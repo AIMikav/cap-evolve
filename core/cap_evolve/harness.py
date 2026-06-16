@@ -366,22 +366,48 @@ def _init_memory_store(run_dir: RunDir, store):
 
 # ---- shared hill-climb loop (parameterized by focus) ----------------------
 
+# Feedback signatures of UNCONTROLLABLE failures — environment/run errors that no
+# capability edit can fix (and which add pure noise to the score). The optimizer is
+# told to ignore these so it doesn't waste edits "fixing" a flaky run.
+_UNCONTROLLABLE = ("infrastructure", "infra error", "timed out", "timeout",
+                   "no rollout", "run error", "traceback", "exception", "rate limit")
+
+
 def _focus_instructions(current_val: SplitResult, focus_ids, label: str) -> str:
-    failing = [pt for pt in current_val.per_task if pt.get("reward", 0) < 1.0]
+    per = current_val.per_task
     if focus_ids is not None:
-        failing = [pt for pt in failing if pt.get("task_id") in set(focus_ids)]
+        per = [pt for pt in per if pt.get("task_id") in set(focus_ids)]
+    passed = [pt for pt in per if (pt.get("reward", 0) or 0) >= 1.0]
+    failing = [pt for pt in per if (pt.get("reward", 0) or 0) < 1.0]
+
+    def _uncontrollable(pt) -> bool:
+        fb = str(pt.get("feedback", "")).lower()
+        return any(k in fb for k in _UNCONTROLLABLE)
+
+    actionable = [pt for pt in failing if not _uncontrollable(pt)]
+    errored = [pt for pt in failing if _uncontrollable(pt)]
+
     lines = [
         "# Optimize the capability",
         "",
-        f"Focus: {label}. Current val reward: {current_val.reward:.3f}. Edit the "
-        "capability files in this working directory to raise it.",
+        f"Focus: {label}. Current val reward: {current_val.reward:.3f} "
+        f"({len(passed)}/{len(per)} tasks already pass). Edit the capability files in "
+        "this working directory to raise the reward on the ACTIONABLE failures below.",
         "",
-        "## Failing tasks (learn from their feedback):",
     ]
-    for pt in failing[:10]:
-        lines.append(f"- {pt.get('task_id')}: {str(pt.get('feedback',''))[:300]}")
-    if not failing:
-        lines.append("- (none failing in focus; seek robustness gains)")
+    if errored:
+        ids = ", ".join(str(pt.get("task_id")) for pt in errored[:25])
+        lines += [
+            f"## Ignore — {len(errored)} task(s) failed with run/infrastructure errors",
+            "These are environment noise (a flaky/aborted run), NOT a capability problem; "
+            "no edit can fix them, so do not change anything on their account: " + ids,
+            "",
+        ]
+    lines.append(f"## {len(actionable)} actionable failing task(s) — find the COMMON rule across them:")
+    for pt in actionable[:10]:
+        lines.append(f"- {pt.get('task_id')}: {str(pt.get('feedback', ''))[:500]}")
+    if not actionable:
+        lines.append("- (no actionable failures in focus; seek robustness/generalization gains)")
     return "\n".join(lines)
 
 

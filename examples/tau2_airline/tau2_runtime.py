@@ -225,33 +225,27 @@ def run_airline_batch(candidate_dir: Path, task_ids: list[str]) -> dict:
     Returns {task_id: {reward, reward_info, trace, termination, output}}."""
     from tau2.data_model.simulation import TextRunConfig
     from tau2.runner import get_tasks, run_tasks
+    import contextlib
+    import signal
+    import sys as _sys
 
     inject_policy(candidate_dir)
     kw = rits_kwargs(AGENT_MODEL)
     model = kw["model"]
     # `timeout`/`num_retries`: a stalled RITS request must abort (and let tau2's
-    # max_errors retry) rather than hang the whole batch forever — concurrency means
-    # one wedged call otherwise blocks the entire evaluation. Override via env.
+    # max_errors retry) rather than hang the whole batch forever.
     llm_args = {"max_tokens": 8000, "api_base": kw["api_base"], "api_key": kw["api_key"],
                 "extra_headers": kw["extra_headers"],
                 "timeout": float(os.environ.get("TAU2_LLM_TIMEOUT", "300")),
                 "num_retries": int(os.environ.get("TAU2_LLM_RETRIES", "2"))}
-    t2 = get_tasks("airline", task_ids=[str(t) for t in task_ids])
     config = TextRunConfig(
         domain="airline", agent="llm_agent", llm_agent=model, llm_args_agent=dict(llm_args),
         user="user_simulator", llm_user=model, llm_args_user=dict(llm_args),
         num_trials=1, max_steps=100, max_errors=10, max_concurrency=MAX_CONCURRENCY, seed=42,
     )
-    # tau2 prints progress to stdout; redirect to stderr so our JSON contract stays clean.
-    import contextlib
-    import signal
-    import sys as _sys
-
-    # Hard wall-clock watchdog on the whole batch. The per-call `timeout` above does
-    # not catch a tau2 concurrent-runner stall (a wedged conversation can hang the
-    # batch indefinitely). SIGALRM fires in the main thread (the harness is
-    # synchronous), aborts run_tasks, and we return {} so those tasks score 0 for this
-    # trial — the loop keeps going instead of hanging forever. Override via env.
+    # Hard wall-clock watchdog: the per-call `timeout` does NOT catch a tau2
+    # concurrent-runner stall (a wedged conversation can hang the batch forever).
+    # SIGALRM fires in the main thread (the harness is synchronous) and aborts the run.
     batch_timeout = int(os.environ.get("TAU2_BATCH_TIMEOUT", "1200"))
 
     class _BatchTimeout(Exception):
@@ -260,38 +254,55 @@ def run_airline_batch(candidate_dir: Path, task_ids: list[str]) -> dict:
     def _on_alarm(signum, frame):
         raise _BatchTimeout()
 
-    old_handler = signal.signal(signal.SIGALRM, _on_alarm)
-    signal.alarm(batch_timeout)
-    try:
-        with contextlib.redirect_stdout(_sys.stderr):
-            results = run_tasks(config, t2, save_path=None, console_display=False)
-    except _BatchTimeout:
-        _sys.stderr.write(f"[tau2_runtime] batch timed out after {batch_timeout}s "
-                          f"({len(task_ids)} tasks) — scoring this trial's tasks as 0\n")
-        return {}
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
-    out = {}
-    for sim in results.simulations:
-        tid = str(sim.task_id)
-        ri = getattr(sim, "reward_info", None)
-        # token usage (summed over all agent+user messages) and cost, for the dashboard.
-        tokens = 0
-        for m in (getattr(sim, "messages", None) or []):
-            u = getattr(m, "usage", None)
-            if isinstance(u, dict):
-                tokens += int(u.get("total_tokens")
-                              or (u.get("prompt_tokens", 0) + u.get("completion_tokens", 0)) or 0)
-        cost = float((getattr(sim, "agent_cost", 0) or 0) + (getattr(sim, "user_cost", 0) or 0))
-        out[tid] = {
-            "reward": float(ri.reward) if ri else 0.0,
-            "reward_info": ri,
-            "trace": transcript(sim),
-            "termination": str(getattr(sim, "termination_reason", None)),
-            "tokens": tokens,
-            "cost": cost,
-            "output": str(getattr(sim, "messages", [])[-1].content
-                          if getattr(sim, "messages", None) else ""),
-        }
+    def _run_ids(ids: list[str]) -> dict:
+        """Run one batch over `ids`; return {tid: result}. {} on watchdog timeout."""
+        t2 = get_tasks("airline", task_ids=[str(t) for t in ids])
+        old = signal.signal(signal.SIGALRM, _on_alarm)
+        signal.alarm(batch_timeout)
+        try:
+            with contextlib.redirect_stdout(_sys.stderr):
+                results = run_tasks(config, t2, save_path=None, console_display=False)
+        except _BatchTimeout:
+            _sys.stderr.write(f"[tau2_runtime] batch timed out after {batch_timeout}s "
+                              f"({len(ids)} tasks)\n")
+            return {}
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+        res = {}
+        for sim in results.simulations:
+            tid = str(sim.task_id)
+            ri = getattr(sim, "reward_info", None)
+            tokens = 0
+            for m in (getattr(sim, "messages", None) or []):
+                u = getattr(m, "usage", None)
+                if isinstance(u, dict):
+                    tokens += int(u.get("total_tokens")
+                                  or (u.get("prompt_tokens", 0) + u.get("completion_tokens", 0)) or 0)
+            cost = float((getattr(sim, "agent_cost", 0) or 0) + (getattr(sim, "user_cost", 0) or 0))
+            res[tid] = {
+                "reward": float(ri.reward) if ri else 0.0,
+                "reward_info": ri,
+                "trace": transcript(sim),
+                "termination": str(getattr(sim, "termination_reason", None)),
+                "tokens": tokens, "cost": cost,
+                "output": str(getattr(sim, "messages", [])[-1].content
+                              if getattr(sim, "messages", None) else ""),
+            }
+        return res
+
+    out = _run_ids([str(t) for t in task_ids])
+    # Retry tasks that died with an INFRASTRUCTURE error (gpt-oss empty turns / RITS
+    # flakiness). These are uncontrollable 0s that no policy/tools edit can fix — they
+    # depress the baseline and inject pure noise into the gate. Re-running usually
+    # recovers them (sampling is stochastic), so the optimizer sees the real signal.
+    for _ in range(int(os.environ.get("TAU2_INFRA_RETRIES", "2"))):
+        infra = [str(t) for t in task_ids
+                 if "INFRASTRUCTURE" in str(out.get(str(t), {}).get("termination", "")) or str(t) not in out]
+        if not infra:
+            break
+        _sys.stderr.write(f"[tau2_runtime] retrying {len(infra)} infra-errored task(s): {infra}\n")
+        for tid, r in _run_ids(infra).items():
+            if "INFRASTRUCTURE" not in str(r.get("termination", "")):  # keep only recovered runs
+                out[tid] = r
     return out
