@@ -1,4 +1,4 @@
-"""tau2 airline runtime helpers for the AgentCapTune example.
+"""tau2 airline runtime helpers for the cap-evolve example.
 
 Routes both the agent and the user simulator to RITS ``openai/gpt-oss-120b``,
 injects the candidate policy into tau2's airline domain, and runs tasks through

@@ -1,15 +1,15 @@
 {
-  "name": "AgentCapTune",
-  "owner": { "name": "AgentCapTune contributors" },
+  "name": "cap-evolve",
+  "owner": { "name": "cap-evolve contributors" },
   "metadata": {
     "description": "Skills-native, host-agnostic harness for optimizing AI-agent capabilities against an eval, with honest train/val/test discipline.",
     "version": "0.1.0"
   },
   "plugins": [
     {
-      "name": "AgentCapTune",
-      "source": "./plugins/AgentCapTune",
-      "description": "The full AgentCapTune skill library: intake, implement-and-check, evaluate, diagnose, gate, baseline, finalize, report; capability/algorithm/optimizer skills; and an autonomous orchestrate skill."
+      "name": "cap-evolve",
+      "source": "./plugins/cap-evolve",
+      "description": "The full cap-evolve skill library: intake, implement-and-check, evaluate, diagnose, gate, baseline, finalize, report; capability/algorithm/optimizer skills; and an autonomous orchestrate skill."
     }
   ]
 }

@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a defect in AgentCapTune
+description: Report a defect in cap-evolve
 labels: [bug]
 body:
   - type: textarea
@@ -17,4 +17,4 @@ body:
   - type: input
     id: version
     attributes:
-      label: AgentCapTune commit / version
+      label: cap-evolve commit / version

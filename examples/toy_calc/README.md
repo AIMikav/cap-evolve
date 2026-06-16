@@ -13,7 +13,7 @@ succeeds when the system prompt contains the marker `[CALC]`, so the optimizatio
 
 ## Run it
 ```bash
-REPO=$PWD                       # AgentCapTune repo root
+REPO=$PWD                       # cap-evolve repo root
 export AGENT_CAPO_CORE=$REPO/core PYTHONPATH=$REPO/core ACAPO_SKILLS_DIR=$REPO/skills
 export ACAPO_TOY_DATA=$REPO/examples/toy_calc
 export ACAPO_MOCK_SCRIPT=$REPO/examples/toy_calc/mock_script.json

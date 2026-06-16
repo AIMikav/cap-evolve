@@ -1,4 +1,4 @@
-# AgentCapTune run report — run_comp
+# cap-evolve run report — run_comp
 
 - Best candidate: `cand_0007`
 - Baseline val: 0.46

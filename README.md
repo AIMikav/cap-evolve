@@ -1,4 +1,4 @@
-# AgentCapTune
+# cap-evolve
 
 <!-- badges: replace OWNER/REPO once published -->
 ![status](https://img.shields.io/badge/status-beta%20(0.x)-orange)
@@ -12,7 +12,7 @@
 against your own eval. Host-agnostic. Honest train/val/test. Every iteration
 versioned in git.**
 
-AgentCapTune is a library of [Agent Skills](https://www.anthropic.com/news/skills)
+cap-evolve is a library of [Agent Skills](https://www.anthropic.com/news/skills)
 (plus a tiny stdlib core) that turns "make this agent better at X" into a
 disciplined loop *any* coding agent can run: collect inputs → wire a 4-method
 adapter → evaluate → diagnose failures → propose edits → keep only what beats a
@@ -30,7 +30,7 @@ honest number you can trust.
 [Skill library](#skill-library) · [Examples](#examples) ·
 [Extending](#extending) · [Contributing](#contributing) · [Citation](#citation)
 
-![AgentCapTune demo](docs/demo.gif)
+![cap-evolve demo](docs/demo.gif)
 
 ## Quickstart (60 seconds)
 
@@ -45,7 +45,7 @@ a deterministic agent whose score depends on its system prompt; the `mock` optim
 edits the prompt, so no API is called):
 
 ```bash
-git clone <repo> AgentCapTune && cd AgentCapTune
+git clone <repo> cap-evolve && cd cap-evolve
 pip install ./core                         # the honest-eval substrate (CLI: acapo)
 ./install.sh                               # place skills into your agent host
 bash examples/toy_calc/run.sh              # scaffold a tmp project dir and run end-to-end
@@ -66,7 +66,7 @@ Or, host-agnostic: point any agent at [`RUN.md`](RUN.md) and say *"follow RUN.md
 ## Optimize your own skill, tool, or agent
 
 The Quickstart runs a *bundled* example. To optimize **your** capability against
-**your** benchmark, you supply three things and AgentCapTune runs the loop:
+**your** benchmark, you supply three things and cap-evolve runs the loop:
 
 1. **The capability to optimize** — a skill (`SKILL.md` package), a tool's code, an
    MCP tool definition, or a system prompt. A *copy* is edited each iteration; your
@@ -79,16 +79,72 @@ You connect these once through a tiny **4-method adapter**
 
 ### Path A — let your coding agent build and run it (no Python from you)
 Open the coding agent you already use (**Claude Code**, Codex, Gemini CLI, opencode,
-…) at the repo root and tell it:
+…) at the repo root and tell it to follow `RUN.md`. It loads the `intake` skill, asks
+you for anything missing, **writes the adapter for you**, runs the `acapo check` gate,
+then the full optimize → significance-gate → sealed-test → report loop, and prints the
+dashboard path. (This is exactly how [`examples/date_tool`](examples/date_tool) was
+built — the optimizer agent wrote the adapter from scratch and improved the tool
+**0.125 → 1.0**, no human edits.)
 
-> **"Follow `RUN.md` to optimize my skill at `<path/to/skill>` against the benchmark
-> at `<path/to/tasks>`. Score a task as `<your pass/fail rule>`."**
+Give it the details `intake` needs up front (anything you omit, it will ask for — and
+will **never fabricate a NEEDED input**). Copy this template and fill it in:
 
-It loads the `intake` skill, asks you for anything missing, **writes the adapter for
-you**, runs the `acapo check` gate, then the full optimize → significance-gate →
-sealed-test → report loop — and prints the dashboard path. This is exactly how
-[`examples/date_tool`](examples/date_tool) was built: the optimizer agent wrote the
-adapter from scratch and improved the tool **0.125 → 1.0**, with no human edits.
+```text
+Follow RUN.md to run a cap-evolve optimization. Here is everything intake needs:
+
+# 1. CAPABILITY TO OPTIMIZE  (what gets edited each iteration)
+- type:            system-prompt | tools | mcp-tool | skill-package   (one or a list)
+- local path:      <path to the skill dir / tool file / prompt / policy to optimize>
+
+# 2. BENCHMARK / DATASET  (the eval)
+- benchmark repo:  <local path or git URL of the benchmark, e.g. ./my-bench>
+- tasks:           <tasks.jsonl path>  OR  "adapter" (the adapter builds them from the benchmark)
+- task format:     each case has an id, an input, and a gold/criterion
+- splits:          ratio 0.5/0.25/0.25 (seeded)  |  explicit ids file  |  all-in-each (no holdout, fit metric)
+
+# 3. RUNNER  (the agent under test) + MODELS + CREDENTIALS
+- how to run one task: <your agent's CLI/SDK/HTTP entrypoint, or the benchmark's own batch runner>
+- runner model(s): <e.g. watsonx/openai/gpt-oss-120b>
+- credentials:     <env vars / .env keys the runner needs, e.g. RITS_API_KEY, WATSONX_*>
+
+# 4. SCORER  (what to optimize against)
+- metric:          <exact-match | task reward in [0,1] | rubric | a pass/fail rule>
+- where it comes from: <the benchmark's verifier, or your scoring function>
+- objective:       maximize mean reward on the VAL split
+
+# 5. OPTIMIZER  (proposes the edits) + MODEL + CREDENTIALS
+- optimizer:       claude-code | codex | gemini-cli | opencode | ibm-bob | generic
+- optimizer model: <e.g. claude-opus-4-6>   (omit to use the optimizer's default)
+- credentials:     <e.g. ANTHROPIC_API_KEY, or BOBSHELL_API_KEY for ibm-bob>
+
+# 6. BUDGET / GATE
+- algorithm:       all-at-once | cyclic | hardest-first | gepa-reflective
+- max_iterations:  <N>     num_trials: <K, use >=3 for a stochastic agent>
+- gate:            significant (k_se, e.g. 1.0) | strict | threshold
+```
+
+**Worked example — tau2-bench airline, from scratch** (this is the bundled
+[`examples/tau2_airline`](examples/tau2_airline); the adapter is provided, so the agent
+just wires the inputs and runs):
+
+```text
+Follow RUN.md to run a cap-evolve optimization:
+# 1. CAPABILITY: [system-prompt, tools]  (optimize the airline policy AND the tool docstrings/code)
+#    local path: examples/tau2_airline/seed_caps   (policy/policy.md + tools/tools.py)
+# 2. BENCHMARK: tau2-bench airline; repo local at ../tau2-bench; tasks via "adapter" (50 airline tasks)
+#    splits: all 50 tasks in train/val/test (no holdout, fit metric) -> run_full/split_ids_all50.json
+# 3. RUNNER: agent AND user simulator = watsonx/openai/gpt-oss-120b via IBM RITS;
+#    credential RITS_API_KEY in the repo-root .env; tau concurrency 7 (TAU2_MAX_CONCURRENCY=7)
+# 4. SCORER: tau2's own task reward in [0,1] (required actions performed + info communicated);
+#    objective = maximize mean reward on val
+# 5. OPTIMIZER: ibm-bob  (or claude-code @ claude-opus-4-6); credential BOBSHELL_API_KEY (or ANTHROPIC_API_KEY)
+# 6. BUDGET: algorithm all-at-once; max_iterations 20; num_trials 5; gate significant (k_se 0.5)
+```
+
+The exact, copy-pasteable commands for that run are in
+[`examples/tau2_airline/run_full/README.md`](examples/tau2_airline/run_full/README.md),
+and the full Bob-optimizer walkthrough (phases, what Bob wrote, metrics) is in
+[`examples/tau2_airline/run_full/BOB_EXPERIMENT.md`](examples/tau2_airline/run_full/BOB_EXPERIMENT.md).
 
 ### Path B — drive it yourself with the `acapo` CLI
 ```bash
@@ -129,7 +185,7 @@ Your benchmark plugs in **only** through the adapter — nothing else changes:
 
 If your benchmark ships its **own batch runner**, implement `run_batch` instead of
 per-task `run_target` (see [`examples/tau2_airline/adapter.py`](examples/tau2_airline/adapter.py))
-so AgentCapTune drives the benchmark's runner directly. Splits, trials, the gate,
+so cap-evolve drives the benchmark's runner directly. Splits, trials, the gate,
 pass^k, the sealed test, and the dashboard are all handled for you.
 
 ## Results
@@ -169,7 +225,7 @@ Codex `.agents/skills`, opencode native, Gemini extensions, …).
 
 ## Install
 ```bash
-pip install ./core            # package: AgentCapTune-core, CLI: acapo
+pip install ./core            # package: cap-evolve-core, CLI: acapo
 ./install.sh                  # copy skills into your host's skills dir (optionally --host <name>)
 ```
 
@@ -211,7 +267,7 @@ pass^k / pass@k.
 
 ## How it compares
 
-| | AgentCapTune | DSPy | GEPA | promptfoo |
+| | cap-evolve | DSPy | GEPA | promptfoo |
 |---|:--:|:--:|:--:|:--:|
 | Optimizes prompts | ✅ | ✅ | ✅ | ❌ (eval only) |
 | Optimizes tools/MCP + skills | ✅ | ➖ | ➖ | ❌ |
@@ -250,11 +306,11 @@ Report security issues via [SECURITY.md](SECURITY.md). Changes: [CHANGELOG.md](C
 
 ## Citation
 ```bibtex
-@software{AgentCapTune,
-  title  = {AgentCapTune: a skills-native, host-agnostic harness for honestly
+@software{cap-evolve,
+  title  = {cap-evolve: a skills-native, host-agnostic harness for honestly
             optimizing AI-agent capabilities},
   year   = {2026},
-  note   = {https://github.com/OWNER/AgentCapTune}
+  note   = {https://github.com/OWNER/cap-evolve}
 }
 ```
 Builds on GEPA, DSPy, SkillOpt, SkillGrad, Trace2Skill, evo/evo-graph/governor,

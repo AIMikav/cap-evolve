@@ -19,7 +19,7 @@ gate_k_se: 1.0
 max_iterations: 20
 store: git                             # one commit per iteration
 ```
-- **All 50 tasks as train/val/test** (no holdout). agent-capo logs a `splits_warning`:
+- **All 50 tasks as train/val/test** (no holdout). cap-evolve logs a `splits_warning`:
   *"test overlaps train/val … report it as a fit metric."* This is the requested fit
   setup, made explicit rather than silent.
 - **Agent + user simulator: gpt-oss-120b** via RITS (`tau2_runtime.py`), tau2
@@ -70,7 +70,7 @@ unlike a low-leverage skills-bench task, the optimizer has real signal to climb 
 
 ## How it was launched
 ```bash
-REPO=/path/to/agent-capo
+REPO=/path/to/cap-evolve
 export AGENT_CAPO_CORE=$REPO/core PYTHONPATH=$REPO/core:$R/.agentcapo/project/adapters
 export ACAPO_SKILLS_DIR=$REPO/skills ACAPO_TAU2_DATA=$REPO/examples/tau2_airline/data
 export TAU2_MAX_CONCURRENCY=7 RITS_API_KEY=... BOBSHELL_API_KEY=...

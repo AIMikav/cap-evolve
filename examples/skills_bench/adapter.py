@@ -1,7 +1,7 @@
 """skills-bench adapter — optimize an Agent Skill against benchflow-ai/skillsbench.
 
 The capability under optimization is a **skill package** (a `skill-package`
-capability): a directory `<skill-name>/SKILL.md`. AgentCapTune edits the skill; the
+capability): a directory `<skill-name>/SKILL.md`. cap-evolve edits the skill; the
 RUNNER is the skills-bench harness running a chosen agent+model on each task WITH
 the candidate skill injected (`--skills-dir <cand> --skill-mode with-skill`); the
 SCORE is the task verifier's reward in [0,1].

@@ -1,4 +1,4 @@
-# Extending AgentCapTune
+# Extending cap-evolve
 
 Everything user-facing is a skill, so extending the harness never means editing
 core. Adding a capability, algorithm, or optimizer is the same three steps.

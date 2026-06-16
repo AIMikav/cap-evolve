@@ -1,10 +1,10 @@
 # date_tool — a from-scratch integration where **Bob** does everything
 
-This example demonstrates the **full agent-capo pipeline starting from nothing**, with
+This example demonstrates the **full cap-evolve pipeline starting from nothing**, with
 **IBM Bob** as the autonomous agent for *both* jobs:
 
 1. **Integration (the intake phase):** Bob writes the 4-method adapter that wires the
-   benchmark to agent-capo — from the scaffolded stub — until `acapo check` is green.
+   benchmark to cap-evolve — from the scaffolded stub — until `acapo check` is green.
 2. **Optimization:** Bob (as the optimizer) edits the capability under test until the
    reward improves, gated honestly on a held-out split.
 
@@ -61,7 +61,7 @@ pass → val 1.0, accepted, test 1.0.
 
 ## Run it yourself
 ```bash
-REPO=/path/to/agent-capo
+REPO=/path/to/cap-evolve
 R=/tmp/date_tool_run; rm -rf $R; mkdir -p $R; cd $R
 
 # 1) SCRIPT — intake scaffolds the project from the template
