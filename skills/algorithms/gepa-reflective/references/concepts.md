@@ -5,6 +5,16 @@
 > complementary candidates. This file explains GEPA's two core ideas, the loop,
 > where it sits relative to DSPy/MIPRO and AlphaEvolve/OpenEvolve, and the sources.
 
+## Contents
+- What GEPA is
+- Idea 1 — reflect on traces, not scalars
+- Idea 2 — keep a per-task Pareto frontier
+- The loop in this skill
+- System-aware merge
+- Relation to DSPy / MIPRO
+- Practical guidance
+- Sources
+
 ## What GEPA is
 
 **GEPA = "Genetic-Pareto."** From the paper (Agrawal et al., 2025, ICLR 2026 Oral):

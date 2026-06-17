@@ -32,7 +32,8 @@ Load **`baseline`**: score the unmodified capability on VAL to confirm there is
 headroom. Records the starting point in the run dir.
 
 ## 4. Optimize
-Load the algorithm skill named in `capevolve.yaml` (e.g. **`all-at-once`**). It runs
+Load the algorithm skill named in `capevolve.yaml` (e.g. **`hill-climb`** with
+`algorithm_focus: all`). It runs
 the loop: select parent → propose edit (via your chosen **optimizer** skill) →
 evaluate on VAL → **gate** (accept only if Δ exceeds the significance bar) →
 snapshot or record-as-rejected → repeat until budget is spent. Diagnosis of

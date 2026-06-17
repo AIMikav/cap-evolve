@@ -10,7 +10,8 @@ capabilities: [system-prompt, tools]   # policy.md (system prompt) + tools.py
 capability_path: seed_caps             # seed_caps/{policy/policy.md, tools/tools.py}
 optimizer_skill: ibm-bob               # Bob proposes every edit
 optimizer_model: ""                    # Bob's default model
-algorithm_skill: all-at-once
+algorithm_skill: hill-climb           # the global hill-climb loop
+algorithm_focus: all                  # reflect on the whole train set each iteration
 dataset_source: adapter
 split_ids_file: split_ids.json         # all 50 tasks in train == val == test
 num_trials: 5                          # 5 tau2 rollouts/task/eval (averages gpt-oss noise)

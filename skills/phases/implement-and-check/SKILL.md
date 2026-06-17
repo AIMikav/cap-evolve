@@ -67,6 +67,9 @@ the only honest entry into `baseline`.
   different rewards for the same rollout; an empty/placeholder `tasks()`; feedback
   that leaks the gold answer (passes the wiring check but corrupts diagnosis).
 
+## Dual-mode
+This phase runs two ways from the **same** SKILL.md: standalone as the slash command `/cap-evolve:implement-and-check` (the `argument-hint` shows its run.py args), and orchestrator-callable — `cap-evolve run` / the `orchestrate` skill invokes the same `scripts/run.py` headlessly and threads the run dir between phases.
+
 ## References
 - `references/concepts.md` — the adapter contract, why each check exists, the
   scorer-determinism-vs-target-stochasticity distinction, and the

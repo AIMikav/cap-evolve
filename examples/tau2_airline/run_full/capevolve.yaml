@@ -2,7 +2,8 @@ capabilities: [system-prompt, tools]
 capability_path: seed_caps
 optimizer_skill: claude-code
 optimizer_model: claude-opus-4-6
-algorithm_skill: all-at-once
+algorithm_skill: hill-climb
+algorithm_focus: all
 dataset_source: adapter
 split_ids_file: split_ids.json
 num_trials: 4

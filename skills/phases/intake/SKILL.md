@@ -59,6 +59,9 @@ worthless result. Splitting inputs into NEEDED (blocking → ask) vs RECOMMENDED
 explicit, recorded default — never a silent fabrication. Treat `INPUTS.md` as the
 spec; this SKILL.md is just the procedure for honoring it.
 
+## Dual-mode
+This phase runs two ways from the **same** SKILL.md: standalone as the slash command `/cap-evolve:intake` (the `argument-hint` shows its run.py args), and orchestrator-callable — `cap-evolve run` / the `orchestrate` skill invokes the same `scripts/run.py` headlessly and threads the run dir between phases.
+
 ## How to run
 ```
 python scripts/run.py --base .capevolve        # scaffold .capevolve/project

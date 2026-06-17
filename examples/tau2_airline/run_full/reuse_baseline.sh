@@ -43,8 +43,8 @@ PY
 
 # Run algorithm -> finalize -> report directly against the seeded run dir.
 RD="$R/.capevolve/run_comp"
-OPT="python3 $REPO/skills/optimizers/claude-code/scripts/run.py --workdir {workdir} --prompt {prompt} --model claude-opus-4-6"
-python3 "$REPO/skills/algorithms/all-at-once/scripts/run.py" --run-dir "$RD" --project "$R/.capevolve/project" \
+OPT="python3 $REPO/skills/optimizers/run-optimizer/scripts/run.py --name claude-code --workdir {workdir} --prompt {prompt} --model claude-opus-4-6"
+python3 "$REPO/skills/algorithms/hill-climb/scripts/run.py" --focus all --run-dir "$RD" --project "$R/.capevolve/project" \
     --optimizer "$OPT" --max-iterations 10 --n-trials 4 --gate-mode significant --k-se 1.0 --store git \
     > "$R/algo.out" 2> "$R/algo.err"
 python3 "$REPO/skills/phases/finalize/scripts/run.py" --run-dir "$RD" --project "$R/.capevolve/project" --n-trials 4 \

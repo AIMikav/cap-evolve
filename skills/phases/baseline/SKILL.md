@@ -44,6 +44,9 @@ wrong and nothing later can fix it.
 - Tasks must be plentiful enough to split three ways and still leave val/test big
   enough that their standard errors are not dominated by sample size.
 
+## Dual-mode
+This phase runs two ways from the **same** SKILL.md: standalone as the slash command `/cap-evolve:baseline` (the `argument-hint` shows its run.py args), and orchestrator-callable — `cap-evolve run` / the `orchestrate` skill invokes the same `scripts/run.py` headlessly and threads the run dir between phases.
+
 ## How to run
 ```
 python scripts/run.py --base .capevolve --project .capevolve/project \

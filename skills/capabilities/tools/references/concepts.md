@@ -5,6 +5,15 @@
 > the editable surface is governed by an action policy. Grounded in provider tool
 > docs, function-calling benchmarks, and prompt-optimization research.
 
+## Contents
+- 1. The model never sees your code — it sees the definitions
+- 2. Two decisions, two levers: SELECT, then FILL
+- 3. More tools is not better
+- 4. Composite tools collapse fragile chains
+- 5. The action policy is the safety boundary
+- 6. Automatic optimization of tool text
+- Sources
+
 ## 1. The model never sees your code — it sees the definitions
 
 At call time the model is given, for every available tool, a serialized block:

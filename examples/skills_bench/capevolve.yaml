@@ -4,7 +4,8 @@ capabilities: [skill-package]
 capability_path: seed_skill        # skills-root holding <skill-name>/SKILL.md
 optimizer_skill: ibm-bob           # IBM Bob proposes the edits
 optimizer_model: ""                # let Bob use its default model
-algorithm_skill: all-at-once
+algorithm_skill: hill-climb
+algorithm_focus: all
 dataset_source: adapter            # tasks() lists skills-bench tasks
 
 num_trials: 4                      # average gpt-oss-120b's high variance over 4 rollouts

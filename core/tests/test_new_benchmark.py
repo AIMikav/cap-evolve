@@ -15,7 +15,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 CORE = REPO / "core"
 EXAMPLE = REPO / "examples" / "json_extract"
-MOCK_RUN = REPO / "skills" / "optimizers" / "mock" / "scripts" / "run.py"
+MOCK_RUN = REPO / "skills" / "optimizers" / "run-optimizer" / "scripts" / "run.py"
 
 sys.path.insert(0, str(CORE))
 sys.path.insert(0, str(EXAMPLE))
@@ -53,7 +53,7 @@ def test_new_benchmark_from_scratch(tmp_path):
     assert base.reward == 0.0, "seed prompt lacks [STRICT_JSON]; baseline must fail JSON scoring"
 
     optimizer = harness.optimizer_from_command(
-        ["python3", str(MOCK_RUN), "--workdir", "{workdir}", "--prompt", "{prompt}"])
+        ["python3", str(MOCK_RUN), "--name", "mock", "--workdir", "{workdir}", "--prompt", "{prompt}"])
     summary = harness.hill_climb_loop(
         adapter, run_dir=run_dir, optimizer=optimizer, current_val=base,
         focus="all", max_iterations=3, gate_kwargs={"mode": "significant", "k_se": 1.0},

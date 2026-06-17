@@ -253,8 +253,9 @@ def optimizer_from_command(cmd_template: list[str]) -> OptimizerFn:
     """Build an OptimizerFn that shells out to a skill's run.py.
 
     ``cmd_template`` is a list with ``{workdir}`` and ``{prompt}`` placeholders,
-    e.g. ``["python", ".../optimizers/mock/scripts/run.py", "--workdir",
-    "{workdir}", "--prompt", "{prompt}"]``. The subprocess edits files in workdir.
+    e.g. ``["python", ".../optimizers/run-optimizer/scripts/run.py", "--name",
+    "mock", "--workdir", "{workdir}", "--prompt", "{prompt}"]``. The subprocess
+    edits files in workdir.
     """
     def _run(workdir: Path, instructions: str) -> None:
         prompt_path = workdir / "INSTRUCTIONS.md"
@@ -512,7 +513,8 @@ def hill_climb_loop(
     no_regression: bool = False,
     store=None,
 ) -> dict:
-    """The loop shared by all-at-once / cyclic / hardest-first.
+    """The loop behind the ``hill-climb`` skill's three ``--focus`` schedules
+    (all / cyclic / hardest-first).
 
     They differ only in the *focus schedule* — which tasks each iteration's
     reflection emphasizes — and (for hardest-first) the order. Parent is always

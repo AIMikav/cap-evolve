@@ -1,0 +1,84 @@
+# Optimizer registry — one row per shell-invokable edit proposer.
+#
+# `run-optimizer` reads this file, resolves the named optimizer, and shells its
+# `command_template` with cwd = the candidate workdir so the agent edits files in
+# place. Adding an optimizer is one row here — no new skill directory.
+#
+# Row schema (all values are scalars so the stdlib YAML reader parses them):
+#   command_template : argv string with {workdir} and {prompt} placeholders.
+#                      {prompt} is the path to INSTRUCTIONS.md; {prompt_text} is
+#                      its CONTENTS (use when the CLI takes the prompt inline).
+#                      {model} expands to the resolved model, or is dropped (with
+#                      its preceding token) when no model is set.
+#   env_keys         : comma-separated env vars the CLI reads for auth (doc only;
+#                      the runner reports which are present).
+#   install_url      : where to get the CLI (printed when it is not on PATH).
+#   auth_notes       : one-line auth hint.
+#   json_flag        : extra flag(s) to request machine-readable output, or "".
+#   offline          : "true" only for `mock` (never shells a network CLI).
+#
+# Per-CLI install/auth/flag prose lives in references/<name>.md.
+
+mock:
+  command_template: "python {self_dir}/_mock_apply.py --workdir {workdir} --prompt {prompt}"
+  env_keys: ""
+  install_url: ""
+  auth_notes: "No auth — deterministic, zero-API. Driven by mock_script.json."
+  json_flag: ""
+  offline: "true"
+
+generic:
+  command_template: "${CAPEVOLVE_OPTIMIZER_CMD}"
+  env_keys: "CAPEVOLVE_OPTIMIZER_CMD"
+  install_url: ""
+  auth_notes: "Whatever your agent CLI needs; this is the escape hatch."
+  json_flag: ""
+  offline: "false"
+
+claude-code:
+  command_template: "claude -p {prompt_text} --permission-mode acceptEdits --model {model}"
+  env_keys: "ANTHROPIC_API_KEY"
+  install_url: "https://docs.claude.com/claude-code"
+  auth_notes: "Logged-in Claude Code session or ANTHROPIC_API_KEY."
+  json_flag: "--output-format json"
+  offline: "false"
+
+codex:
+  command_template: "codex exec --sandbox workspace-write -m {model} {prompt_text}"
+  env_keys: "OPENAI_API_KEY"
+  install_url: "https://developers.openai.com/codex"
+  auth_notes: "codex login, or OPENAI_API_KEY."
+  json_flag: "--json"
+  offline: "false"
+
+gemini-cli:
+  command_template: "gemini -p {prompt_text} --approval-mode=yolo -m {model}"
+  env_keys: "GEMINI_API_KEY"
+  install_url: "https://github.com/google-gemini/gemini-cli"
+  auth_notes: "gemini auth, or GEMINI_API_KEY."
+  json_flag: "--output-format json"
+  offline: "false"
+
+opencode:
+  command_template: "opencode run --dangerously-skip-permissions -m {model} {prompt_text}"
+  env_keys: ""
+  install_url: "https://opencode.ai/docs/cli"
+  auth_notes: "Per opencode's provider config."
+  json_flag: ""
+  offline: "false"
+
+openclaw:
+  command_template: "${CAPEVOLVE_OPENCLAW_CMD}"
+  env_keys: "CAPEVOLVE_OPENCLAW_CMD"
+  install_url: ""
+  auth_notes: "OpenClaw's headless flags are not standardized — set the command via env."
+  json_flag: ""
+  offline: "false"
+
+ibm-bob:
+  command_template: "bob --accept-license --yolo --chat-mode code --hide-intermediary-output -m {model} {prompt_text}"
+  env_keys: "BOBSHELL_API_KEY,BOB_API_KEY"
+  install_url: "https://bob.ibm.com/download/bobshell.sh"
+  auth_notes: "Reads BOBSHELL_API_KEY (runner also maps BOB_API_KEY and the nearest .env)."
+  json_flag: ""
+  offline: "false"

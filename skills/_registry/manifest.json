@@ -1,57 +1,5 @@
 {
   "skills": {
-    "all-at-once": {
-      "component": "algorithm",
-      "path": "algorithms/all-at-once",
-      "summary": "Global hill-climb; propose against the whole train set each iteration, parent = best.",
-      "entry": "scripts/run.py",
-      "abstract": "scripts/abstract.py",
-      "check": "scripts/check.py",
-      "prompt": null,
-      "inputs": null,
-      "needs": [
-        "scores",
-        "traces",
-        "candidate"
-      ],
-      "provides": [
-        "candidate"
-      ],
-      "compatible_with": {
-        "capabilities": [
-          "*"
-        ],
-        "optimizers": [
-          "*"
-        ]
-      }
-    },
-    "cyclic": {
-      "component": "algorithm",
-      "path": "algorithms/cyclic",
-      "summary": "Focus one train task at a time, cycling through them (skipping solved ones).",
-      "entry": "scripts/run.py",
-      "abstract": "scripts/abstract.py",
-      "check": "scripts/check.py",
-      "prompt": null,
-      "inputs": null,
-      "needs": [
-        "scores",
-        "traces",
-        "candidate"
-      ],
-      "provides": [
-        "candidate"
-      ],
-      "compatible_with": {
-        "capabilities": [
-          "*"
-        ],
-        "optimizers": [
-          "*"
-        ]
-      }
-    },
     "gepa-reflective": {
       "component": "algorithm",
       "path": "algorithms/gepa-reflective",
@@ -79,10 +27,10 @@
         ]
       }
     },
-    "hardest-first": {
+    "hill-climb": {
       "component": "algorithm",
-      "path": "algorithms/hardest-first",
-      "summary": "Rank train tasks by baseline score ascending and attack the hardest first, then cycle.",
+      "path": "algorithms/hill-climb",
+      "summary": "Global hill-climb on the val gate with a selectable focus schedule (--focus all|cyclic|hardest-first); parent is always the current best.",
       "entry": "scripts/run.py",
       "abstract": "scripts/abstract.py",
       "check": "scripts/check.py",
@@ -193,164 +141,10 @@
         ]
       }
     },
-    "claude-code": {
+    "run-optimizer": {
       "component": "optimizer",
-      "path": "optimizers/claude-code",
-      "summary": "Use the Claude Code CLI headless (claude -p --permission-mode acceptEdits) as the edit proposer.",
-      "entry": "scripts/run.py",
-      "abstract": "scripts/abstract.py",
-      "check": "scripts/check.py",
-      "prompt": null,
-      "inputs": null,
-      "needs": [],
-      "provides": [
-        "candidate"
-      ],
-      "compatible_with": {
-        "capabilities": [
-          "*"
-        ],
-        "algorithms": [
-          "*"
-        ]
-      }
-    },
-    "codex": {
-      "component": "optimizer",
-      "path": "optimizers/codex",
-      "summary": "OpenAI Codex CLI headless (codex exec --sandbox workspace-write) as edit proposer.",
-      "entry": "scripts/run.py",
-      "abstract": "scripts/abstract.py",
-      "check": "scripts/check.py",
-      "prompt": null,
-      "inputs": null,
-      "needs": [],
-      "provides": [
-        "candidate"
-      ],
-      "compatible_with": {
-        "capabilities": [
-          "*"
-        ],
-        "algorithms": [
-          "*"
-        ]
-      }
-    },
-    "gemini-cli": {
-      "component": "optimizer",
-      "path": "optimizers/gemini-cli",
-      "summary": "Google Gemini CLI headless (gemini -p --approval-mode=yolo) as edit proposer.",
-      "entry": "scripts/run.py",
-      "abstract": "scripts/abstract.py",
-      "check": "scripts/check.py",
-      "prompt": null,
-      "inputs": null,
-      "needs": [],
-      "provides": [
-        "candidate"
-      ],
-      "compatible_with": {
-        "capabilities": [
-          "*"
-        ],
-        "algorithms": [
-          "*"
-        ]
-      }
-    },
-    "generic": {
-      "component": "optimizer",
-      "path": "optimizers/generic",
-      "summary": "Drive any shell-invokable agent as the edit proposer via CAPEVOLVE_OPTIMIZER_CMD.",
-      "entry": "scripts/run.py",
-      "abstract": "scripts/abstract.py",
-      "check": "scripts/check.py",
-      "prompt": null,
-      "inputs": null,
-      "needs": [],
-      "provides": [
-        "candidate"
-      ],
-      "compatible_with": {
-        "capabilities": [
-          "*"
-        ],
-        "algorithms": [
-          "*"
-        ]
-      }
-    },
-    "ibm-bob": {
-      "component": "optimizer",
-      "path": "optimizers/ibm-bob",
-      "summary": "IBM Bob as edit proposer via AGENTS.md (configurable via CAPEVOLVE_BOB_CMD; no standard headless CLI).",
-      "entry": "scripts/run.py",
-      "abstract": "scripts/abstract.py",
-      "check": "scripts/check.py",
-      "prompt": null,
-      "inputs": null,
-      "needs": [],
-      "provides": [
-        "candidate"
-      ],
-      "compatible_with": {
-        "capabilities": [
-          "*"
-        ],
-        "algorithms": [
-          "*"
-        ]
-      }
-    },
-    "mock": {
-      "component": "optimizer",
-      "path": "optimizers/mock",
-      "summary": "Deterministic, zero-API edit proposer driven by a JSON edit script; for tests/CI.",
-      "entry": "scripts/run.py",
-      "abstract": "scripts/abstract.py",
-      "check": "scripts/check.py",
-      "prompt": null,
-      "inputs": null,
-      "needs": [],
-      "provides": [
-        "candidate"
-      ],
-      "compatible_with": {
-        "capabilities": [
-          "*"
-        ],
-        "algorithms": [
-          "*"
-        ]
-      }
-    },
-    "openclaw": {
-      "component": "optimizer",
-      "path": "optimizers/openclaw",
-      "summary": "OpenClaw as edit proposer (configurable via CAPEVOLVE_OPENCLAW_CMD).",
-      "entry": "scripts/run.py",
-      "abstract": "scripts/abstract.py",
-      "check": "scripts/check.py",
-      "prompt": null,
-      "inputs": null,
-      "needs": [],
-      "provides": [
-        "candidate"
-      ],
-      "compatible_with": {
-        "capabilities": [
-          "*"
-        ],
-        "algorithms": [
-          "*"
-        ]
-      }
-    },
-    "opencode": {
-      "component": "optimizer",
-      "path": "optimizers/opencode",
-      "summary": "opencode headless (opencode run --dangerously-skip-permissions) as edit proposer.",
+      "path": "optimizers/run-optimizer",
+      "summary": "One runner for every shell-invokable edit proposer; resolves a named optimizer from optimizers/registry.yaml and shells it in the candidate workdir.",
       "entry": "scripts/run.py",
       "abstract": "scripts/abstract.py",
       "check": "scripts/check.py",
@@ -412,7 +206,9 @@
       "provides": [
         "splits",
         "baseline",
-        "candidate"
+        "candidate",
+        "scores",
+        "traces"
       ],
       "compatible_with": {
         "capabilities": [

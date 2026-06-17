@@ -39,6 +39,9 @@ between:
 Always report the **test stderr / CI**, not just the point: "0.71" and
 "0.71 ± 0.08" support very different decisions.
 
+## Dual-mode
+This phase runs two ways from the **same** SKILL.md: standalone as the slash command `/cap-evolve:report` (the `argument-hint` shows its run.py args), and orchestrator-callable — `cap-evolve run` / the `orchestrate` skill invokes the same `scripts/run.py` headlessly and threads the run dir between phases.
+
 ## How to run
 ```
 python scripts/run.py --run-dir .capevolve/run_XXXX

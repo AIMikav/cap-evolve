@@ -61,6 +61,30 @@ def _cmd_check(argv):
     return 0 if rep.ok else 1
 
 
+# Old hill-climb skill names → (skill, focus). The three byte-identical clones are
+# now one ``hill-climb`` skill parameterized by ``--focus``.
+_ALGO_FOCUS_ALIASES = {
+    "all-at-once": ("hill-climb", "all"),
+    "cyclic": ("hill-climb", "cyclic"),
+    "hardest-first": ("hill-climb", "hardest-first"),
+}
+
+
+def _resolve_algorithm(name: str) -> tuple[str, str | None]:
+    """Map a spec ``algorithm_skill`` to (skill_name, focus).
+
+    ``hill-climb`` may be given directly (focus defaults to ``all``); the legacy
+    names ``all-at-once``/``cyclic``/``hardest-first`` translate to it with the
+    right focus. Any other algorithm (e.g. ``gepa-reflective``) passes through
+    with no focus.
+    """
+    if name in _ALGO_FOCUS_ALIASES:
+        return _ALGO_FOCUS_ALIASES[name]
+    if name == "hill-climb":
+        return "hill-climb", "all"
+    return name, None
+
+
 def _resolve_skills(skills_dir: Path) -> dict:
     manifest = skills_dir / "_registry" / "manifest.json"
     if not manifest.exists():
@@ -105,21 +129,50 @@ def _cmd_run(argv):
     base = str(proj_abs.parent.relative_to(workdir))  # ".capevolve"
     cap_path = spec.get("capability_path", "seed_capability")
     ratios = f"{spec.get('split_train',0.5)},{spec.get('split_val',0.25)},{spec.get('split_test',0.25)}"
-    opt_cmd = (f"{sys.executable} {skill_run(spec['optimizer_skill'])} "
+
+    # Optimizer semantics (v2): ``optimizer_skill`` is now the optimizer NAME,
+    # resolved by the single ``run-optimizer`` skill against optimizers/registry.yaml
+    # (no per-CLI skill dir). Back-compat: an old name like ``claude-code`` is just
+    # the registry row of the same name, so old specs keep working.
+    optimizer_name = spec["optimizer_skill"]
+    opt_cmd = (f"{sys.executable} {skill_run('run-optimizer')} --name {optimizer_name} "
                f"--workdir {{workdir}} --prompt {{prompt}}")
     if spec.get("optimizer_model"):
         opt_cmd += f" --model {spec['optimizer_model']}"
+
+    # Algorithm semantics (v2): the three hill-climb variants are one ``hill-climb``
+    # skill selected by ``--focus``. Back-compat: translate the old skill names. An
+    # explicit ``algorithm_focus`` in the spec overrides the name-derived default.
+    algorithm_name, algorithm_focus = _resolve_algorithm(spec["algorithm_skill"])
+    if spec.get("algorithm_focus") and algorithm_name == "hill-climb":
+        algorithm_focus = str(spec["algorithm_focus"])
     py = sys.executable
 
     def run(cmd):
         return subprocess.run(cmd, capture_output=True, text=True, cwd=str(workdir))
 
+    # The run sequence is built from the manifest + spec (orchestrate validates the
+    # needs/provides DAG); it now includes intake + the check gate before baseline.
+    sequence = ["intake", "implement-and-check", "baseline", algorithm_name, "finalize", "report"]
+
     if args.plan_only:
         print(json.dumps({"skills_dir": str(skills_dir), "workdir": str(workdir), "spec": spec,
-                          "optimizer_cmd": opt_cmd,
-                          "sequence": ["baseline", spec["algorithm_skill"], "finalize", "report"]},
-                         indent=2))
+                          "optimizer": optimizer_name, "optimizer_cmd": opt_cmd,
+                          "algorithm": algorithm_name, "focus": algorithm_focus,
+                          "gate_mode": spec.get("gate_mode", "significant"),
+                          "budget": {"max_iterations": spec.get("max_iterations", 10),
+                                     "stall": spec.get("stall", 0)},
+                          "sequence": sequence}, indent=2))
         return 0
+
+    # Hard gate: cap-evolve check must pass before any budget is spent (intake is the
+    # user's job before `run`; here we enforce the check half of implement-and-check).
+    from .check import run_check as _run_check
+    chk = _run_check(proj_abs)
+    if not chk.ok:
+        print(json.dumps({"step": "implement-and-check", "error": "check failed",
+                          "report": chk.to_dict()}))
+        return 1
 
     # 1) baseline (creates the run dir; capture its relative path)
     base_cmd = [py, skill_run("baseline"), "--base", base, "--project", project,
@@ -136,13 +189,15 @@ def _cmd_run(argv):
         return 1
     run_dir = json.loads(proc.stdout)["run_dir"]
 
-    # 2) algorithm
-    alg_cmd = [py, skill_run(spec["algorithm_skill"]), "--run-dir", run_dir, "--project", project,
+    # 2) algorithm (hill-climb variants select their schedule via --focus)
+    alg_cmd = [py, skill_run(algorithm_name), "--run-dir", run_dir, "--project", project,
                "--optimizer", opt_cmd, "--max-iterations", str(spec.get("max_iterations", 10)),
                "--n-trials", str(spec.get("num_trials", 1)),
                "--gate-mode", str(spec.get("gate_mode", "significant")),
                "--k-se", str(spec.get("gate_k_se", 1.0)),
                "--store", str(spec.get("store", "git"))]
+    if algorithm_focus is not None:
+        alg_cmd += ["--focus", algorithm_focus]
     if spec.get("store_commit_cmd"):
         alg_cmd += ["--store-commit-cmd", str(spec["store_commit_cmd"])]
     proc = run(alg_cmd)

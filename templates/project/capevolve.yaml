@@ -10,11 +10,12 @@ capability_path: seed_capability         # the artifact dir (a copy is optimized
 actions: [edit]                          # allowed edits (capability-specific)
 
 # --- who proposes edits -----------------------------------------------------
-optimizer_skill: mock                    # optimizers/<skill>
+optimizer_skill: mock                    # optimizer NAME (resolved by run-optimizer via optimizers/registry.yaml)
 optimizer_model: ""                      # backend-specific (e.g. a claude model id)
 
 # --- how to iterate ---------------------------------------------------------
-algorithm_skill: all-at-once             # algorithms/<skill>
+algorithm_skill: hill-climb              # algorithms/<skill>
+algorithm_focus: all                     # hill-climb schedule: all | cyclic | hardest-first
 
 # --- data + splits ----------------------------------------------------------
 dataset_source: tasks.jsonl              # file/dir, or "adapter" to use tasks()

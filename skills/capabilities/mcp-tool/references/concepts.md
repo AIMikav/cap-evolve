@@ -5,6 +5,14 @@
 > permitted, and why external tool metadata is untrusted. Grounded in the
 > official MCP specification and security guidance.
 
+## Contents
+- 1. What MCP is
+- 2. The Tool object — what the model sees
+- 3. The ownership boundary (why the policy is restricted)
+- 4. External tool metadata is untrusted
+- 5. Practical optimization playbook
+- Sources
+
 ## 1. What MCP is
 
 The Model Context Protocol is an open standard for connecting AI applications to

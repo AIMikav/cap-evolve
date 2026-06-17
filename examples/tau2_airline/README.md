@@ -43,16 +43,16 @@ export CAPEVOLVE_MOCK_SCRIPT="$PWD/mock_script.json"
 
 python3 -m cap_evolve check .capevolve/project                 # HARD GATE
 python3 $REPO/skills/phases/baseline/scripts/run.py   --base .capevolve --project .capevolve/project --capability seed_policy --n-trials 2 --max-iterations 1 --run-ts demo
-OPT="python3 $REPO/skills/optimizers/mock/scripts/run.py --workdir {workdir} --prompt {prompt}"
-python3 $REPO/skills/algorithms/all-at-once/scripts/run.py --run-dir .capevolve/run_demo --project .capevolve/project --optimizer "$OPT" --max-iterations 1 --n-trials 2
+OPT="python3 $REPO/skills/optimizers/run-optimizer/scripts/run.py --name mock --workdir {workdir} --prompt {prompt}"
+python3 $REPO/skills/algorithms/hill-climb/scripts/run.py --focus all --run-dir .capevolve/run_demo --project .capevolve/project --optimizer "$OPT" --max-iterations 1 --n-trials 2
 python3 $REPO/skills/phases/finalize/scripts/run.py   --run-dir .capevolve/run_demo --project .capevolve/project --n-trials 2
 python3 $REPO/skills/phases/report/scripts/run.py     --run-dir .capevolve/run_demo
 ```
 
-To use a **real optimizer** instead of the mock, swap the `--optimizer` command for
-the `claude-code` optimizer skill (requires the `claude` CLI):
+To use a **real optimizer** instead of the mock, swap the `--name` for a real
+agent (requires that CLI on PATH, e.g. `claude`):
 ```
-OPT="python3 $REPO/skills/optimizers/claude-code/scripts/run.py --workdir {workdir} --prompt {prompt}"
+OPT="python3 $REPO/skills/optimizers/run-optimizer/scripts/run.py --name claude-code --workdir {workdir} --prompt {prompt}"
 ```
 Claude will read the gold-aware diagnosis in `INSTRUCTIONS.md` and edit `policy.md`.
 

@@ -37,7 +37,7 @@ c208d39 seed: baseline candidate
 | 4. hard gate | **SCRIPT** `cap-evolve check` | `{"ok": true, "stubs": [], "problems": []}` |
 | 5. baseline eval on val | **SCRIPT** `baseline` phase | `baseline.json` (val 0.125) |
 | 6. propose edit from val feedback | **BOB** (optimizer) | `sample_output/optimized/parse_date.py` |
-| 7. re-eval, significance gate, accept/reject | **SCRIPT** `all-at-once` + core gate | `events.jsonl`, git commit |
+| 7. re-eval, significance gate, accept/reject | **SCRIPT** `hill-climb --focus all` + core gate | `events.jsonl`, git commit |
 | 8. sealed test once + report + dashboard | **SCRIPT** `finalize` + `report` | `report.md`, `dashboard.html` |
 
 The honesty core (splits, sealed test, `Δ > k·SE` gate, pass^k) is **all script**, in
@@ -47,7 +47,7 @@ The honesty core (splits, sealed test, `Δ > k·SE` gate, pass^k) is **all scrip
 ## What Bob actually saw and wrote
 
 The adapter's `score()` turns each failure into optimizer feedback. Bob's optimization
-prompt (`INSTRUCTIONS.md`, built by the `all-at-once` phase) contained:
+prompt (`INSTRUCTIONS.md`, built by the `hill-climb` algorithm) contained:
 ```
 Current val reward: 0.125. Edit the capability files ... to raise it.
 ## Failing tasks (learn from their feedback):
@@ -75,7 +75,7 @@ cp -R $REPO/examples/date_tool/seed_cap .
 #    (hand Bob INSTRUCTIONS.md; it writes adapters/adapter.py — see adapter.bob.py here)
 export CAPEVOLVE_CORE=$REPO/core PYTHONPATH=$REPO/core:$R/.capevolve/project/adapters
 export CAPEVOLVE_DT_TASKS=$R/tasks.jsonl BOBSHELL_API_KEY=...   # bob --logout && bob --accept-license once
-python3 $REPO/skills/optimizers/ibm-bob/scripts/run.py --workdir $R --prompt $R/INSTRUCTIONS.md
+python3 $REPO/skills/optimizers/run-optimizer/scripts/run.py --name ibm-bob --workdir $R --prompt $R/INSTRUCTIONS.md
 
 # 4) SCRIPT — the hard gate
 python3 -m cap_evolve.cli check .capevolve/project        # -> ok: true
