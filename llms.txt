@@ -5,15 +5,17 @@
 > train/val/test discipline enforced in code. The pipeline is a library of Agent
 > Skills; the only shipped code is a tiny stdlib substrate.
 
-If you are an agent driving cap-evolve: follow `RUN.md`. Implement the 4-method
-adapter (`docs/ADAPTER_CONTRACT.md`), pass `cap-evolve check`, then run the phases
+If you are an agent driving cap-evolve: follow `RUN.md`. Implement the adapter —
+`tasks · run_target(task, ctx, *, seed) · score` plus a pure `materialize` and a
+`live` context manager (`apply` is a back-compat hook); see
+`docs/ADAPTER_CONTRACT.md`. Pass `cap-evolve check`, then run the phases
 intake → implement-and-check → baseline → <algorithm> → finalize → report. Never
 score the test split except at finalize; gate acceptance on val.
 
 ## Start here
 - [RUN.md](RUN.md): the top-level orchestration prompt (point any agent at this).
 - [README.md](README.md): what it is, quickstart, comparison, skill library.
-- [docs/ADAPTER_CONTRACT.md](docs/ADAPTER_CONTRACT.md): the 4 methods you implement.
+- [docs/ADAPTER_CONTRACT.md](docs/ADAPTER_CONTRACT.md): the adapter methods you implement.
 - [docs/HONEST_EVAL.md](docs/HONEST_EVAL.md): the non-negotiable eval guarantees.
 
 ## Extend
@@ -21,12 +23,14 @@ score the test split except at finalize; gate acceptance on val.
 - [CONTRIBUTING.md](CONTRIBUTING.md): dev setup and house rules.
 - [docs/ROADMAP.md](docs/ROADMAP.md): prioritized next work.
 
-## Skills (each is skills/<component>/<name>/SKILL.md)
+## Skills (19; each is skills/<component>/<name>/SKILL.md)
 - phases: intake, implement-and-check, baseline, evaluate, diagnose, gate, finalize, report
 - capabilities: system-prompt, skill-package, tools, mcp-tool
-- algorithms: all-at-once, cyclic, hardest-first, gepa-reflective
-- optimizers: claude-code, codex, gemini-cli, opencode, openclaw, ibm-bob, generic, mock
-- orchestrate: orchestrate
+- algorithms: hill-climb (--focus all|cyclic|hardest-first), gepa, skillopt, gepa-reflective
+  (gepa & skillopt are the flagships; gepa-reflective is a thin precursor)
+- optimizers: run-optimizer + optimizers/registry.yaml (claude-code, codex, gemini-cli,
+  opencode, openclaw, ibm-bob, generic, mock — one runner resolves the name)
+- orchestrate: orchestrate, using-cap-evolve (session-start router)
 
 ## Examples
 - [examples/toy_calc](examples/toy_calc): zero-API deterministic proof.
