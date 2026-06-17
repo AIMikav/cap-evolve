@@ -1,0 +1,61 @@
+{"t": 1781682086.638272, "kind": "splits", "train": 30, "val": 10, "test": 10, "seed": 0}
+{"t": 1781683031.4316108, "kind": "evaluate", "split": "val", "tag": "seed", "reward": 0.55, "stderr": 0.16329931618554522, "cost_usd": 0.0, "tokens": 1301607, "seconds": 944.79}
+{"t": 1781683031.433127, "kind": "baseline", "val": 0.55, "stderr": 0.16329931618554522}
+{"t": 1781683032.196953, "kind": "gepa_start", "seed": 0, "minibatch_size": 4, "max_metric_calls": 300, "max_iterations": 12, "component_selector": "round_robin", "selection_strategy": "pareto_per_instance"}
+{"t": 1781683032.197818, "kind": "gepa_select", "parent": "seed", "strategy": "pareto_per_instance", "sel_seed": 1654615998, "pool": 1}
+{"t": 1781683268.5051541, "kind": "minibatch", "tag": "mb_p_0000", "ids": ["24", "28", "13", "1"], "reward": 0.75, "fired": 4, "cached": 0}
+{"t": 1781684008.666249, "kind": "minibatch", "tag": "mb_c_0000", "ids": ["24", "28", "13", "1"], "reward": 0.5, "fired": 4, "cached": 0}
+{"t": 1781684008.666338, "kind": "gepa_local_gate", "candidate": "gepa_0001", "parent": "seed", "child_sum": 2.0, "parent_sum": 3.0, "passed": false}
+{"t": 1781684008.7918642, "kind": "gepa_select", "parent": "seed", "strategy": "pareto_per_instance", "sel_seed": 1112038970, "pool": 1}
+{"t": 1781684419.3130329, "kind": "minibatch", "tag": "mb_p_0001", "ids": ["16", "15", "12", "29"], "reward": 0.75, "fired": 4, "cached": 0}
+{"t": 1781684780.630903, "kind": "minibatch", "tag": "mb_c_0001", "ids": ["16", "15", "12", "29"], "reward": 0.0, "fired": 4, "cached": 0}
+{"t": 1781684780.6313112, "kind": "gepa_local_gate", "candidate": "gepa_0002", "parent": "seed", "child_sum": 0.0, "parent_sum": 3.0, "passed": false}
+{"t": 1781684780.773182, "kind": "gepa_select", "parent": "seed", "strategy": "pareto_per_instance", "sel_seed": 1302718217, "pool": 1}
+{"t": 1781684915.314673, "kind": "minibatch", "tag": "mb_p_0002", "ids": ["15", "11", "18", "28"], "reward": 0.75, "fired": 2, "cached": 2}
+{"t": 1781684979.501605, "kind": "optimizer_error", "candidate": "gepa_0003", "error": "optimizer failed (1): "}
+{"t": 1781684979.50991, "kind": "minibatch", "tag": "mb_c_0002", "ids": ["15", "11", "18", "28"], "reward": 0.75, "fired": 0, "cached": 4}
+{"t": 1781684979.510196, "kind": "gepa_local_gate", "candidate": "gepa_0003", "parent": "seed", "child_sum": 3.0, "parent_sum": 3.0, "passed": false}
+{"t": 1781684979.667433, "kind": "gepa_select", "parent": "seed", "strategy": "pareto_per_instance", "sel_seed": 938204377, "pool": 1}
+{"t": 1781685132.697671, "kind": "minibatch", "tag": "mb_p_0003", "ids": ["16", "4", "9", "24"], "reward": 0.75, "fired": 2, "cached": 2}
+{"t": 1781685734.448946, "kind": "minibatch", "tag": "mb_c_0003", "ids": ["16", "4", "9", "24"], "reward": 0.5, "fired": 4, "cached": 0}
+{"t": 1781685734.449253, "kind": "gepa_local_gate", "candidate": "gepa_0004", "parent": "seed", "child_sum": 2.0, "parent_sum": 3.0, "passed": false}
+{"t": 1781685734.596454, "kind": "gepa_select", "parent": "seed", "strategy": "pareto_per_instance", "sel_seed": 407295012, "pool": 1}
+{"t": 1781685901.4346292, "kind": "minibatch", "tag": "mb_p_0004", "ids": ["19", "25", "8", "29"], "reward": 0.25, "fired": 3, "cached": 1}
+{"t": 1781686288.637631, "kind": "minibatch", "tag": "mb_c_0004", "ids": ["19", "25", "8", "29"], "reward": 0.5, "fired": 4, "cached": 0}
+{"t": 1781686288.637811, "kind": "gepa_local_gate", "candidate": "gepa_0005", "parent": "seed", "child_sum": 2.0, "parent_sum": 1.0, "passed": true}
+{"t": 1781686767.42555, "kind": "evaluate", "split": "val", "tag": "gepa_0005", "reward": 0.55, "stderr": 0.16329931618554522, "cost_usd": 0.0, "tokens": 1986992, "seconds": 478.79}
+{"t": 1781686767.425662, "kind": "gepa_val_gate", "candidate": "gepa_0005", "accept": false, "reason": "paired \u0394\u0304=+0.0000 <= 0.5\u00b7SE=0.0745 (SE=0.1491, n=10)", "val": 0.55, "parent": "seed", "parent_val": 0.55}
+{"t": 1781686767.587353, "kind": "gepa_select", "parent": "seed", "strategy": "pareto_per_instance", "sel_seed": 631194409, "pool": 1}
+{"t": 1781687009.7076201, "kind": "minibatch", "tag": "mb_p_0005", "ids": ["9", "3", "23", "2"], "reward": 0.75, "fired": 3, "cached": 1}
+{"t": 1781687080.1458719, "kind": "optimizer_error", "candidate": "gepa_0006", "error": "optimizer failed (1): "}
+{"t": 1781687080.1508071, "kind": "minibatch", "tag": "mb_c_0005", "ids": ["9", "3", "23", "2"], "reward": 0.75, "fired": 0, "cached": 4}
+{"t": 1781687080.151037, "kind": "gepa_local_gate", "candidate": "gepa_0006", "parent": "seed", "child_sum": 3.0, "parent_sum": 3.0, "passed": false}
+{"t": 1781687080.2545228, "kind": "gepa_select", "parent": "seed", "strategy": "pareto_per_instance", "sel_seed": 1418186270, "pool": 1}
+{"t": 1781687150.959782, "kind": "minibatch", "tag": "mb_p_0006", "ids": ["15", "17", "3", "11"], "reward": 0.75, "fired": 1, "cached": 3}
+{"t": 1781687526.0827022, "kind": "minibatch", "tag": "mb_c_0006", "ids": ["15", "17", "3", "11"], "reward": 0.25, "fired": 4, "cached": 0}
+{"t": 1781687526.0828989, "kind": "gepa_local_gate", "candidate": "gepa_0007", "parent": "seed", "child_sum": 1.0, "parent_sum": 3.0, "passed": false}
+{"t": 1781687526.186701, "kind": "gepa_select", "parent": "seed", "strategy": "pareto_per_instance", "sel_seed": 1864753826, "pool": 1}
+{"t": 1781687671.934922, "kind": "minibatch", "tag": "mb_p_0007", "ids": ["10", "19", "20", "29"], "reward": 0.5, "fired": 2, "cached": 2}
+{"t": 1781688145.889075, "kind": "minibatch", "tag": "mb_c_0007", "ids": ["10", "19", "20", "29"], "reward": 0.5, "fired": 4, "cached": 0}
+{"t": 1781688145.8892019, "kind": "gepa_local_gate", "candidate": "gepa_0008", "parent": "seed", "child_sum": 2.0, "parent_sum": 2.0, "passed": false}
+{"t": 1781688146.021267, "kind": "gepa_select", "parent": "seed", "strategy": "pareto_per_instance", "sel_seed": 878225224, "pool": 1}
+{"t": 1781688226.631231, "kind": "minibatch", "tag": "mb_p_0008", "ids": ["17", "15", "14", "27"], "reward": 0.5, "fired": 2, "cached": 2}
+{"t": 1781688346.2966201, "kind": "optimizer_error", "candidate": "gepa_0009", "error": "optimizer failed (1): "}
+{"t": 1781688346.3008971, "kind": "minibatch", "tag": "mb_c_0008", "ids": ["17", "15", "14", "27"], "reward": 0.5, "fired": 0, "cached": 4}
+{"t": 1781688346.301041, "kind": "gepa_local_gate", "candidate": "gepa_0009", "parent": "seed", "child_sum": 2.0, "parent_sum": 2.0, "passed": false}
+{"t": 1781688346.4007528, "kind": "gepa_select", "parent": "seed", "strategy": "pareto_per_instance", "sel_seed": 1118805955, "pool": 1}
+{"t": 1781688346.403531, "kind": "minibatch", "tag": "mb_p_0009", "ids": ["1", "25", "29", "17"], "reward": 0.25, "fired": 0, "cached": 4}
+{"t": 1781688350.971402, "kind": "optimizer_error", "candidate": "gepa_0010", "error": "optimizer failed (1): "}
+{"t": 1781688350.9757178, "kind": "minibatch", "tag": "mb_c_0009", "ids": ["1", "25", "29", "17"], "reward": 0.25, "fired": 0, "cached": 4}
+{"t": 1781688350.975932, "kind": "gepa_local_gate", "candidate": "gepa_0010", "parent": "seed", "child_sum": 1.0, "parent_sum": 1.0, "passed": false}
+{"t": 1781688351.053925, "kind": "gepa_select", "parent": "seed", "strategy": "pareto_per_instance", "sel_seed": 60308648, "pool": 1}
+{"t": 1781688395.26193, "kind": "minibatch", "tag": "mb_p_0010", "ids": ["2", "23", "26", "12"], "reward": 0.75, "fired": 1, "cached": 3}
+{"t": 1781688950.3834162, "kind": "minibatch", "tag": "mb_c_0010", "ids": ["2", "23", "26", "12"], "reward": 0.75, "fired": 4, "cached": 0}
+{"t": 1781688950.383521, "kind": "gepa_local_gate", "candidate": "gepa_0011", "parent": "seed", "child_sum": 3.0, "parent_sum": 3.0, "passed": false}
+{"t": 1781688950.497567, "kind": "gepa_select", "parent": "seed", "strategy": "pareto_per_instance", "sel_seed": 4908357, "pool": 1}
+{"t": 1781688950.5007339, "kind": "minibatch", "tag": "mb_p_0011", "ids": ["19", "15", "26", "27"], "reward": 1.0, "fired": 0, "cached": 4}
+{"t": 1781689248.0027509, "kind": "optimizer_error", "candidate": "gepa_0012", "error": "optimizer failed (1): "}
+{"t": 1781689336.418474, "kind": "minibatch", "tag": "mb_c_0011", "ids": ["19", "15", "26", "27"], "reward": 1.0, "fired": 4, "cached": 0}
+{"t": 1781689336.418599, "kind": "gepa_local_gate", "candidate": "gepa_0012", "parent": "seed", "child_sum": 4.0, "parent_sum": 4.0, "passed": false}
+{"t": 1781689769.374613, "kind": "evaluate", "split": "test", "tag": "FINAL", "reward": 0.7, "stderr": 0.15275252316519466, "cost_usd": 0.0, "tokens": 870324, "seconds": 432.34}
+{"t": 1781689769.37651, "kind": "finalize", "test_reward": 0.7, "best_id": "seed"}
