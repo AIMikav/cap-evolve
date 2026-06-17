@@ -89,8 +89,7 @@ Per CLI (verify with `<cli> --help`):
 empty (`mock`, `generic`, `opencode`, `openclaw`, `ibm-bob`), nothing changes —
 the optimizer runs prose-fed exactly as before, and `mock` stays fully offline. If
 the output isn't parseable JSON, `cost.total_cost_usd` is `null` and the loop
-continues without a cost figure (never an error). See `core-wiring.md` below for
-threading that cost into the iteration store.
+continues without a cost figure (never an error).
 
 ## Back-compat
 
@@ -100,5 +99,3 @@ without edits.
 
 ## References
 - `references/<name>.md` — install, auth, and flags for each CLI.
-- `references/core-wiring.md` — the (small) cli.py change needed to thread the
-  parsed `total_cost_usd` from the optimizer JSON into the iteration store.

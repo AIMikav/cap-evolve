@@ -1,4 +1,4 @@
-"""Observability reducer + renderers for a CapEvolve run (Wave 4).
+"""Observability reducer + renderers for a CapEvolve run. 
 
 This module is the deterministic, stdlib-only builder the ``report`` skill calls.
 It does three things:

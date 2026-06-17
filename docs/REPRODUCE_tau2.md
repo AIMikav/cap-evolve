@@ -1,6 +1,6 @@
 # Reproducing a tau2-airline run (intake answers + exact commands)
 
-A worked walkthrough of running the **v2 pipeline** on tau2-bench airline,
+A worked walkthrough of running the **pipeline** on tau2-bench airline,
 fully autonomously: `cap-evolve check → baseline → <algorithm> → finalize →
 report → dashboard`, with the agent *and* user simulator both
 `watsonx/openai/gpt-oss-120b` via IBM RITS. Two real runs (configs + dashboards)

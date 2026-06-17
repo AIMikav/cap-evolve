@@ -73,7 +73,7 @@ AB_TASK_IDS="0,1,26,39,41,43,45,47,48,49" python3 examples/tau2_airline/ab_compa
 A prior composite run (policy + tools together) with the **claude-code** optimizer,
 agent+user `gpt-oss-120b` (watsonx/RITS), **all 50 tasks** (no-holdout fit),
 **num_trials 4**, tau **concurrency 7**, git iteration store + optimizer memory.
-For the current, committed, reproducible v2 runs (with dashboards) see
+For the current, committed, reproducible runs (with dashboards) see
 [run_full/](run_full/); the general recipe is in
 [../../docs/REPRODUCE_tau2.md](../../docs/REPRODUCE_tau2.md).
 

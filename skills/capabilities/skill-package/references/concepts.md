@@ -1,6 +1,6 @@
 # Concepts — optimizing a skill package
 
-> Distilled from Anthropic's **skill-creator** skill and the Agent Skills standard.
+> Follows the Agent Skills standard and widely-published skill-authoring guidance.
 > When the optimizer edits a skill package, these are the rules that make the edit
 > a *better skill*, not just different text.
 

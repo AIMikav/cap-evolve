@@ -30,8 +30,6 @@ honest number you can trust.
 [Skill library](#skill-library) · [Examples](#examples) ·
 [Extending](#extending) · [Contributing](#contributing) · [Citation](#citation)
 
-![cap-evolve demo](docs/demo.gif)
-
 ## Quickstart (60 seconds)
 
 **Prerequisites:** Python 3.10+ and git — that's all for this example (it's
@@ -348,11 +346,14 @@ Report security issues via [SECURITY.md](SECURITY.md). Changes: [CHANGELOG.md](C
   title  = {cap-evolve: a skills-native, host-agnostic harness for honestly
             optimizing AI-agent capabilities},
   year   = {2026},
-  note   = {https://github.com/OWNER/cap-evolve}
+  note   = {https://github.com/skillberry-ai/cap-evolve}
 }
 ```
-Builds on GEPA, DSPy, SkillOpt, SkillGrad, Trace2Skill, evo/evo-graph/governor,
-tau-bench/tau2-bench, and the Agent Skills standard — see [docs/sources.bib](docs/sources.bib).
+**Acknowledgements.** The `gepa` and `skillopt` algorithm skills are independent
+implementations of the methods described in the GEPA (arXiv:2507.19457) and SkillOpt
+(arXiv:2605.23904) papers — no third-party code is included; both reference projects
+are MIT-licensed. cap-evolve also draws on ideas from DSPy, tau-bench/tau2-bench, and
+the Agent Skills standard. Full citations: [docs/sources.bib](docs/sources.bib).
 
 ## License
 MIT.

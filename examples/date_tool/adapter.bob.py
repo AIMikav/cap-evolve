@@ -46,7 +46,7 @@ class Adapter(CapabilityAdapter):
     def run_target(self, task: Task, ctx, *, seed: int = 0) -> Rollout:
         """Import parse_date from the candidate dir (ctx) and run it on task.input.
 
-        ``ctx`` is the live candidate dir (v2 ``live()`` contract); the parser is
+        ``ctx`` is the live candidate dir (the ``live()`` contract); the parser is
         deterministic, so ``seed`` is accepted but unused."""
         candidate_dir = Path(ctx)
         try:

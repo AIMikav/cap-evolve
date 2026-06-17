@@ -2,8 +2,8 @@
 
 Routes both the agent and the user simulator to RITS ``openai/gpt-oss-120b``,
 injects the candidate policy into tau2's airline domain, and runs tasks through
-tau2's concurrent batch runner. Adapted from prior agent-optimization work's tau2 wiring (rits_connect +
-inject + runner) and trimmed to the policy-optimization case.
+tau2's concurrent batch runner: it routes RITS, injects the candidate policy/tools
+into tau2's airline domain, and runs tasks through tau2's runner.
 """
 
 from __future__ import annotations

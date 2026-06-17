@@ -1,6 +1,6 @@
-# tau2-airline — v2 pipeline end-to-end run (autonomous)
+# tau2-airline — hill-climb end-to-end run (autonomous)
 
-Evidence that the **v2 pipeline runs end-to-end with zero intervention**:
+Evidence that the **pipeline runs end-to-end with zero intervention**:
 `cap-evolve check → baseline → hill-climb (ibm-bob) → finalize → report → dashboard`,
 agent **and** user simulator = `watsonx/openai/gpt-oss-120b` via IBM RITS.
 

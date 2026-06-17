@@ -11,7 +11,7 @@ we use 4, cleaner). The using-agent implements these once in
     materialize(candidate_dir, edits=None)    -> None         # write edits into the dir (pure)
     live(candidate_dir)                       -> ctx (CM)     # make the candidate LIVE for a rollout
 
-Why ``materialize`` + ``live`` (W1 redesign) instead of a single ``apply``:
+Why ``materialize`` + ``live`` instead of a single ``apply``:
 ``apply(candidate_dir)`` used to be a *global* side effect (e.g. monkeypatching a
 benchmark's policy), which (a) prevented two candidates being evaluated
 concurrently — there is only one global slot — and (b) made the safety ``check``

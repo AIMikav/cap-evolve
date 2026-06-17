@@ -1,13 +1,13 @@
 # tau2-airline — full end-to-end runs (evidence)
 
-Two real, fully-autonomous runs of the v2 pipeline on tau2-bench airline, with the
+Two real, fully-autonomous runs of the pipeline on tau2-bench airline, with the
 agent **and** user simulator both `watsonx/openai/gpt-oss-120b` via IBM RITS. Both
 were driven entirely by `cap-evolve run` (no intervention): `check → baseline →
 <algorithm> → finalize → report → dashboard`.
 
 | run | algorithm | optimizer | split | result |
 |-----|-----------|-----------|-------|--------|
-| [`v2_run/`](v2_run/)   | `hill-climb --focus all` | ibm-bob          | 12/6/6 holdout | baseline val 0.583 → candidates honestly rejected (within 1·SE) → best=seed; sealed test **0.417** |
+| [`hillclimb_run/`](hillclimb_run/)   | `hill-climb --focus all` | ibm-bob          | 12/6/6 holdout | baseline val 0.583 → candidates honestly rejected (within 1·SE) → best=seed; sealed test **0.417** |
 | [`gepa_run/`](gepa_run/) | `gepa`                 | claude-code(opus) | 30/10/10 holdout | baseline val 0.55; 1/12 passed the minibatch gate, no significant full-val gain → best=seed; sealed test **0.70** |
 
 Each dir holds the self-contained `dashboard.html` (KPI strip, cumulative-best stair,

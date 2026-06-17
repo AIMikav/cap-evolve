@@ -130,7 +130,7 @@ def _cmd_run(argv):
     cap_path = spec.get("capability_path", "seed_capability")
     ratios = f"{spec.get('split_train',0.5)},{spec.get('split_val',0.25)},{spec.get('split_test',0.25)}"
 
-    # Optimizer semantics (v2): ``optimizer_skill`` is now the optimizer NAME,
+    # Optimizer semantics: ``optimizer_skill`` is the optimizer NAME,
     # resolved by the single ``run-optimizer`` skill against optimizers/registry.yaml
     # (no per-CLI skill dir). Back-compat: an old name like ``claude-code`` is just
     # the registry row of the same name, so old specs keep working.
@@ -140,7 +140,7 @@ def _cmd_run(argv):
     if spec.get("optimizer_model"):
         opt_cmd += f" --model {spec['optimizer_model']}"
 
-    # Algorithm semantics (v2): the three hill-climb variants are one ``hill-climb``
+    # Algorithm semantics: the three hill-climb variants are one ``hill-climb``
     # skill selected by ``--focus``. Back-compat: translate the old skill names. An
     # explicit ``algorithm_focus`` in the spec overrides the name-derived default.
     algorithm_name, algorithm_focus = _resolve_algorithm(spec["algorithm_skill"])

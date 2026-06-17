@@ -1,4 +1,4 @@
-"""Thin shim: the dashboard builder lives in ``cap_evolve.dashboard`` (Wave 4).
+"""Thin shim: the dashboard builder lives in ``cap_evolve.dashboard``. 
 
 The report skill imports this module so the reducer/renderers stay engine-owned
 and unit-tested under ``core/tests`` while the skill keeps a stable import name.
