@@ -11,7 +11,7 @@ All notable changes to cap-evolve are documented here. The format follows
 - **19 Agent Skills**: phases (intake, implement-and-check, baseline, evaluate,
   diagnose, gate, finalize, report), capabilities (system-prompt, tools, mcp-tool,
   skill-package), algorithms (**hill-climb** with `--focus all|cyclic|hardest-first`,
-  **gepa**, **skillopt**, gepa-reflective), one **run-optimizer** skill backed by
+  **gepa**, **skillopt**), one **run-optimizer** skill backed by
   `optimizers/registry.yaml` (claude-code, codex, gemini-cli, opencode, openclaw,
   ibm-bob, generic, mock), and orchestrate + a `using-cap-evolve` session-start router.
 - **`gepa`** (flagship): real GEPA — two-stage minibatch-then-full-val economy,

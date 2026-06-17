@@ -75,7 +75,7 @@ def _resolve_algorithm(name: str) -> tuple[str, str | None]:
 
     ``hill-climb`` may be given directly (focus defaults to ``all``); the legacy
     names ``all-at-once``/``cyclic``/``hardest-first`` translate to it with the
-    right focus. Any other algorithm (e.g. ``gepa-reflective``) passes through
+    right focus. Any other algorithm (e.g. ``gepa`` / ``skillopt``) passes through
     with no focus.
     """
     if name in _ALGO_FOCUS_ALIASES:

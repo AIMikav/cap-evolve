@@ -1,6 +1,6 @@
 """GEPA — the sample-efficient reflective Pareto optimizer (arXiv:2507.19457).
 
-This is the *real* GEPA loop, distinct from the thin ``harness.pareto_loop``: it
+This is the *real* GEPA loop, distinct from a plain hill-climb: it
 adds the economy that makes GEPA sample-efficient — a cheap **minibatch** stage in
 front of the expensive full-val gate — plus a **reflective dataset** built from
 traces, a **per-instance Pareto frontier** with frequency-weighted parent
@@ -429,7 +429,7 @@ def gepa_loop(
         a merge (every Nth accept).
 
     Returns a result dict in the same shape as ``hill_climb_loop`` /
-    ``pareto_loop`` (plus GEPA-specific fields). The run's ``best_id`` is set to the
+    ``hill_climb_loop`` (plus GEPA-specific fields). The run's ``best_id`` is set to the
     highest-val pool member; the test split is never touched.
     """
     gate_kwargs = dict(gate_kwargs or {})

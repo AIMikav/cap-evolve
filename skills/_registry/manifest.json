@@ -27,33 +27,6 @@
         ]
       }
     },
-    "gepa-reflective": {
-      "component": "algorithm",
-      "path": "algorithms/gepa-reflective",
-      "summary": "GEPA-style reflective Pareto evolution \u2014 per-task frontier parent selection + reflective dataset proposals.",
-      "entry": "scripts/run.py",
-      "abstract": "scripts/abstract.py",
-      "check": "scripts/check.py",
-      "prompt": null,
-      "inputs": null,
-      "needs": [
-        "scores",
-        "traces",
-        "reflective_dataset",
-        "candidate"
-      ],
-      "provides": [
-        "candidate"
-      ],
-      "compatible_with": {
-        "capabilities": [
-          "*"
-        ],
-        "optimizers": [
-          "*"
-        ]
-      }
-    },
     "hill-climb": {
       "component": "algorithm",
       "path": "algorithms/hill-climb",

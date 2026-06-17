@@ -43,8 +43,9 @@ path, how to obtain it, and the alternatives. Never invent a NEEDED input.
 - **budget**: `max_iterations` (default 10), `stall` (stop after N rejects),
   `max_metric_calls`, `max_usd`.
 
-- **optimizer + model**: `optimizer_skill` (claude-code/codex/gemini-cli/opencode/
-  generic/mock) and `optimizer_model` (e.g. a Claude/GPT model id).
+- **optimizer + model**: `optimizer_skill` is the optimizer NAME, resolved by the
+  `run-optimizer` skill against `optimizers/registry.yaml` (run `run-optimizer --list`
+  to see the available names); `optimizer_model` is the backend-specific model id.
 
 - **gate**: `gate_mode` (significant|strict|threshold|simplicity_tiebreak),
   `gate_k_se` (default 1.0). Add `--no-regression` to forbid breaking passing tasks.

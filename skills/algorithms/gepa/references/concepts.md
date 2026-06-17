@@ -30,8 +30,8 @@ expensive evaluations only when a cheap signal says it is worth it.
 ## The two-stage economy
 
 The economy is the part that makes the "sample-efficient" claim real, and is what
-distinguishes this skill from the thin `gepa-reflective` (which evaluates every
-proposal on full val).
+makes it sample-efficient: most proposals are filtered cheaply on a minibatch
+before any full-val evaluation is paid for.
 
 1. **Minibatch local gate (cheap).** Each iteration samples a small minibatch of
    train ids, evaluates the parent and the proposed child on *that same minibatch*
@@ -115,12 +115,6 @@ possible future refinement.)
 
 ## Relation to the family
 
-- **`gepa-reflective`** is the thin precursor: per-task Pareto selection + a
-  reflective dataset over failing *val* tasks, but **no minibatch economy and no
-  merge** — every proposal is evaluated on full val. This `gepa` skill supersedes it
-  for real runs; `gepa-reflective` remains as the minimal illustration of the two
-  core ideas and as a `harness.pareto_loop` smoke. Prefer `gepa` when rollouts are
-  expensive.
 - **`hill-climb`** always extends the single global best with a focus *schedule*; no
   frontier, no minibatch gate. Best for the first baseline run and for
   feedback-poor binary tasks where reflection has little to work with.

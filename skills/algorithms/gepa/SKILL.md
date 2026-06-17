@@ -101,5 +101,5 @@ test stays sealed for `finalize`.
 
 - `references/concepts.md` — the GEPA economy, reflective dataset / actionable side
   information, per-instance frequency-weighted frontier, system-aware merge, the
-  metric-call budget, and the relation to the `gepa-reflective` thin skill and the
-  hill-climb / skillopt siblings. Cites arXiv:2507.19457.
+  metric-call budget, and the relation to the hill-climb / skillopt siblings.
+  Cites arXiv:2507.19457.

@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import gate as gate_mod
-from .loop import SplitResult, aggregate_scores, select_parent
+from .loop import SplitResult, aggregate_scores
 from .rundir import RunDir, _atomic_write
 from .splits import Splits, make_splits
 from .types import Rollout, Score, Task
@@ -523,8 +523,8 @@ def hill_climb_loop(
 
     They differ only in the *focus schedule* — which tasks each iteration's
     reflection emphasizes — and (for hardest-first) the order. Parent is always
-    the current best (global hill-climb). gepa-reflective overrides parent
-    selection separately.
+    the current best (global hill-climb). The ``gepa`` algorithm uses its own
+    per-instance frontier and parent selection (see ``cap_evolve.gepa``).
     """
     gate_kwargs = dict(gate_kwargs or {})
     rejected, history, store = _init_memory_store(run_dir, store)
@@ -572,90 +572,6 @@ def hill_climb_loop(
         "stop_reason": why or "max_iterations",
         "steps": steps,
     }
-
-
-# ---- GEPA-style reflective Pareto loop ------------------------------------
-
-def pareto_loop(
-    adapter,
-    *,
-    run_dir: RunDir,
-    optimizer: OptimizerFn,
-    seed_val: SplitResult,
-    max_iterations: int = 10,
-    n_trials: int = 1,
-    gate_kwargs: dict | None = None,
-    no_regression: bool = False,
-    store=None,
-) -> dict:
-    """GEPA-style reflective evolution with a per-task Pareto frontier.
-
-    Differs from the hill-climb: instead of always extending the single global
-    best, it selects a parent from the Pareto frontier over per-task val scores
-    (keeping specialists that the aggregate mean would hide — gepa's insight), and
-    the proposal prompt is a reflective dataset over the parent's failing tasks
-    (gepa's Actionable Side Information). Acceptance still uses the val
-    significance gate; test stays sealed.
-    """
-    gate_kwargs = dict(gate_kwargs or {})
-    rejected, history, store = _init_memory_store(run_dir, store)
-    # frontier entries: {id, dir, val(SplitResult), per_task}
-    frontier = [{"id": "seed", "dir": str(run_dir.candidate_dir("seed")),
-                 "val": seed_val.reward, "per_task": seed_val.per_task,
-                 "result": seed_val}]
-    steps = []
-
-    for _ in range(max_iterations):
-        exhausted, why = run_dir.budget_exhausted()
-        if exhausted:
-            break
-        parent = select_parent(frontier, strategy="pareto")
-        parent_result = parent["result"]
-        instructions = _reflective_instructions(parent_result)
-        step = run_step(
-            adapter, run_dir=run_dir, parent_dir=Path(parent["dir"]),
-            optimizer=optimizer, instructions=instructions, current_val=parent_result,
-            n_trials=n_trials, gate_kwargs=gate_kwargs, no_regression=no_regression,
-            rejected=rejected, history=history, store=store,
-        )
-        steps.append(step)
-        if step["accepted"]:
-            res = SplitResult.from_dict(step["candidate_val"])
-            cid = step["candidate_id"]
-            frontier.append({"id": cid, "dir": str(run_dir.candidate_dir(cid)),
-                             "val": res.reward, "per_task": res.per_task, "result": res})
-
-    best = max(frontier, key=lambda c: c["val"])
-    run_dir.set_best(best["id"])
-    _, why = run_dir.budget_exhausted()
-    return {
-        "algorithm": "gepa-reflective",
-        "best_id": best["id"],
-        "best_val": best["val"],
-        "frontier_size": len(frontier),
-        "iterations": len(steps),
-        "accepts": sum(1 for s in steps if s["accepted"]),
-        "stop_reason": why or "max_iterations",
-        "steps": steps,
-    }
-
-
-def _reflective_instructions(parent_result: SplitResult) -> str:
-    failing = [pt for pt in parent_result.per_task if pt.get("reward", 0) < 1.0]
-    lines = [
-        "# Reflective optimization (GEPA-style)",
-        "",
-        "Below is a reflective dataset of the parent candidate's FAILING val tasks "
-        "(inputs, the agent's output, and feedback). Diagnose the common root cause "
-        "and edit the capability to fix the general pattern — not one task.",
-        "",
-    ]
-    for pt in failing[:10]:
-        lines.append(f"## task {pt.get('task_id')}")
-        lines.append(f"- Feedback: {str(pt.get('feedback',''))[:500]}")
-    if not failing:
-        lines.append("(parent passes all sampled val tasks; pursue robustness.)")
-    return "\n".join(lines)
 
 
 # ---- finalize -------------------------------------------------------------

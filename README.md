@@ -120,8 +120,8 @@ Follow RUN.md to run a cap-evolve optimization. Here is everything intake needs:
 - credentials:     <e.g. ANTHROPIC_API_KEY, or BOBSHELL_API_KEY for ibm-bob>
 
 # 6. BUDGET / GATE
-- algorithm:       hill-climb (--focus all|cyclic|hardest-first) | gepa | skillopt | gepa-reflective
-                   (gepa & skillopt are the flagships; gepa-reflective is a thin precursor)
+- algorithm:       hill-climb (--focus all|cyclic|hardest-first) | gepa | skillopt
+                   (gepa & skillopt are the sample-efficient flagships)
 - max_iterations:  <N>     num_trials: <K, use >=3 for a stochastic agent>
 - gate:            significant (k_se, e.g. 1.0) | strict | threshold   (paired sig is the default)
 ```
@@ -259,7 +259,7 @@ NAME changes (one runner, `run-optimizer`, resolves it via `optimizers/registry.
 capabilities: [system-prompt, tools]   # list of capabilities to optimize jointly
                                        #   any of: system-prompt | tools | mcp-tool | skill-package
 optimizer:        claude-code      # ← swap the NAME: codex | gemini-cli | opencode | openclaw | ibm-bob | generic | mock
-algorithm_skill:  hill-climb       # hill-climb (--focus all|cyclic|hardest-first) | gepa | skillopt | gepa-reflective
+algorithm_skill:  hill-climb       # hill-climb (--focus all|cyclic|hardest-first) | gepa | skillopt
 num_trials: 4
 store: git                         # versions every iteration; or: copy | command (e.g. a skills store)
 ```
@@ -319,14 +319,14 @@ skills became **one** `run-optimizer` skill + a one-row-per-optimizer
 | orchestrate | `orchestrate` · `using-cap-evolve` (session-start router) |
 | phases | `intake` · `implement-and-check` · `baseline` · `evaluate` · `diagnose` · `gate` · `finalize` · `report` |
 | capabilities | `system-prompt` · `skill-package` · `tools` · `mcp-tool` |
-| algorithms | `hill-climb` (`--focus all\|cyclic\|hardest-first`) · `gepa` · `skillopt` · `gepa-reflective` |
+| algorithms | `hill-climb` (`--focus all\|cyclic\|hardest-first`) · `gepa` · `skillopt` |
 | optimizers | `run-optimizer` + `optimizers/registry.yaml` (`claude-code`, `codex`, `gemini-cli`, `opencode`, `openclaw`, `ibm-bob`, `generic`, `mock`) |
 
 `gepa` (real GEPA — two-stage minibatch-then-full-val economy, per-instance Pareto
 frontier, reflective dataset, system-aware merge; arXiv:2507.19457) and `skillopt`
 (epochs × mini-batches, decaying textual-LR edit budget, rejected-edit buffer, gated
-slow update; arXiv:2605.23904) are the **flagships**; `gepa-reflective` is a thin
-precursor.
+slow update; arXiv:2605.23904) are the sample-efficient **flagships**; `hill-climb`
+(`--focus all|cyclic|hardest-first`) is the simple global-best baseline climber.
 
 ## Examples
 - [`examples/toy_calc`](examples/toy_calc) — zero-API deterministic proof (the CI gate).

@@ -5,7 +5,7 @@ engine:
 
   * ``hill_climb_loop`` proposes against the whole train set every iteration
     (one-shot, no notion of an epoch or a shrinking step), and
-  * ``pareto_loop`` (gepa) maintains a Pareto FRONTIER of specialists and samples
+  * ``gepa`` maintains a Pareto FRONTIER of specialists and samples
     a parent from it.
 
 SkillOpt keeps gepa's *epochs × mini-batches* economy but stays a STRICT

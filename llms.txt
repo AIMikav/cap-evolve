@@ -26,8 +26,8 @@ score the test split except at finalize; gate acceptance on val.
 ## Skills (19; each is skills/<component>/<name>/SKILL.md)
 - phases: intake, implement-and-check, baseline, evaluate, diagnose, gate, finalize, report
 - capabilities: system-prompt, skill-package, tools, mcp-tool
-- algorithms: hill-climb (--focus all|cyclic|hardest-first), gepa, skillopt, gepa-reflective
-  (gepa & skillopt are the flagships; gepa-reflective is a thin precursor)
+- algorithms: hill-climb (--focus all|cyclic|hardest-first), gepa, skillopt
+  (gepa & skillopt are the sample-efficient flagships)
 - optimizers: run-optimizer + optimizers/registry.yaml (claude-code, codex, gemini-cli,
   opencode, openclaw, ibm-bob, generic, mock — one runner resolves the name)
 - orchestrate: orchestrate, using-cap-evolve (session-start router)

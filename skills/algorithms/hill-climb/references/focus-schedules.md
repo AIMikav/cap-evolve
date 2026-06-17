@@ -26,4 +26,4 @@ errors via the structured `raw.errored` flag, not feedback substring matching).
 ## Parent selection (all schedules)
 The parent is always the current best candidate — a strict global hill-climb. A
 per-task Pareto frontier that keeps specialists is a *different* algorithm
-(`gepa-reflective`, which calls `harness.pareto_loop`), not a focus mode here.
+(the `gepa` skill, which keeps a per-instance Pareto frontier), not a focus mode here.
