@@ -120,6 +120,42 @@ export interface CompareResult {
   tasks: string[]
 }
 
+/** GET /api/runs/{id}/memory. */
+export interface HistoryEntry {
+  candidate_id: string
+  summary: string
+  val: number | null
+}
+export interface RejectedEntry {
+  candidate_id: string
+  summary: string
+  reason: string
+  val: number | null
+}
+export interface MemoryResult {
+  history: HistoryEntry[]
+  rejected: RejectedEntry[]
+}
+
+/** GET /api/runs/{id}/candidate/{cid}/files. */
+export interface CandidateFile {
+  name: string
+  text: string
+}
+
+/** GET /api/runs/{id}/rollout/{file}. */
+export interface RolloutDetail {
+  input?: unknown
+  rollout?: {
+    output?: unknown
+    trace?: string
+    tool_calls?: Array<{ name?: string; [k: string]: unknown }>
+    error?: string | null
+    [k: string]: unknown
+  }
+  score?: { reward?: number | null; feedback?: string; [k: string]: unknown }
+}
+
 /** SSE frames from GET /api/runs/{id}/stream. */
 export type StreamEvent =
   | { type: 'snapshot'; data: RunDetail }

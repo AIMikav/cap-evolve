@@ -1,7 +1,10 @@
 /** Typed wrappers over the cap-evolve dashboard backend (/api/*). */
 import type {
   CandidateDiff,
+  CandidateFile,
   CompareResult,
+  MemoryResult,
+  RolloutDetail,
   RolloutRow,
   RunDetail,
   RunSummary,
@@ -26,9 +29,24 @@ export const api = {
     return getJSON<RolloutRow[]>(`/api/runs/${encodeURIComponent(id)}/rollouts${q}`, signal)
   },
 
+  rollout: (id: string, file: string, signal?: AbortSignal) =>
+    getJSON<RolloutDetail>(
+      `/api/runs/${encodeURIComponent(id)}/rollout/${encodeURIComponent(file)}`,
+      signal,
+    ),
+
   diff: (id: string, candidate: string, signal?: AbortSignal) =>
     getJSON<CandidateDiff>(
       `/api/runs/${encodeURIComponent(id)}/diff/${encodeURIComponent(candidate)}`,
+      signal,
+    ),
+
+  memory: (id: string, signal?: AbortSignal) =>
+    getJSON<MemoryResult>(`/api/runs/${encodeURIComponent(id)}/memory`, signal),
+
+  candidateFiles: (id: string, cid: string, signal?: AbortSignal) =>
+    getJSON<CandidateFile[]>(
+      `/api/runs/${encodeURIComponent(id)}/candidate/${encodeURIComponent(cid)}/files`,
       signal,
     ),
 

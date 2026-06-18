@@ -12,12 +12,13 @@ import { StatusBadge } from '../components/StatusBadge'
 import { KpiStrip } from '../components/KpiStrip'
 import { BestCurveChart } from '../components/BestCurveChart'
 import { LineageTree } from '../components/LineageTree'
+import { PhasesTimeline } from '../components/PhasesTimeline'
 import type { RunStatus } from '../lib/types'
 
 const TABS: TabDef[] = [
   { id: 'overview', label: 'Overview' },
+  { id: 'phases', label: 'Phases' },
   { id: 'lineage', label: 'Lineage' },
-  { id: 'phases', label: 'Phases', disabled: true },
   { id: 'trajectories', label: 'Trajectories', disabled: true },
   { id: 'iterations', label: 'Iterations', disabled: true },
   { id: 'memory', label: 'Memory', disabled: true },
@@ -90,6 +91,8 @@ export function RunDeepDive() {
               {(active) =>
                 active === 'overview' ? (
                   <BestCurveChart nodes={data.graph.nodes} />
+                ) : active === 'phases' ? (
+                  <PhasesTimeline detail={data} />
                 ) : active === 'lineage' ? (
                   <LineageTree graph={data.graph} />
                 ) : (
