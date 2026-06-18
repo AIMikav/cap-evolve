@@ -4,10 +4,16 @@ def test_is_up_false_when_nothing_listening():
     assert server.is_up(1) is False
 
 
-def test_resolve_static_dir_returns_path_or_none():
+def test_resolve_static_dir_points_at_frontend_dist():
     from capevolve_dashboard import server
     out = server.resolve_static_dir()
-    assert out is None or out.name == "dist"
+    # Whether or not it's been built, the resolved location must be the real
+    # dashboard/frontend/dist — guards the parents[] off-by-one regression.
+    from pathlib import Path
+    expected = Path(server.__file__).resolve().parents[2] / "frontend" / "dist"
+    if out is not None:
+        assert out == expected
+        assert out.parent.name == "frontend" and out.parent.parent.name == "dashboard"
 
 
 def test_url_for():

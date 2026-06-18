@@ -23,8 +23,9 @@ def is_up(port: int, host: str = "127.0.0.1") -> bool:
 
 
 def resolve_static_dir() -> Path | None:
-    # server.py -> capevolve_dashboard -> backend -> dashboard -> repo
-    dist = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+    # server.py(file) -> capevolve_dashboard[0] -> backend[1] -> dashboard[2];
+    # the built SPA lives at dashboard/frontend/dist.
+    dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     return dist if dist.is_dir() else None
 
 
