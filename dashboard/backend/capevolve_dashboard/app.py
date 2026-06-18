@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from . import runs, trajectories
+from . import compare, runs, trajectories
 from . import stream as _stream
 
 
@@ -31,16 +31,19 @@ def create_app(base_dir: Path, static_dir: Path | None = None) -> FastAPI:
         except runs.RunNotFound:
             raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
 
+    def _resolve_or_404(run_id: str) -> Path:
+        try:
+            return runs.resolve_run(base, run_id)
+        except runs.RunNotFound:
+            raise HTTPException(status_code=404, detail="run not found")
+
     @app.get("/api/runs/{run_id}/rollouts")
     def get_rollouts(run_id: str, split: str | None = Query(default=None)):
-        path = base / run_id
-        if not (path / "events.jsonl").exists():
-            raise HTTPException(status_code=404, detail="run not found")
-        return trajectories.list_rollouts(path, split)
+        return trajectories.list_rollouts(_resolve_or_404(run_id), split)
 
     @app.get("/api/runs/{run_id}/rollout/{file_name}")
     def get_rollout(run_id: str, file_name: str):
-        path = base / run_id
+        path = _resolve_or_404(run_id)
         try:
             return trajectories.read_rollout(path, file_name)
         except FileNotFoundError:
@@ -48,23 +51,16 @@ def create_app(base_dir: Path, static_dir: Path | None = None) -> FastAPI:
 
     @app.get("/api/runs/{run_id}/diff/{candidate}")
     def get_diff(run_id: str, candidate: str):
-        path = base / run_id
-        if not (path / "events.jsonl").exists():
-            raise HTTPException(status_code=404, detail="run not found")
-        return trajectories.diff_candidate(path, candidate)
+        return trajectories.diff_candidate(_resolve_or_404(run_id), candidate)
 
     @app.get("/api/compare")
     def get_compare(ids: str = Query(...)):
-        from . import compare
         run_ids = [x for x in ids.split(",") if x]
         return compare.compare_runs(base, run_ids)
 
     @app.get("/api/runs/{run_id}/stream")
     async def run_stream(run_id: str):
-        path = base / run_id
-        events_path = path / "events.jsonl"
-        if not events_path.exists():
-            raise HTTPException(status_code=404, detail="run not found")
+        events_path = _resolve_or_404(run_id) / "events.jsonl"
 
         async def gen():
             # Initial snapshot of the full reduced run.

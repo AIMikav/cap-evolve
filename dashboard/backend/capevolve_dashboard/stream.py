@@ -15,10 +15,13 @@ def read_new_events(path: Path, offset: int) -> tuple[list[dict], int]:
     p = Path(path)
     if not p.exists():
         return [], offset
-    raw = p.read_bytes()
-    if offset >= len(raw):
+    if offset >= p.stat().st_size:
         return [], offset
-    chunk = raw[offset:]
+    # Seek-and-read so each poll costs O(new bytes), not O(file size) — the stream
+    # route calls this twice a second per client over a growing events.jsonl.
+    with p.open("rb") as fh:
+        fh.seek(offset)
+        chunk = fh.read()
     last_nl = chunk.rfind(b"\n")
     if last_nl == -1:
         return [], offset  # only a partial line so far

@@ -42,3 +42,32 @@ def test_load_run_missing_raises(tmp_base):
     from capevolve_dashboard import runs
     with pytest.raises(runs.RunNotFound):
         runs.load_run(tmp_base, "run_nope")
+
+
+def test_resolve_run_accepts_valid_child(tmp_base, make_run):
+    from capevolve_dashboard import runs
+    make_run("run_a", events=BASE_EVENTS)
+    p = runs.resolve_run(tmp_base, "run_a")
+    assert p.name == "run_a"
+    assert p.parent == tmp_base.resolve()
+
+
+def test_resolve_run_rejects_traversal(tmp_base, make_run):
+    import pytest
+    from capevolve_dashboard import runs
+    make_run("run_a", events=BASE_EVENTS)
+    # A run dir one level up must not be reachable via traversal.
+    (tmp_base.parent / "run_evil").mkdir(exist_ok=True)
+    (tmp_base.parent / "run_evil" / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    for evil in ("..", "../run_evil", "run_a/../../run_evil"):
+        with pytest.raises(runs.RunNotFound):
+            runs.resolve_run(tmp_base, evil)
+
+
+def test_resolve_run_rejects_non_run_prefix(tmp_base):
+    import pytest
+    from capevolve_dashboard import runs
+    (tmp_base / "notarun").mkdir()
+    (tmp_base / "notarun" / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(runs.RunNotFound):
+        runs.resolve_run(tmp_base, "notarun")

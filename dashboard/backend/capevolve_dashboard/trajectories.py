@@ -39,8 +39,10 @@ def list_rollouts(run_path: Path, split: str | None = None) -> list[dict]:
 
 
 def read_rollout(run_path: Path, file_name: str) -> dict:
-    safe = Path(file_name).name  # prevent path traversal
-    for f in (Path(run_path) / "rollouts").rglob(safe):
+    safe = Path(file_name).name  # strip any path components from the basename
+    # sorted() makes the result deterministic if the same basename exists under
+    # multiple splits; run_path is already a validated run dir (see resolve_run).
+    for f in sorted((Path(run_path) / "rollouts").rglob(safe)):
         return dashboard.redact(json.loads(f.read_text()))
     raise FileNotFoundError(file_name)
 

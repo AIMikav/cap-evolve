@@ -34,7 +34,7 @@ def ensure_up(base_dir, port: int = 7878, open_browser: bool = True) -> str:
         if open_browser:
             webbrowser.open(url)
         return url
-    env = dict(os.environ, CAPEVOLVE_BASE_DIR=str(base_dir), CAPEVOLVE_PORT=str(port))
+    env = dict(os.environ, CAPEVOLVE_BASE_DIR=str(base_dir))
     static = resolve_static_dir()
     if static:
         env["CAPEVOLVE_STATIC_DIR"] = str(static)
