@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from . import compare, runs, trajectories
+from . import memory as _memory
 from . import stream as _stream
 
 
@@ -52,6 +53,14 @@ def create_app(base_dir: Path, static_dir: Path | None = None) -> FastAPI:
     @app.get("/api/runs/{run_id}/diff/{candidate}")
     def get_diff(run_id: str, candidate: str):
         return trajectories.diff_candidate(_resolve_or_404(run_id), candidate)
+
+    @app.get("/api/runs/{run_id}/memory")
+    def get_memory(run_id: str):
+        return _memory.read_memory(_resolve_or_404(run_id))
+
+    @app.get("/api/runs/{run_id}/candidate/{candidate}/files")
+    def get_candidate_files(run_id: str, candidate: str):
+        return _memory.list_candidate_files(_resolve_or_404(run_id), candidate)
 
     @app.get("/api/compare")
     def get_compare(ids: str = Query(...)):
