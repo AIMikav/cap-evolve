@@ -322,12 +322,20 @@ def _val_size(spec: dict, project: Path) -> int | None:
     reports the formula with an unknown val size instead of failing.
     """
     ids_file = spec.get("split_ids_file")
-    if ids_file and Path(ids_file).exists():
-        try:
-            d = json.loads(Path(ids_file).read_text(encoding="utf-8"))
-            return len(d.get("val") or [])
-        except Exception:  # noqa: BLE001
-            pass
+    if ids_file:
+        # Resolve as given (absolute/cwd-relative) else relative to the project dir,
+        # matching how baseline resolves it — so the preview reflects the real split.
+        p = Path(ids_file)
+        if not p.exists():
+            cand = Path(project) / ids_file
+            if cand.exists():
+                p = cand
+        if p.exists():
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+                return len(d.get("val") or [])
+            except Exception:  # noqa: BLE001
+                pass
     try:
         from .check import load_adapter
         from .splits import make_splits
