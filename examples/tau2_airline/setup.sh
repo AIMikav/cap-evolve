@@ -24,6 +24,11 @@ say "1/3  Install cap-evolve (Python venv + core CLI)"
 "$PY" -m pip install -q --index-url "$PIP_INDEX" --upgrade pip
 "$PY" -m pip install -q --index-url "$PIP_INDEX" -e "$REPO/core" || die "pip install ./core failed"
 "$VENV/bin/cap-evolve" version || die "cap-evolve CLI not available"
+# Live dashboard (optional but recommended): installs the dashboard server so
+# `cap-evolve run --dashboard auto` shows the run in a browser. Non-fatal.
+"$PY" -m pip install -q --index-url "$PIP_INDEX" -e "$REPO/dashboard/backend" 2>/dev/null \
+  && echo "  dashboard server installed (live UI available)" \
+  || echo "  (optional) dashboard server not installed — run still works with --dashboard off"
 
 say "2/3  INTAKE — onboard the tau2-bench benchmark (per PROMPT.md)"
 # (a) Install the benchmark: clone tau2-bench (latest main) + pip install -e. Record the SHA.
