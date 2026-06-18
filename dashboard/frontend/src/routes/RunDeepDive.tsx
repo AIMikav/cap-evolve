@@ -14,6 +14,7 @@ import { BestCurveChart } from '../components/BestCurveChart'
 import { LineageTree } from '../components/LineageTree'
 import { PhasesTimeline } from '../components/PhasesTimeline'
 import { Trajectories } from '../components/Trajectories'
+import { IterationsDiff } from '../components/IterationsDiff'
 import type { RunStatus } from '../lib/types'
 
 const TABS: TabDef[] = [
@@ -21,7 +22,7 @@ const TABS: TabDef[] = [
   { id: 'phases', label: 'Phases' },
   { id: 'lineage', label: 'Lineage' },
   { id: 'trajectories', label: 'Trajectories' },
-  { id: 'iterations', label: 'Iterations', disabled: true },
+  { id: 'iterations', label: 'Iterations' },
   { id: 'memory', label: 'Memory', disabled: true },
   { id: 'insights', label: 'Insights', disabled: true },
 ]
@@ -98,6 +99,8 @@ export function RunDeepDive() {
                   <LineageTree graph={data.graph} />
                 ) : active === 'trajectories' ? (
                   <Trajectories runId={id!} />
+                ) : active === 'iterations' ? (
+                  <IterationsDiff runId={id!} graph={data.graph} />
                 ) : (
                   <Card>
                     <div className="p-8 text-center text-sm text-muted">This view lands in Plan 3.</div>
