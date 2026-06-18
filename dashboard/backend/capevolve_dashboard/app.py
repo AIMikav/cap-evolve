@@ -50,4 +50,10 @@ def create_app(base_dir: Path) -> FastAPI:
             raise HTTPException(status_code=404, detail="run not found")
         return trajectories.diff_candidate(path, candidate)
 
+    @app.get("/api/compare")
+    def get_compare(ids: str = Query(...)):
+        from . import compare
+        run_ids = [x for x in ids.split(",") if x]
+        return compare.compare_runs(base, run_ids)
+
     return app
