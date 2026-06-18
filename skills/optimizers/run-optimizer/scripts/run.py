@@ -219,6 +219,10 @@ def main(argv=None) -> int:
     p.add_argument("--budget", type=int, default=None,
                    help="per-iteration cap rendered into the registry row's budget_flag "
                         "(e.g. claude-code → --max-turns N); ignored if the row has none")
+    p.add_argument("--usd-budget", type=float, default=None,
+                   help="per-iteration USD cap rendered into the row's usd_budget_flag "
+                        "(e.g. claude-code → --max-budget-usd N), enforced by the optimizer "
+                        "CLI itself; ignored if the row has none (e.g. ibm-bob)")
     p.add_argument("--list", action="store_true", help="list known optimizers and exit")
     args = p.parse_args(argv)
 
@@ -266,6 +270,13 @@ def main(argv=None) -> int:
     budget_flag = str(row.get("budget_flag", "")).strip()
     if args.budget is not None and budget_flag and str(row.get("offline", "")).lower() != "true":
         cmd += shlex.split(budget_flag.replace("{budget}", str(int(args.budget))))
+
+    # Per-iteration USD cap: render {usd} into the row's usd_budget_flag (e.g.
+    # claude-code → "--max-budget-usd N"), enforced natively by the optimizer CLI.
+    # Skipped when --usd-budget is unset, the row has no usd_budget_flag, or it's offline.
+    usd_budget_flag = str(row.get("usd_budget_flag", "")).strip()
+    if args.usd_budget is not None and usd_budget_flag and str(row.get("offline", "")).lower() != "true":
+        cmd += shlex.split(usd_budget_flag.replace("{usd}", f"{float(args.usd_budget):g}"))
 
     if not cmd:
         print(json.dumps({"optimizer": name, "error":

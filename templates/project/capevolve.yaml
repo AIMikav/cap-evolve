@@ -12,8 +12,11 @@ actions: [edit]                          # allowed edits (capability-specific)
 # --- who proposes edits -----------------------------------------------------
 optimizer_skill: mock                    # optimizer NAME (resolved by run-optimizer via optimizers/registry.yaml)
 optimizer_model: ""                      # backend-specific (e.g. a claude model id)
-optimizer_max_turns: 0                   # 0 = off; per-iteration cap passed to the agent CLI
+optimizer_max_turns: 0                   # 0 = off; per-iteration WORK cap passed to the agent CLI
 #   (claude-code → --max-turns N), bounding the cost/work of each optimization step
+optimizer_usd_per_iter: 0.0              # 0 = off; per-iteration DOLLAR cap passed to the agent CLI
+#   (claude-code → --max-budget-usd N, enforced by the CLI itself). Optimizers without a
+#   native $ cap (e.g. ibm-bob) ignore it — bound those via optimizer_max_turns / max_optimizer_usd.
 
 # --- how to iterate ---------------------------------------------------------
 algorithm_skill: hill-climb              # algorithms/<skill>

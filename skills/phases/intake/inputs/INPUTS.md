@@ -17,6 +17,15 @@ path, how to obtain it, and the alternatives. Never invent a NEEDED input.
   - how to get it: wire your agent's entrypoint (CLI/SDK/HTTP) inside `run_target`;
     capture output + trace into a `Rollout`
   - options: in-process call | subprocess | a benchmark's own runner (`run_batch`)
+  - **runner model + credentials**: which model(s) the runner uses and the env vars /
+    `.env` keys it needs (e.g. `OPENAI_API_KEY`, `WATSONX_*`, `RITS_API_KEY`). For an
+    OpenAI-compatible / custom endpoint (vLLM, IBM RITS, a gateway), capture the
+    `api_base` + any custom auth header and pass them through the runner's LLM config
+    (most benchmarks forward extra kwargs to litellm) — prefer per-call config over
+    monkeypatching. ASK the user for missing credentials; never hardcode a secret.
+  - **benchmark repo (if the runner IS a benchmark)**: where to get it (a local path
+    or git URL) and how to install it (e.g. `pip install -e ../<bench>`). Record the
+    resolved commit so the run is reproducible.
 
 - **scorer**: how a rollout becomes a reward in [0,1] + feedback.
   - where: `adapter.py::score`
@@ -42,11 +51,15 @@ path, how to obtain it, and the alternatives. Never invent a NEEDED input.
 
 - **budget**: `max_iterations` (default 10), `stall` (stop after N rejects),
   `max_metric_calls` (0 = unlimited), `max_usd` (0 = unlimited; total cap over
-  runner + optimizer + intake), `max_optimizer_usd` (separate optimizer-only cap),
-  and `optimizer_max_turns` (per-iteration cap passed to the agent CLI, e.g.
-  claude-code `--max-turns`). Write all of these into `capevolve.yaml` — the template
-  has slots for each. Suggest the user run `cap-evolve estimate --spec capevolve.yaml`
-  to preview call counts and a $ range before the first run.
+  runner + optimizer + intake), `max_optimizer_usd` (cumulative optimizer-only cap),
+  `optimizer_max_turns` (per-iteration WORK cap passed to the agent CLI, e.g.
+  claude-code `--max-turns N`), and `optimizer_usd_per_iter` (per-iteration DOLLAR cap
+  passed to the agent CLI and enforced by it where supported, e.g. claude-code
+  `--max-budget-usd N`; optimizers without a native $ cap, e.g. ibm-bob, ignore it and
+  rely on `optimizer_max_turns` / `max_optimizer_usd`). Write all of these into
+  `capevolve.yaml` — the template has slots for each. Suggest the user run
+  `cap-evolve estimate --spec capevolve.yaml` to preview call counts and a $ range
+  before the first run.
 
 - **optimizer + model**: `optimizer_skill` is the optimizer NAME, resolved by the
   `run-optimizer` skill against `optimizers/registry.yaml` (run `run-optimizer --list`

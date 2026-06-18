@@ -176,6 +176,12 @@ def _cmd_run(argv):
     # budget_flag_template (e.g. claude-code → --max-turns N), bounding each step's cost.
     if spec.get("optimizer_max_turns"):
         opt_cmd += f" --budget {int(spec['optimizer_max_turns'])}"
+    # Per-iteration optimizer USD cap: run-optimizer maps --usd-budget to the row's
+    # usd_budget_flag (e.g. claude-code → --max-budget-usd N), enforced by the optimizer
+    # CLI itself. Rows without one (e.g. ibm-bob) ignore it — bound those via
+    # optimizer_max_turns and/or the cumulative max_optimizer_usd instead.
+    if spec.get("optimizer_usd_per_iter"):
+        opt_cmd += f" --usd-budget {float(spec['optimizer_usd_per_iter'])}"
 
     # Algorithm semantics: the three hill-climb variants are one ``hill-climb``
     # skill selected by ``--focus``. Back-compat: translate the old skill names. An

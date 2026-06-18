@@ -6,6 +6,21 @@ All notable changes to cap-evolve are documented here. The format follows
 
 ## [Unreleased]
 ### Added
+- **Per-iteration optimizer dollar cap** (`optimizer_usd_per_iter` in `capevolve.yaml`):
+  threaded through `run-optimizer --usd-budget` into a new registry `usd_budget_flag`,
+  enforced natively by the optimizer CLI where supported (claude-code →
+  `--max-budget-usd N`). Optimizers without a native $ cap (e.g. ibm-bob) ignore it and
+  are bounded by `optimizer_max_turns` / the cumulative `max_optimizer_usd`.
+- intake `INPUTS.md` now covers the **runner model + credentials + custom
+  OpenAI-compatible/RITS endpoint** and **obtaining/installing a benchmark repo** (with
+  the resolved commit recorded), aligning the interview contract with the README.
+### Fixed
+- Scaffolded project adapter template (`templates/project/adapters/adapter.py`) matched
+  the real `CapabilityAdapter` contract: abstract `tasks` / `run_target(task, ctx, *, seed)`
+  / `score`, with `materialize`/`live`/`apply`/`run_batch` documented as optional
+  overrides. The old stub used a stale `run_target(task, candidate_dir, split)` signature
+  and presented `apply` as a 4th abstract method, which a filled-in body could make the
+  stub-probe silently pass.
 - Honest-eval core (`cap_evolve`): seeded splits with a sealed test set,
   significance gate, multi-trial variance, pass^k + pass@k, bootstrap CIs.
 - **19 Agent Skills**: phases (intake, implement-and-check, baseline, evaluate,
