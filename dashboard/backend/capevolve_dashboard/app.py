@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
-from . import runs
+from . import runs, trajectories
 
 
 def create_app(base_dir: Path) -> FastAPI:
@@ -27,5 +27,27 @@ def create_app(base_dir: Path) -> FastAPI:
             return runs.load_run(base, run_id)
         except runs.RunNotFound:
             raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+
+    @app.get("/api/runs/{run_id}/rollouts")
+    def get_rollouts(run_id: str, split: str | None = Query(default=None)):
+        path = base / run_id
+        if not (path / "events.jsonl").exists():
+            raise HTTPException(status_code=404, detail="run not found")
+        return trajectories.list_rollouts(path, split)
+
+    @app.get("/api/runs/{run_id}/rollout/{file_name}")
+    def get_rollout(run_id: str, file_name: str):
+        path = base / run_id
+        try:
+            return trajectories.read_rollout(path, file_name)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="rollout not found")
+
+    @app.get("/api/runs/{run_id}/diff/{candidate}")
+    def get_diff(run_id: str, candidate: str):
+        path = base / run_id
+        if not (path / "events.jsonl").exists():
+            raise HTTPException(status_code=404, detail="run not found")
+        return trajectories.diff_candidate(path, candidate)
 
     return app
