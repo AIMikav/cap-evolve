@@ -48,10 +48,28 @@ def main(argv=None) -> int:
     ratios = tuple(float(x) for x in args.ratios.split(","))
     split_ids = None
     if args.split_ids:
-        split_ids = json.loads(Path(args.split_ids).read_text(encoding="utf-8"))
+        # Resolve the split-ids path robustly: as given (absolute or cwd-relative),
+        # else relative to the project dir. `cap-evolve run` invokes baseline with
+        # cwd=workdir, so a project-relative `split_ids_file: split_ids.json` in
+        # capevolve.yaml would otherwise miss — this lets users author it naturally.
+        sp = Path(args.split_ids)
+        if not sp.exists():
+            cand = Path(args.project) / args.split_ids
+            if cand.exists():
+                sp = cand
+        split_ids = json.loads(sp.read_text(encoding="utf-8"))
     splits = harness.ensure_splits(adapter, run_dir, seed=args.seed, ratios=ratios,
                                    split_ids=split_ids)
-    result = harness.baseline(adapter, Path(args.capability), run_dir=run_dir, n_trials=args.n_trials)
+    # Resolve the seed capability dir robustly: as given (absolute/cwd-relative),
+    # else relative to the project dir. `cap-evolve run` invokes baseline with
+    # cwd=workdir, so a project-relative `capability_path: seed_capability` in
+    # capevolve.yaml would otherwise miss — let users author it naturally.
+    cap_path = Path(args.capability)
+    if not cap_path.exists():
+        cand = Path(args.project) / args.capability
+        if cand.exists():
+            cap_path = cand
+    result = harness.baseline(adapter, cap_path, run_dir=run_dir, n_trials=args.n_trials)
 
     print(json.dumps({
         "run_dir": str(run_dir.root),

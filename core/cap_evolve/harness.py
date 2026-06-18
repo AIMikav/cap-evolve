@@ -299,6 +299,10 @@ def optimizer_from_command(cmd_template: list[str]) -> OptimizerFn:
         if proc.returncode != 0:
             raise RuntimeError(
                 f"optimizer failed ({proc.returncode}): {_optimizer_failure_detail(proc)}")
+        # Capture optimizer spend (cost_usd/tokens) from run-optimizer's JSON payload
+        # so it counts against the budget and shows in the dashboard. Returns None
+        # when the agent CLI emitted no structured cost (spend stays unmeasured).
+        return _parse_optimizer_cost(proc.stdout)
     return _run
 
 
