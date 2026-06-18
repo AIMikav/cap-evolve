@@ -19,16 +19,32 @@ PIP_INDEX="${PIP_INDEX:-https://pypi.org/simple}"   # public PyPI (override if y
 say(){ printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 die(){ printf '\n\033[1;31mSETUP FAILED: %s\033[0m\n' "$*" >&2; exit 1; }
 
+# --- options: install the live dashboard server or not ---------------------
+WITH_DASHBOARD="${WITH_DASHBOARD:-1}"   # default ON; env or flag can override
+for arg in "$@"; do
+  case "$arg" in
+    --dashboard)    WITH_DASHBOARD=1 ;;
+    --no-dashboard) WITH_DASHBOARD=0 ;;
+    -h|--help) echo "usage: setup.sh [--dashboard|--no-dashboard]  (default: --dashboard)"; exit 0 ;;
+    *) echo "unknown option: $arg  (use --dashboard | --no-dashboard)" >&2; exit 2 ;;
+  esac
+done
+
 say "1/3  Install cap-evolve (Python venv + core CLI)"
 [ -x "$PY" ] || python3 -m venv "$VENV" || die "could not create venv (need python3.10+)"
 "$PY" -m pip install -q --index-url "$PIP_INDEX" --upgrade pip
 "$PY" -m pip install -q --index-url "$PIP_INDEX" -e "$REPO/core" || die "pip install ./core failed"
 "$VENV/bin/cap-evolve" version || die "cap-evolve CLI not available"
-# Live dashboard (optional but recommended): installs the dashboard server so
-# `cap-evolve run --dashboard auto` shows the run in a browser. Non-fatal.
-"$PY" -m pip install -q --index-url "$PIP_INDEX" -e "$REPO/dashboard/backend" 2>/dev/null \
-  && echo "  dashboard server installed (live UI available)" \
-  || echo "  (optional) dashboard server not installed — run still works with --dashboard off"
+# Live dashboard (recommended; toggle with --dashboard / --no-dashboard). The built
+# frontend (dashboard/frontend/dist — the capybara UI) is committed, so no node is
+# needed at runtime; this just installs the server that serves it. Non-fatal.
+if [ "$WITH_DASHBOARD" = "1" ]; then
+  "$PY" -m pip install -q --index-url "$PIP_INDEX" -e "$REPO/dashboard/backend" 2>/dev/null \
+    && echo "  dashboard server installed (live capybara UI: cap-evolve run --dashboard auto)" \
+    || echo "  (optional) dashboard server not installed — run still works with --dashboard off"
+else
+  echo "  dashboard install SKIPPED (--no-dashboard) — run with: CAPEVOLVE_DASHBOARD=off bash run.sh"
+fi
 
 say "2/3  INTAKE — onboard the tau2-bench benchmark (per PROMPT.md)"
 # (a) Install the benchmark: clone tau2-bench (latest main) + pip install -e. Record the SHA.
