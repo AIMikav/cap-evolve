@@ -83,7 +83,7 @@ def main(argv=None) -> int:
     if args.dashboard_mode in ("auto", "report-only"):
         try:
             from cap_evolve import dashboard_launch
-            base = run_dir.root.parent
+            base = run_dir.root.resolve().parent  # absolute: subprocess cwd may differ
             status = dashboard_launch.maybe_launch(
                 base, mode=args.dashboard_mode, port=args.dashboard_port, open_browser=True
             )

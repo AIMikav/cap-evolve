@@ -199,7 +199,11 @@ def _cmd_run(argv):
     # Auto-start the live dashboard now (the run dir exists) so the whole
     # evolution is watchable. Best-effort: never blocks or fails the run.
     if dash_mode == "auto":
-        status = dashboard_launch.maybe_launch(base, mode=dash_mode, port=dash_port, open_browser=True)
+        # Absolute base: the dashboard subprocess inherits THIS process's cwd
+        # (not workdir), so a relative ".capevolve" would resolve wrongly when
+        # `cap-evolve run` is invoked from outside workdir.
+        status = dashboard_launch.maybe_launch(
+            proj_abs.parent, mode=dash_mode, port=dash_port, open_browser=True)
         print(json.dumps(status))
 
     # 2) algorithm (hill-climb variants select their schedule via --focus)
