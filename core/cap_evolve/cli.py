@@ -258,6 +258,15 @@ def _cmd_run(argv):
                "--store", str(spec.get("store", "git"))]
     if algorithm_focus is not None:
         alg_cmd += ["--focus", algorithm_focus]
+    # Surface the selected capability skills to the optimizer prompt so it knows the
+    # allowed edit space (e.g. tools → may add composite tools). hill-climb consumes
+    # --capabilities; algorithms without the flag ignore the extra arg via argparse error,
+    # so only pass it to those that accept it.
+    caps = spec.get("capabilities") or []
+    if isinstance(caps, str):
+        caps = [c.strip() for c in caps.split(",") if c.strip()]
+    if caps and algorithm_name == "hill-climb":
+        alg_cmd += ["--capabilities", ",".join(str(c) for c in caps)]
     # gepa treats metric-calls as its PRIMARY budget; forward it explicitly (hill-climb
     # has no such flag and enforces the same cap via run_dir.budget_exhausted()).
     if algorithm_name == "gepa" and spec.get("max_metric_calls"):

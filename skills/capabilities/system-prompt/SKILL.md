@@ -39,6 +39,14 @@ attention; conflicting instructions resolve unpredictably.
 `validate(dir) -> {ok, files, problems}`. Edit ops: `set`, `append`,
 `ensure_contains`. A project adapter's `apply` can call these directly.
 
+## Optimizing it each iteration (analyze → ideate → edit)
+The optimizer should **analyze before editing**: from the traces + the current
+prompt, identify (a) the recurring failures clustered by root cause (the rule the
+agent keeps breaking) and (b) the good behavior seen only on some trials that
+should be made consistent; then make ONE targeted prompt edit that fixes the
+biggest cluster and reinforces (b) — sharpen or correct the offending rule rather
+than appending more preamble. Be economical: one good edit, then stop.
+
 ## How to run
 ```
 python scripts/check.py

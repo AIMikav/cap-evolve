@@ -139,6 +139,15 @@ Keep the policy tight unless your specific MCP client supports more.
 (restricted policy; reports refusals), `validate` (well-formedness, dup names,
 empty descriptions).
 
+## Optimizing it each iteration (analyze → ideate → edit)
+The optimizer should **analyze before editing**: from the traces, identify (a) the
+recurring mis-selection / bad-argument failures clustered by root cause and (b) the
+good behavior seen only on some trials to make consistent; then make ONE targeted
+SAFE edit — tool/parameter documentation, an in-description example, or
+adding/removing a tool from the exposed set (never the wire schema or handler) —
+that fixes the biggest cluster and reinforces (b). Be economical: one good edit,
+then stop.
+
 ## How to run
 
 ```

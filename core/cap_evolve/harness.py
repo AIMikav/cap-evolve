@@ -543,37 +543,175 @@ def _is_infra(pt) -> bool:
     return bool((pt.get("raw") or {}).get("errored"))
 
 
-def _focus_instructions(current_val: SplitResult, focus_ids, label: str) -> str:
+# Per-capability edit-space brief surfaced to the optimizer. Kept short and
+# general; the long-form guidance lives in each capability skill's SKILL.md, which
+# the optimizer can open via the pointer we emit. ``summary`` is read from the
+# capability's meta.yaml at runtime so this never drifts from the skill.
+_CAP_EDIT_SPACE = {
+    "tools": "Edit tool names/descriptions, per-parameter docs, in-description examples, "
+             "the JSON schema, and the handler code. You MAY ADD tools — including a "
+             "COMPOSITE tool that calls existing tools to collapse a fumbled multi-call "
+             "chain — and REMOVE redundant/overlapping ones. Selection is driven by the "
+             "name+description; argument-filling by the parameter schema/enums.",
+    "system-prompt": "Edit the prompt/policy text: instructions, decision policy, and the "
+                     "output contract. Prefer sharpening rules the traces show the agent "
+                     "breaking; do not just append more preamble.",
+    "skill-package": "Edit the SKILL.md (frontmatter + body), its references, and bundled "
+                     "scripts, staying within skill-creator rules (valid frontmatter, "
+                     "progressive disclosure, one-level references, concise body).",
+    "mcp-tool": "ONLY safe edits: tool/parameter documentation, in-description examples, and "
+                "adding/removing tools from the exposed set. The wire schema and tool code "
+                "are owned by the external server and are NOT editable here.",
+}
+
+
+def _capability_brief(capabilities) -> str:
+    """A compact 'what you are allowed to edit' block for the optimizer prompt.
+
+    ``capabilities`` is the list from the spec (e.g. ``["system-prompt", "tools"]``).
+    For each we emit its one-line meta summary plus the allowed edit space, and a
+    pointer to the full capability SKILL.md so the optimizer can use the whole
+    edit space (e.g. composite tools) rather than guessing from the files alone.
+    Returns "" when no capabilities are known (older callers) so behavior is additive.
+    """
+    caps = [c for c in (capabilities or []) if c]
+    if not caps:
+        return ""
+    skills_root = Path(__file__).resolve().parents[2] / "skills" / "capabilities"
+    lines = ["## What you are editing (the allowed edit space)",
+             "The capability under optimization is composed of these editable artifact(s). "
+             "Use the FULL edit space below — do not limit yourself to trivial wording tweaks."]
+    for c in caps:
+        summary = ""
+        meta = skills_root / c / "meta.yaml"
+        if meta.exists():
+            for ln in meta.read_text(encoding="utf-8").splitlines():
+                if ln.startswith("summary:"):
+                    summary = ln.split(":", 1)[1].strip()
+                    break
+        edit = _CAP_EDIT_SPACE.get(c, "")
+        skill_md = skills_root / c / "SKILL.md"
+        lines.append(f"- **{c}** — {summary}")
+        if edit:
+            lines.append(f"  - Allowed edits: {edit}")
+        if skill_md.exists():
+            lines.append(f"  - Full guidance (read if you need the boundaries): {skill_md}")
+    return "\n".join(lines)
+
+
+def _algorithm_brief(current_val: SplitResult, algorithm: str) -> str:
+    """How acceptance works, so the optimizer aims for a real, significant gain."""
+    return (
+        "## How your edit is judged\n"
+        f"Algorithm: {algorithm}. Your edited candidate is re-scored on the SAME held-out "
+        f"val tasks and compared to the current best (val reward {current_val.reward:.3f}). "
+        "It is ACCEPTED only if the per-task improvement clears a significance bar (a noise "
+        "margin), so a tiny or lucky change is rejected. Aim for a real, generalizing gain "
+        "across a CLASS of failures — not a one-off patch to a single task (that overfits "
+        "and gets rejected or hurts the held-out test)."
+    )
+
+
+def _classify(per):
+    """Split focus tasks into infra-errored / always-failing / flaky / solid.
+
+    Uses the AGGREGATE reward (mean over trials), so a task that passes only some
+    of the time is 'flaky' (0 < reward < 1) — a sometimes-good behavior to make
+    CONSISTENT — distinct from an always-failing task (reward ~ 0) whose root cause
+    must be fixed. (Per-task feedback is from the last trial and can disagree with a
+    graded mean; the reward is the honest signal, so we classify by it.)"""
+    errored = [pt for pt in per if _is_infra(pt)]
+    rest = [pt for pt in per if not _is_infra(pt)]
+    eps = 1e-9
+    always_fail = [pt for pt in rest if (pt.get("reward", 0) or 0) <= eps]
+    flaky = [pt for pt in rest if eps < (pt.get("reward", 0) or 0) < 1.0 - eps]
+    solid = [pt for pt in rest if (pt.get("reward", 0) or 0) >= 1.0 - eps]
+    return errored, always_fail, flaky, solid
+
+
+def _fmt(pt) -> str:
+    return f"- {pt.get('task_id')} (reward {float(pt.get('reward', 0) or 0):.2f}): " \
+           f"{str(pt.get('feedback', '')).strip()[:400]}"
+
+
+def _focus_instructions(current_val: SplitResult, focus_ids, label: str,
+                        capabilities=None, algorithm: str = "hill-climb") -> str:
+    """Build one iteration's INSTRUCTIONS: analyze → ideate → edit, economically.
+
+    The optimizer is told (a) the recurring problems to fix and (b) the
+    sometimes-good behaviors to make consistent, what edit space it may use (the
+    selected capability skills), how acceptance works, and to be economical.
+    """
     per = current_val.per_task
     if focus_ids is not None:
         per = [pt for pt in per if pt.get("task_id") in set(focus_ids)]
-    passed = [pt for pt in per if (pt.get("reward", 0) or 0) >= 1.0]
-    failing = [pt for pt in per if (pt.get("reward", 0) or 0) < 1.0]
-
-    actionable = [pt for pt in failing if not _is_infra(pt)]
-    errored = [pt for pt in failing if _is_infra(pt)]
+    errored, always_fail, flaky, solid = _classify(per)
+    n = len(per)
 
     lines = [
-        "# Optimize the capability",
+        "# Optimize the capability — analyze first, then make ONE targeted edit",
         "",
-        f"Focus: {label}. Current val reward: {current_val.reward:.3f} "
-        f"({len(passed)}/{len(per)} tasks already pass). Edit the capability files in "
-        "this working directory to raise the reward on the ACTIONABLE failures below.",
+        f"Focus: {label}. Current val reward {current_val.reward:.3f}: "
+        f"{len(solid)} solid / {len(flaky)} flaky / {len(always_fail)} failing"
+        + (f" / {len(errored)} infra-errored" if errored else "") + f" of {n} tasks.",
+        "",
+        "Work in three steps and STOP after step 3:",
+        "",
+        "## Step 1 — Analyze (read the traces + the current capability)",
+        "Read the capability files in this working directory and the failing/flaky traces "
+        "below. Identify, with evidence:",
+        "  (a) the MAIN RECURRING problems that drive the metric down — cluster the failures "
+        "by shared root cause (same missing step, same mis-used tool, same misread field); "
+        "name the cluster and the tasks in it, biggest cluster first.",
+        "  (b) the GOOD behaviors that happen only SOMETIMES (the flaky tasks below pass on "
+        "some trials and fail on others) — identify what the agent does on the good runs "
+        "that we want to make CONSISTENT.",
+        "",
+        "## Step 2 — Ideate",
+        "Propose the single best, targeted edit (or a tight set) that directly addresses the "
+        "biggest cluster from (a) and reinforces (b). It must be a CONCRETE edit to the "
+        "capability (specific file + change), not vague advice, and must generalize across "
+        "the class — not patch one task.",
+        "",
+        "## Step 3 — Edit and stop",
+        "Apply the edit to the capability files here, then STOP. Do not re-run evaluation "
+        "yourself; the harness re-scores you.",
         "",
     ]
+
+    if always_fail:
+        lines.append(f"## (a) {len(always_fail)} ALWAYS-failing task(s) — fix the shared root cause:")
+        lines += [_fmt(pt) for pt in always_fail[:10]]
+        lines.append("")
+    if flaky:
+        lines.append(f"## (b) {len(flaky)} FLAKY task(s) — pass sometimes; make the good behavior consistent:")
+        lines.append("(reward is the mean over trials — the honest signal; the feedback line is "
+                     "from the LAST trial and may say 'passed' even when the mean is below 1.)")
+        lines += [_fmt(pt) for pt in flaky[:8]]
+        lines.append("")
+    if not always_fail and not flaky:
+        lines.append("## No actionable failures in focus — seek a robustness/generalization gain "
+                     "that does not regress the solid tasks.")
+        lines.append("")
     if errored:
         ids = ", ".join(str(pt.get("task_id")) for pt in errored[:25])
         lines += [
             f"## Ignore — {len(errored)} task(s) failed with run/infrastructure errors",
-            "These are environment noise (a flaky/aborted run), NOT a capability problem; "
-            "no edit can fix them, so do not change anything on their account: " + ids,
+            "Environment noise (a flaky/aborted run), NOT a capability problem; no edit can "
+            "fix them, so do not change anything on their account: " + ids,
             "",
         ]
-    lines.append(f"## {len(actionable)} actionable failing task(s) — find the COMMON rule across them:")
-    for pt in actionable[:10]:
-        lines.append(f"- {pt.get('task_id')}: {str(pt.get('feedback', ''))[:500]}")
-    if not actionable:
-        lines.append("- (no actionable failures in focus; seek robustness/generalization gains)")
+
+    cap = _capability_brief(capabilities)
+    if cap:
+        lines += [cap, ""]
+    lines += [_algorithm_brief(current_val, algorithm), ""]
+    lines += [
+        "## Be economical",
+        "Be analytical but to the point: minimal thinking out loud, no narration or "
+        "restating these instructions, no exploring unrelated files. Do exactly what is "
+        "needed for ONE good edit and finish. Do not loop or burn turns/tokens.",
+    ]
     return "\n".join(lines)
 
 
@@ -590,6 +728,7 @@ def hill_climb_loop(
     algorithm: str = "hill_climb",
     no_regression: bool = False,
     store=None,
+    capabilities=None,
 ) -> dict:
     """The loop behind the ``hill-climb`` skill's three ``--focus`` schedules
     (all / cyclic / hardest-first).
@@ -624,7 +763,8 @@ def hill_climb_loop(
             label = f"task {focus_ids[0]}" if focus_ids else "train"
         else:
             focus_ids, label = None, focus
-        instructions = _focus_instructions(current_val, focus_ids, label)
+        instructions = _focus_instructions(current_val, focus_ids, label,
+                                            capabilities=capabilities, algorithm=algorithm)
         step = run_step(
             adapter, run_dir=run_dir, parent_dir=run_dir.candidate_dir(run_dir.best_id),
             optimizer=optimizer, instructions=instructions, current_val=current_val,
