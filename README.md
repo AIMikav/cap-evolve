@@ -12,7 +12,7 @@
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![deps](https://img.shields.io/badge/runtime%20deps-0%20(stdlib)-success)
 ![license](https://img.shields.io/badge/license-MIT-informational)
-![skills](https://img.shields.io/badge/agent%20skills-19-7c5cff)
+![skills](https://img.shields.io/badge/agent%20skills-18-7c5cff)
 
 **Optimize any AI agent's capabilities — its skills, tools/MCP, and prompts —
 against your own eval. Host-agnostic. Honest train/val/test. Every iteration
@@ -41,8 +41,7 @@ honest number you can trust.
 **Prerequisites:** Python 3.10+ and git — that's all for this example (it's
 **zero-API**, so no model key needed). A *real* optimization additionally needs a
 coding-agent CLI to act as the optimizer (e.g. `claude`, `codex`, `gemini`) plus
-its API key — see [Optimize your own](#optimize-your-own-skill-tool-or-agent). Some
-benchmarks (e.g. skills-bench) also need Docker.
+its API key — see [Optimize your own](#optimize-your-own-skill-tool-or-agent).
 
 **Step 1 — verify the install with a real, zero-API run** (the `toy_calc` example:
 a deterministic agent whose score depends on its system prompt; the `mock` optimizer
@@ -87,9 +86,9 @@ Open the coding agent you already use (**Claude Code**, Codex, Gemini CLI, openc
 …) at the repo root and tell it to follow `RUN.md`. It loads the `intake` skill, asks
 you for anything missing, **writes the adapter for you**, runs the `cap-evolve check` gate,
 then the full optimize → significance-gate → sealed-test → report loop, and prints the
-dashboard path. (This is exactly how [`examples/date_tool`](examples/date_tool) was
-built — the optimizer agent wrote the adapter from scratch and improved the tool
-**0.125 → 1.0**, no human edits.)
+dashboard path. (This is exactly how [`examples/tau2_airline`](examples/tau2_airline)
+was onboarded — paste [`examples/tau2_airline/PROMPT.md`](examples/tau2_airline/PROMPT.md)
+and the agent clones + installs the benchmark, writes the adapter, and runs the loop.)
 
 Give it the details `intake` needs up front (anything you omit, it will ask for — and
 will **never fabricate a NEEDED input**). Copy this template and fill it in:
@@ -146,30 +145,35 @@ cap-evolve run --spec capevolve.yaml --max-usd 10 --max-iterations 5 \
                --optimizer-max-turns 30            # claude-code → --max-turns 30 per step
 ```
 
-**Worked example — tau2-bench airline, from scratch** (this is the bundled
-[`examples/tau2_airline`](examples/tau2_airline); the adapter is provided, so the agent
-just wires the inputs and runs):
+**Worked example — tau2-bench airline, onboarded from a single prompt.** The bundled
+[`examples/tau2_airline`](examples/tau2_airline) shows cap-evolve taking a **brand-new
+benchmark** from one paste-the-prompt to an honest, optimized result. You don't pre-install
+anything: intake **clones + installs tau2-bench**, wires IBM RITS, writes the adapter,
+runs the `cap-evolve check` gate, then the full loop with a **live capybara dashboard**.
 
-```text
-Follow RUN.md to run a cap-evolve optimization:
-# 1. CAPABILITY: [system-prompt, tools]  (optimize the airline policy AND the tool docstrings/code)
-#    local path: examples/tau2_airline/seed_caps   (policy/policy.md + tools/tools.py)
-# 2. BENCHMARK: tau2-bench airline; repo local at ../tau2-bench; tasks via "adapter" (50 airline tasks)
-#    splits: an honest holdout (e.g. 30/10/10) via a split_ids.json, or all 50 as
-#    train/val/test for a no-holdout fit metric (the engine logs a splits_warning)
-# 3. RUNNER: agent AND user simulator = watsonx/openai/gpt-oss-120b via IBM RITS;
-#    credential RITS_API_KEY in the repo-root .env; tau concurrency 7 (TAU2_MAX_CONCURRENCY=7)
-# 4. SCORER: tau2's own task reward in [0,1] (required actions performed + info communicated);
-#    objective = maximize mean reward on val
-# 5. OPTIMIZER: ibm-bob  (or claude-code @ claude-opus-4-6); credential BOBSHELL_API_KEY (or ANTHROPIC_API_KEY)
-# 6. BUDGET: algorithm hill-climb (--focus all); max_iterations 20; num_trials 5; gate significant (k_se 0.5)
-#            max_usd 50 (total cap); optimizer_max_turns 40 (claude-code per-step cap); max_metric_calls 0
-#            (or algorithm gepa / skillopt for the sample-efficient flagships)
+- **Paste the prompt:** [`examples/tau2_airline/PROMPT.md`](examples/tau2_airline/PROMPT.md)
+  — give it to Claude Code at the repo root and say *"follow RUN.md."* It is the exact
+  intake input: capability `[system-prompt, tools]` (airline **policy + tools**, jointly),
+  benchmark tau2-bench airline (git URL + `pip install -e`), runner `openai/gpt-oss-120b`
+  via RITS as **both agent and user simulator**, scorer = tau2's task reward, optimizer
+  `claude-code @ claude-opus-4-6`, hill-climb, all 50 tasks, 10 trials.
+- **Or run the executable transcript** of that onboarding directly (two commands):
+
+```bash
+# RITS creds in repo-root .env (RITS_API_KEY, RITS_API_URL); be logged into Claude Code
+bash examples/tau2_airline/setup.sh   # intake onboarding: install cap-evolve + clone/install
+                                      # tau2-bench (records the commit) + scaffold project
+                                      # + wire the adapter/RITS shim/seed + cap-evolve check (hard gate)
+bash examples/tau2_airline/run.sh     # cap-evolve run --dashboard auto: full run + live capybara dashboard
 ```
 
-The exact, copy-pasteable commands plus two real autonomous runs (hill-climb/ibm-bob
-and gepa/claude-code, with dashboards) are in
-[`examples/tau2_airline/run_full/README.md`](examples/tau2_airline/run_full/README.md).
+Key facts of this run: the RITS runner uses `gpt-oss-120b` as **both** agent and user
+simulator; the optimizer is `claude-opus-4-6`; each iteration spends under a per-iteration
+`$` cap (`--max-budget-usd`, enforced by the Claude CLI itself); acceptance is the **paired
+significance gate**; every iteration is a **git commit**; and the **live dashboard** shows
+per-iteration optimizer + runner **cost & time** plus the one-time **intake cost**. Full
+walkthrough: [`examples/tau2_airline/DEMO.md`](examples/tau2_airline/DEMO.md). Reproduce
+from zero: [docs/REPRODUCE_tau2.md](docs/REPRODUCE_tau2.md).
 
 ### Path B — drive it yourself with the `cap-evolve` CLI
 ```bash
@@ -199,10 +203,8 @@ data, swap `capabilities` in `capevolve.yaml`:
 
 | You want to optimize… | Copy this example | `capabilities:` |
 |---|---|---|
-| a **tool's code** | [`examples/date_tool`](examples/date_tool) | `[tools]` |
-| a **skill package** (`SKILL.md`) | [`examples/skills_bench`](examples/skills_bench) | `[skill-package]` |
+| a simple **prompt** (zero-API proof) | [`examples/toy_calc`](examples/toy_calc) | `[system-prompt]` |
 | a **system prompt + tools** (real agent) | [`examples/tau2_airline`](examples/tau2_airline) | `[system-prompt, tools]` |
-| a simple **prompt** / extractor | [`examples/toy_calc`](examples/toy_calc) · [`examples/json_extract`](examples/json_extract) | `[system-prompt]` |
 
 ### Pointing it at your own benchmark
 Your benchmark plugs in **only** through the adapter — nothing else changes:
@@ -221,18 +223,14 @@ pass^k, the sealed test, and the dashboard are all handled for you.
 ## Results
 
 Real [tau2-bench](https://github.com/sierra-research/tau2-bench) **airline** run —
-optimizing the airline **policy + tools together** with a Claude-Opus optimizer and
-`gpt-oss-120b` as both agent and user simulator, over all 50 tasks:
+optimizing the airline **policy + tools together** with a `claude-opus-4-6` optimizer and
+`gpt-oss-120b` as both agent and user simulator (via IBM RITS), over all 50 tasks:
 
-| | reward |
-|---|---|
-| baseline (seed policy + default tool docs) | **0.46** |
-| **optimized** (policy + tool docstrings, 8 iterations) | **0.80** · pass^1 0.80 · pass@2 0.87 |
+<!-- RESULTS_PLACEHOLDER: baseline/best/test + pass^k to be filled from the latest run -->
 
-**+0.34** on 50 tasks (31/50 fully solved) — every iteration a git commit, the
-optimizer's reasoning kept in `STATE.md` / `rejected.jsonl`. Exact commands, inputs,
-and intake answers: [docs/REPRODUCE_tau2.md](docs/REPRODUCE_tau2.md); measured
-numbers: [examples/tau2_airline/RESULTS.md](examples/tau2_airline/RESULTS.md).
+> Numbers come from the latest run in [`examples/tau2_airline/run_full/`](examples/tau2_airline/run_full/)
+> (`report.md` / `dashboard.html`); every iteration is a git commit. Reproduce from
+> zero: [docs/REPRODUCE_tau2.md](docs/REPRODUCE_tau2.md).
 
 ## Supported agent hosts
 
@@ -330,7 +328,7 @@ Whitespace: **skills-native + host-agnostic + honesty enforced in code.** Roadma
 
 ## Skill library
 
-**19 skills.** The library was deliberately collapsed: the 8 per-CLI optimizer
+**18 skills.** The library was deliberately collapsed: the 8 per-CLI optimizer
 skills became **one** `run-optimizer` skill + a one-row-per-optimizer
 `optimizers/registry.yaml`, and the three hill-climb clones became **one**
 `hill-climb` skill with `--focus`.
@@ -350,9 +348,11 @@ slow update; arXiv:2605.23904) are the sample-efficient **flagships**; `hill-cli
 (`--focus all|cyclic|hardest-first`) is the simple global-best baseline climber.
 
 ## Examples
-- [`examples/toy_calc`](examples/toy_calc) — zero-API deterministic proof (the CI gate).
-- [`examples/json_extract`](examples/json_extract) — a new benchmark from scratch (adapter + data only).
-- [`examples/tau2_airline`](examples/tau2_airline) — the real tau2-bench run above.
+
+| Example | What it is |
+|---|---|
+| [`examples/toy_calc`](examples/toy_calc) | zero-API deterministic proof — the CI gate (no model key needed). |
+| [`examples/tau2_airline`](examples/tau2_airline) | the real tau2-bench airline run, onboarded from a single prompt ([`PROMPT.md`](examples/tau2_airline/PROMPT.md) → [`setup.sh`](examples/tau2_airline/setup.sh) → [`run.sh`](examples/tau2_airline/run.sh); see [`DEMO.md`](examples/tau2_airline/DEMO.md)). |
 
 ## Extending
 A new capability / algorithm / optimizer is **one folder** — clone `templates/skill`,

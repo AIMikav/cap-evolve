@@ -76,11 +76,12 @@ integration*: scaffold → implement the 4 adapter methods → `cap-evolve check
 before any budget is spent. The using-agent (e.g. the chosen optimizer) can run
 this whole integration autonomously.
 
-> **Worked example (from scratch, integration by the optimizer agent):**
-> `examples/date_tool/` — the intake script scaffolds the project, the **optimizer
-> agent** implements the adapter from the stub until `cap-evolve check` passes, then
-> optimizes the capability (a tool) 0.125 → 1.0. It documents exactly what a SCRIPT
-> does vs what the optimizer agent does vs what you do.
+> **Worked example (onboard a new benchmark from a prompt):**
+> `examples/tau2_airline/` (see its `PROMPT.md`) — the intake/onboarding step
+> **installs the benchmark** (clones tau2-bench) and the **optimizer agent** wires the
+> adapter from the stub until `cap-evolve check` passes, then optimizes the policy +
+> tools. `setup.sh` is the executable transcript of that onboarding; `run.sh` runs the
+> full optimization with the live dashboard.
 
 ## What good vs bad intake looks like
 - **Good:** every NEEDED input resolved to a real path or `"adapter"`; splits and
