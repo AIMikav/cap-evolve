@@ -18,6 +18,20 @@ export interface RunSummary {
 
 export type NodeStatus = 'seed' | 'accepted' | 'rejected' | 'failed'
 
+/** One row of reduced["summary"].per_iteration — optimizer vs runner cost/time per step.
+ * Cost fields are nullable (runner cost is often $0/null on RITS); time is always set. */
+export interface PerIterationCost {
+  iteration: number
+  candidate: string
+  status: NodeStatus
+  optimizer_usd: number | null
+  optimizer_seconds: number
+  optimizer_tokens: number
+  runner_usd: number | null
+  runner_seconds: number
+  runner_tokens: number
+}
+
 /** A candidate in reduced["graph"].nodes. */
 export interface GraphNode {
   id: string
@@ -30,6 +44,8 @@ export interface GraphNode {
   feedback?: Record<string, string>
   cost_usd?: number | null
   tokens?: number | null
+  opt_cost_usd?: number | null
+  opt_tokens?: number | null
   seconds?: number | null
   optimizer_seconds?: number | null
   runner_seconds?: number | null
@@ -70,6 +86,8 @@ export interface RunSummaryDetail {
   }
   tokens?: number | null
   tokens_by_role?: { runner: number; optimizer: number; intake: number }
+  per_iteration?: PerIterationCost[]
+  intake?: { usd: number; seconds: number; tokens: number }
   budget?: {
     max_iterations?: number
     max_metric_calls?: number

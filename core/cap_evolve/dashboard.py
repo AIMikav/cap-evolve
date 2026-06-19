@@ -285,6 +285,10 @@ def reduce_run(run_dir) -> dict:
             "feedback": fb,
             "cost_usd": ev.get("cost_usd") or 0.0,
             "tokens": ev.get("tokens") or 0,
+            # Per-iteration optimizer cost/tokens (RITS runner cost is often $0/null,
+            # but the optimizer agent CLI reports opt_cost_usd / opt_tokens per step).
+            "opt_cost_usd": ev.get("opt_cost_usd") or ev.get("optimizer_cost_usd"),
+            "opt_tokens": ev.get("opt_tokens") or ev.get("optimizer_tokens") or 0,
             "seconds": (ev.get("runner_seconds") or 0.0) + (ev.get("optimizer_seconds") or 0.0),
             "optimizer_seconds": ev.get("optimizer_seconds") or 0.0,
             "runner_seconds": ev.get("runner_seconds") or 0.0,
@@ -377,6 +381,31 @@ def reduce_run(run_dir) -> dict:
     except Exception:  # noqa: BLE001
         sealed = bool(final)
 
+    # --- per-iteration cost/time (optimizer vs runner), intake row ------
+    # Time is ALWAYS available (optimizer_seconds + runner seconds per step);
+    # cost is shown only when present (runner cost is often $0/null on RITS).
+    per_iteration = []
+    for n in sorted((x for x in nodes.values() if (x.get("iteration") or 0) > 0),
+                    key=lambda x: x.get("iteration") or 0):
+        runner_cost = n.get("cost_usd")
+        per_iteration.append({
+            "iteration": n.get("iteration"),
+            "candidate": n["id"],
+            "status": n.get("status"),
+            "optimizer_usd": n.get("opt_cost_usd"),  # nullable
+            "optimizer_seconds": round(n.get("optimizer_seconds") or 0.0, 2),
+            "optimizer_tokens": int(n.get("opt_tokens") or 0),
+            # Runner cost is nullable: only surface a real number, not a synthetic 0.
+            "runner_usd": (float(runner_cost) if runner_cost else None),
+            "runner_seconds": round(n.get("runner_seconds") or 0.0, 2),
+            "runner_tokens": int(n.get("tokens") or 0),
+        })
+    intake = {
+        "usd": round(intake_usd, 4),
+        "seconds": round(intake_secs, 2),
+        "tokens": int(intake_tokens),
+    }
+
     delta_pct = None
     if baseline_val not in (None, 0) and best_val is not None:
         delta_pct = round((best_val - baseline_val) / abs(baseline_val) * 100.0, 1)
@@ -408,6 +437,8 @@ def reduce_run(run_dir) -> dict:
         "tokens": tokens,
         "tokens_by_role": {"runner": tokens - opt_tokens - int(intake_tokens),
                            "optimizer": opt_tokens, "intake": int(intake_tokens)},
+        "per_iteration": per_iteration,
+        "intake": intake,
         "budget": (run_dir.budget.to_dict() if sp is not None else None),
         "spent": (sp.to_dict() if sp is not None else None),
         "budget_warnings": [e for e in events if e.get("kind") == "budget_warning"],
@@ -987,6 +1018,49 @@ function sec(title){const s=$('section');s.append($('h2',{text:title}));main.app
   el.append(svg('path',{d,fill:'none',stroke:'#4493f8','stroke-width':2}));
   el.append(svg('text',{x:W-m.r,y:H-8,fill:'#8b949e','font-size':10,'text-anchor':'end'})).textContent=`$${xmax.toFixed(4)} total`;
   s.append(el);
+})();
+
+/* ---------- 6c. Cost & time per iteration (optimizer vs runner) + intake ---------- */
+(function(){
+  const rows=S.per_iteration||[];
+  const intake=S.intake||{usd:0,seconds:0,tokens:0};
+  const s=sec('Cost & time per iteration');
+  // intake row — always shown, even at $0, so it's clear intake spent nothing.
+  const dsec=v=>{v=Math.max(0,Math.round(v||0));if(v<60)return v+'s';
+    const m=Math.floor(v/60);if(m<60)return m+'m '+(v%60)+'s';return Math.floor(m/60)+'h '+(m%60)+'m';};
+  const intakeRow=$('div',{class:'phase',style:'margin-bottom:12px'});
+  intakeRow.innerHTML='<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'+
+    'background:var(--accent);margin-right:6px;vertical-align:-1px"></span>'+
+    '<b>Intake</b> &nbsp; cost <b>$'+(intake.usd||0).toFixed(4)+'</b>'+
+    (intake.usd===0?' <span class="muted">(spent $0)</span>':'')+
+    ' &nbsp; time <b>'+dsec(intake.seconds)+'</b> &nbsp; <span class="muted">'+
+    (intake.tokens||0).toLocaleString()+' tok</span>';
+  s.append(intakeRow);
+  if(!rows.length){s.append($('p',{class:'muted',text:'No iterations recorded yet.'}));return;}
+  const optMax=Math.max(1e-6,...rows.map(r=>r.optimizer_seconds||0));
+  const runMax=Math.max(1e-6,...rows.map(r=>r.runner_seconds||0));
+  const t=$('table');
+  t.append($('tr',{},$('th',{text:'iter'}),$('th',{text:'candidate'}),
+    $('th',{class:'r',text:'opt $'}),$('th',{html:'<span style="color:var(--accent)">opt time</span>'}),
+    $('th',{class:'r',text:'run $'}),$('th',{html:'<span style="color:var(--ok)">run time</span>'})));
+  const bar=(secv,max,col)=>{const frac=max>0?Math.min(1,secv/max):0;
+    const wrap=$('div',{style:'display:flex;align-items:center;gap:8px'});
+    const track=$('div',{style:'height:6px;width:64px;border-radius:6px;overflow:hidden;background:var(--card2)'});
+    track.append($('div',{style:`height:100%;border-radius:6px;width:${frac*100}%;background:${col}`}));
+    wrap.append(track,$('span',{class:'muted num',text:dsec(secv)}));return wrap;};
+  rows.forEach(r=>{
+    t.append($('tr',{},
+      $('td',{class:'num muted',text:r.iteration}),
+      $('td',{},$('code',{text:r.candidate})),
+      $('td',{class:'r num',text:r.optimizer_usd!=null?'$'+(+r.optimizer_usd).toFixed(4):'—'}),
+      $('td',{},bar(r.optimizer_seconds||0,optMax,'#4493f8')),
+      $('td',{class:'r num',text:r.runner_usd!=null?'$'+(+r.runner_usd).toFixed(4):'—'}),
+      $('td',{},bar(r.runner_seconds||0,runMax,'#3fb950'))));
+  });
+  s.append(t);
+  s.append($('div',{class:'legend',html:'<span><i style="background:#4493f8"></i>optimizer time</span>'+
+    '<span><i style="background:#3fb950"></i>runner time</span>'+
+    '<span class="muted">$ shown when available (runner cost is often $0/null) · time always</span>'}));
 })();
 
 /* ---------- 7. Annotations / diagnoses stream ---------- */
