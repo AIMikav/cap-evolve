@@ -116,6 +116,57 @@ the live capybara UI; the `setup.sh` flag `--dashboard` / `--no-dashboard` toggl
 installing that server. Full walkthrough: [`DEMO.md`](examples/tau2_airline/DEMO.md);
 reproduce from zero: [`docs/REPRODUCE_tau2.md`](docs/REPRODUCE_tau2.md).
 
+This is the exact prompt that produced this example — paste it to your coding agent
+and say *"follow RUN.md"*:
+
+```text
+Follow RUN.md to run a cap-evolve optimization. Onboard this as a brand-new
+benchmark — the intake/integration step should CLONE + INSTALL it (not assume it
+exists). Here is everything intake needs:
+
+# 1. CAPABILITY TO OPTIMIZE  (a copy is edited each iteration; the original is never touched)
+- type:         [system-prompt, tools]      # the airline POLICY and the TOOLS, jointly
+- tools means:  edit tool docstrings/descriptions; edit tool behavior/code; and
+                ADD/REMOVE tools, including composite tools that call existing tools
+- seed:         tau2-bench's canonical airline policy + its airline tool set
+
+# 2. BENCHMARK / DATASET  (the eval) — INSTALL IT DURING INTAKE
+- benchmark:    tau2-bench, airline domain
+- repo:         https://github.com/sierra-research/tau2-bench   (latest main; record the resolved commit)
+- install:      git clone as a sibling dir ../tau2-bench, then `pip install -e ../tau2-bench`
+- tasks:        "adapter" — the adapter loads all 50 airline tasks from tau2
+                (tau2.domains.airline.environment.get_tasks)
+- splits:       all 50 tasks as train = val = test  (no-holdout fit metric; the engine
+                logs a splits_warning and the report flags the test number as a fit metric)
+
+# 3. RUNNER  (the agent under test) + MODELS + CREDENTIALS
+- how to run:   tau2's own batch runner (adapter.run_batch -> tau2.runner.run_tasks)
+- agent AND user simulator:  openai/gpt-oss-120b  via IBM RITS
+- RITS wiring:  litellm model "hosted_vllm/openai/gpt-oss-120b" + per-call api_base +
+                extra_headers {"RITS_API_KEY": ...}  (NO litellm monkeypatch, NO tau2 fork)
+- credentials:  RITS_API_KEY (+ RITS_API_URL) in the repo-root .env
+- concurrency:  TAU2_MAX_CONCURRENCY=100
+
+# 4. SCORER  (what to optimize against)
+- metric:       tau2's own task reward in [0,1] (required actions performed + info communicated)
+- feedback:     gold-AWARE but gold-SAFE — which required actions/info were missed (the learning signal)
+- objective:    maximize mean reward on the VAL split
+
+# 5. OPTIMIZER  (proposes the edits) + MODEL + CREDENTIALS
+- optimizer:    claude-code
+- model:        claude-opus-4-6
+- credentials:  a logged-in Claude Code session (or ANTHROPIC_API_KEY)
+
+# 6. BUDGET / GATE
+- algorithm:        hill-climb  (--focus all)
+- max_iterations:   10          num_trials: 10
+- per-iteration optimizer $ cap:  optimizer_usd_per_iter 40   (claude --max-budget-usd, enforced by the CLI itself)
+- optimizer_max_turns: 400      (generous; the $ cap is the real per-iteration ceiling)
+- max_usd: 400      max_optimizer_usd: 400
+- gate:             significant (paired), k_se 0.2
+- store:            git          (every iteration committed for an inspectable process)
+```
+
 ## Optimize your own
 
 To optimize **your** capability against **your** benchmark, you wire one small
@@ -142,11 +193,79 @@ keeps eval honest). Two ways to get there:
 **A — let your coding agent build it (no Python from you).** Open the coding agent
 you already use at the repo root and tell it to follow `RUN.md`. It loads the
 `intake` skill, asks for anything missing (never fabricating a NEEDED input),
-writes the adapter, runs `cap-evolve check`, then the full loop. Give it the brief
-intake needs: capability type(s), benchmark repo + install, runner model +
-credentials, scorer, optimizer + model, budget, and gate.
+writes the adapter, runs `cap-evolve check`, then the full loop.
 [`examples/tau2_airline/PROMPT.md`](examples/tau2_airline/PROMPT.md) is a complete
-worked brief.
+worked brief (also embedded verbatim in the
+[tau2-bench section](#tau2-bench-example-real) above).
+
+Fill this in and paste it to your coding agent with *"follow RUN.md"* — intake asks
+for anything you omit and never fabricates a needed input:
+
+```text
+Follow RUN.md to run a cap-evolve optimization on MY benchmark/agent. If the
+benchmark is not installed yet, the intake/integration step should CLONE + INSTALL
+it. Here is everything intake needs (fill each field; leave a field blank only if
+you want intake to ask):
+
+# 1. CAPABILITY  (what gets optimized — a COPY is edited each iteration; the original is never touched)
+- type:    <one or a list of: system-prompt | tools | mcp-tool | skill-package>
+           # system-prompt = a prompt/policy text file; tools = the agent's OWN tools;
+           # mcp-tool = tools served by an EXTERNAL MCP server (only docs/exposed-set edits);
+           # skill-package = an Agent Skill dir (SKILL.md + refs + scripts). Combine, e.g. [system-prompt, tools].
+- seed:    <path to the seed artifact to optimize, e.g. policy/policy.md | tools.json | skills/<name>/>
+- NOTE for `tools`: the optimizer may edit tool docstrings/descriptions AND tool
+           behavior/code, AND add/remove COMPOSITE tools that call existing tools
+           (wrapping rules, loops, argument normalization) — not just reword docs.
+
+# 2. BENCHMARK / DATASET  (the eval)
+- benchmark:  <name, e.g. my-bench / SWE-bench-lite / a homegrown suite>
+- repo:       <local path OR git URL>            # where the benchmark code/data lives
+- install:    <how to install it, e.g. `pip install -e ../<bench>`; RECORD the resolved commit for reproducibility>
+- tasks:      <path to tasks.jsonl  OR  "adapter">   # "adapter" = adapter.tasks(split) builds them in-code
+- task format: each task = id + input + gold/criterion
+              # one JSON object per line: {"id": ..., "input": ..., "target"/"criterion": ...}
+- splits:     <one of:>
+              #  seeded ratio   -> split_seed + split_train/val/test (default 0.5/0.25/0.25)
+              #  explicit       -> split_ids.json  {"train":[...],"val":[...],"test":[...]} (e.g. an official split)
+              #  no-holdout fit -> train == val == test == all ids (report FLAGS the test number as a fit metric)
+
+# 3. RUNNER  (the agent under test) + MODELS + CREDENTIALS
+- how to run one task:  <in-process call | subprocess | HTTP endpoint
+                         | the benchmark's OWN batch runner -> implement adapter.run_batch instead of run_target>
+- runner model(s):      <model id(s) the agent under test uses>
+- credentials:          <env vars / repo-root .env keys, e.g. OPENAI_API_KEY, WATSONX_*, RITS_API_KEY — never hardcode a secret>
+- custom/OpenAI-compatible endpoint (vLLM, IBM RITS, a gateway):
+                        <api_base + any custom auth header>
+                        # pass via the runner's LLM config (most benchmarks forward extra kwargs to litellm);
+                        # prefer PER-CALL config — no monkeypatch, no benchmark fork
+- concurrency knob:     <e.g. an env var / max-concurrency setting the runner honors>
+
+# 4. SCORER  (what to optimize against)
+- metric:     <exact-match | reward in [0,1] | rubric | pass/fail rule>
+- source:     <the benchmark's own verifier  OR  your score() function in adapter.py>
+- feedback:   must be GENERAL and gold-SAFE — it is the learning signal; never leak the gold answer
+- objective:  maximize mean reward on the VAL split
+
+# 5. OPTIMIZER  (proposes the edits) + MODEL + CREDENTIALS
+- optimizer:   <claude-code | codex | gemini-cli | opencode | openclaw | ibm-bob | generic | mock>
+- model:       <backend-specific model id>
+- credentials: <e.g. ANTHROPIC_API_KEY or a logged-in Claude Code session; BOBSHELL_API_KEY for ibm-bob>
+
+# 6. BUDGET / GATE
+- algorithm:            <hill-climb (--focus all|cyclic|hardest-first) | gepa | skillopt>
+- max_iterations:       <N — dominant cost knob>
+- num_trials:           <>=3 for a stochastic agent; 1 only for a deterministic one>   # enables pass^k
+- max_metric_calls:     <0 = unlimited; else stop after N runner evals>
+- max_usd:              <total $ cap over runner + optimizer + intake; 0 = unlimited>
+- max_optimizer_usd:    <cumulative optimizer-only $ cap; 0 = unlimited>
+- optimizer_usd_per_iter: <PER-ITERATION $ cap enforced by the optimizer CLI itself, e.g. claude `--max-budget-usd N`>
+- optimizer_max_turns:  <per-iteration WORK cap passed to the agent CLI, e.g. claude `--max-turns N`>
+- gate:                 <significant (k_se) | strict | threshold>
+                        # significant: accept only if Δ > k_se · SE — k_se is how many standard errors
+                        # the val gain must clear (e.g. 0.2 = lenient, 1.0 = strict) so noise isn't mistaken for progress
+- stall:                <stop after N consecutive rejects; 0 = run all max_iterations>
+- store:                git          # versions every iteration as a commit for an inspectable process
+```
 
 **B — drive the `cap-evolve` CLI yourself.**
 
