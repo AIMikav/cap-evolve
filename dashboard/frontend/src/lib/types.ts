@@ -106,7 +106,7 @@ export interface RunSummaryDetail {
   tokens_by_role?: { runner: number; optimizer: number; intake: number }
   per_iteration?: PerIterationCost[]
   evaluations?: Evaluation[]
-  intake?: { usd: number; seconds: number; tokens: number }
+  intake?: { usd: number; seconds: number; tokens: number; output_summary?: string; implemented?: string[] }
   budget?: {
     max_iterations?: number
     max_metric_calls?: number

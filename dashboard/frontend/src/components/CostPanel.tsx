@@ -35,6 +35,10 @@ export function CostPanel({ summary }: { summary: RunSummaryDetail }) {
   return (
     <motion.div variants={staggerContainer} initial="hidden" animate="show" className="space-y-4">
       <motion.div variants={fadeUpItem}>
+        <IntakePanel summary={summary} />
+      </motion.div>
+
+      <motion.div variants={fadeUpItem}>
         <Card className="p-4">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-medium">Cost by role</h3>
@@ -96,6 +100,53 @@ export function CostPanel({ summary }: { summary: RunSummaryDetail }) {
         <BudgetMeters summary={summary} />
       </motion.div>
     </motion.div>
+  )
+}
+
+/** Intake summary — the cost/time/tokens the intake phase spent scaffolding the run,
+ * plus the human-readable output_summary and the list of adapter/skill methods it
+ * implemented. Surfaces the `intake` event the CLI logs (falls back to spent-derived
+ * numbers when the event is absent). */
+function IntakePanel({ summary }: { summary: RunSummaryDetail }) {
+  const intake = summary.intake ?? { usd: 0, seconds: 0, tokens: 0 }
+  const implemented = intake.implemented ?? []
+  return (
+    <Card className="p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-sm font-medium">Intake</h3>
+        <span className="text-[11px] text-muted">interview + scaffold the run</span>
+      </div>
+      <div className="grid grid-cols-3 gap-2 text-center">
+        <div className="rounded bg-surface-2 px-2 py-2">
+          <div className="text-[11px] uppercase tracking-wide text-muted">cost</div>
+          <div className="tnum mt-1 text-sm font-semibold">{usd(intake.usd)}</div>
+          {intake.usd === 0 && <div className="text-[11px] text-muted">spent $0</div>}
+        </div>
+        <div className="rounded bg-surface-2 px-2 py-2">
+          <div className="text-[11px] uppercase tracking-wide text-muted">time</div>
+          <div className="tnum mt-1 text-sm font-semibold">{duration(intake.seconds)}</div>
+        </div>
+        <div className="rounded bg-surface-2 px-2 py-2">
+          <div className="text-[11px] uppercase tracking-wide text-muted">tokens</div>
+          <div className="tnum mt-1 text-sm font-semibold">{compactNum(intake.tokens || null)}</div>
+        </div>
+      </div>
+      {intake.output_summary && (
+        <p className="mt-3 whitespace-pre-line text-sm text-muted">{intake.output_summary}</p>
+      )}
+      {implemented.length > 0 && (
+        <div className="mt-3">
+          <div className="mb-1.5 text-[11px] uppercase tracking-wide text-muted">implemented</div>
+          <div className="flex flex-wrap gap-1.5">
+            {implemented.map((m) => (
+              <span key={m} className="rounded bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-foreground">
+                {m}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
   )
 }
 

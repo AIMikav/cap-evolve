@@ -30,9 +30,20 @@ rollouts.
   Feedback}` — GEPA's reflective-dataset shape. This triple lets the optimizer see
   the task, what the agent actually did, and the diagnosis, instead of a bare
   score.
-- **clusters:** failing tasks grouped by a shared feedback signature, so the
+- **clusters:** ALL failing trajectories grouped by shared root cause, so the
   optimizer can fix a whole *class* of failure with one principled edit rather
-  than patching tasks one at a time (and overfitting to each).
+  than patching tasks one at a time (and overfitting to each). "Failing" here is
+  not only zero-score tasks — explicitly include **partial-credit** failures (a
+  task that scored e.g. 0.5 because a write got the wrong arguments) and
+  **communication / omission** failures (the agent did the action but failed to
+  report or confirm the required information). These are real lost score and are
+  routinely missed when only total failures are clustered. Each cluster is
+  **ranked by cost** — how many tasks (and how much aggregate score) it accounts
+  for — so the biggest lever is addressed first. And each cluster is tagged
+  KNOWLEDGE (the agent doesn't know a format/rule/criterion → fix in the prompt)
+  or BEHAVIORAL/execution (the agent knows but skips/fumbles the action, e.g.
+  stalls before a write → fix in code/tools), so the optimizer knows *where* the
+  fix belongs, not just what it is.
 - **kept_good:** tasks already passing — the set the gate's no-regression check
   must protect, so a fix for one cluster does not silently break a passing task.
 
@@ -42,14 +53,24 @@ the per-iteration optimizer INSTRUCTIONS — the optimizer must **analyze before
 edits**, never patch blindly:
 1. **Analyze the trajectories DEEPLY first.** Read the traces closely (not a
    skim) alongside the current capability, and name (a) the MAIN RECURRING root-cause
-   *clusters* (above, biggest first, with evidence) — the rules and workflows the
-   agent botches, the steps it skips, the tools it mis-uses or repeats N times —
-   and (b) the GOOD behaviors that occur only *sometimes* (tasks whose mean reward
-   is between 0 and 1 pass on some trials and fail on others); identify what the
-   good runs do so it can be made CONSISTENT. (Always-failing tasks, mean ≈ 0, are
-   a root-cause fix; flaky tasks are a consistency/reinforcement fix — a different
-   edit. The per-task `Feedback` line is from the *last* trial and can disagree
-   with a graded mean; the reward is the honest signal.) If your coding agent
+   *clusters* — the rules and workflows the agent botches, the steps it skips, the
+   tools it mis-uses or repeats N times. Cluster **ALL** failing trajectories by
+   shared root cause, not only the zero-score ones: include **partial-credit**
+   failures (wrong arguments to a write, a missed required action) and
+   **communication / omission** failures (the action was done but the required
+   info was never reported/confirmed) — these lose real score and are easy to
+   overlook. **Rank the clusters by how much they cost** (tasks affected ×
+   score lost), biggest first, with evidence. For each cluster, label it
+   **KNOWLEDGE** (the agent lacks a format/rule/criterion → fix in the prompt) or
+   **BEHAVIORAL/execution** (the agent knows but skips or fumbles the action — the
+   classic stall before a write, an un-issued call → fix in code/tools): more
+   prose will not fix a behavioral cluster the model already "knew" and skipped.
+   Then name (b) the GOOD behaviors that occur only *sometimes* (tasks whose mean
+   reward is between 0 and 1 pass on some trials and fail on others); identify what
+   the good runs do so it can be made CONSISTENT. (Always-failing tasks, mean ≈ 0,
+   are a root-cause fix; flaky tasks are a consistency/reinforcement fix — a
+   different edit. The per-task `Feedback` line is from the *last* trial and can
+   disagree with a graded mean; the reward is the honest signal.) If your coding agent
    supports parallel sub-agents, fan them out — one per failure cluster or per
    candidate-edit hypothesis — to analyze concurrently, then synthesize; it makes
    each costly iteration deeper and faster.

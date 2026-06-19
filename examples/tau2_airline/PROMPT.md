@@ -28,6 +28,14 @@ exists). Here is everything intake needs:
 
 # 3. RUNNER  (the agent under test) + MODELS + CREDENTIALS
 - how to run:   tau2's own batch runner (adapter.run_batch -> tau2.runner.run_tasks)
+- fast eval:    ALSO implement the optional adapter method
+                run_trials(tasks, ctx, *, n_trials, base_seed) -> {task_id: [Rollout, ...]}.
+                Run ALL num_trials in ONE tau2 run_tasks call with num_trials=N (grouped by
+                sim.trial) at TAU2_MAX_CONCURRENCY=125, and return {task_id: [trial0, trial1, ...]}
+                (len n_trials, trial-ordered). When present, cap-evolve calls it ONCE per candidate
+                instead of looping run_batch per trial; per-trial persistence
+                (rollouts/<split>/<task>__<tag>__t<k>.json) is UNCHANGED so pass^k / SE / resume
+                keep working. This collapses N sequential eval passes into one batched run.
 - agent AND user simulator:  openai/gpt-oss-120b  via IBM RITS
 - RITS wiring:  litellm model "hosted_vllm/openai/gpt-oss-120b" + per-call api_base +
                 extra_headers {"RITS_API_KEY": ...}  (NO litellm monkeypatch, NO tau2 fork)
@@ -65,10 +73,18 @@ exists). Here is everything intake needs:
 - optimizer instructions: author .capevolve/project/optimizer/INSTRUCTIONS.md from the scaffolded
                 template (keep its {{...}} placeholders intact — the harness fills them per
                 iteration), tailoring the guidance + the "READ THESE" pointers (./trajectories/,
-                ./guidance/<cap>/, ./STATE.md, ./MEMORY.md, ../tau2-bench) to this benchmark.
-                For the tools capability, the primary edit is CODE-BEARING tools (a validation tool
-                that enforces a policy rule in code then calls the existing tool and removes the raw
-                one; a workflow tool that collapses a recurring sequence) — not docstring prose.
+                ./guidance/<cap>/, ./guidance/diagnose/SKILL.md, ./guidance/optimizer/claude-code.md,
+                ./STATE.md, ./MEMORY.md, ../tau2-bench) to this benchmark. The authored INSTRUCTIONS
+                must follow the new flow: READ ./MEMORY.md FIRST and never re-propose a rejected
+                approach; address ALL failure clusters each iteration (fan out one subagent per
+                cluster, each in its own worktree, then merge all edits into ONE candidate); and end
+                STATE.md with the rich "## Handover for next iteration" section (approaches tried,
+                lessons, recommendation, what NOT to retry). For the tools capability, the primary
+                edit is CODE-BEARING tools — a validation tool that enforces a rule in code then
+                calls the existing tool and removes the raw one; a workflow tool that collapses a
+                recurring sequence; and a composite WRITE tool that performs a stalled multi-step
+                action in code (then removes the raw write primitives) so the agent cannot analyze,
+                confirm, and then fail to execute — not docstring prose.
 
 # 6. BUDGET / GATE
 - algorithm:        hill-climb  (--focus all)

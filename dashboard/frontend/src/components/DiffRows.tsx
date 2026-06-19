@@ -1,9 +1,8 @@
 import type { DiffFile } from '../lib/types'
 import { cn } from '../lib/cn'
 
-/** Shared diff row styling + file renderer used by IterationsDiff, GitDiff, and the
- * RadialTimeline expand panel — one source of truth for the diff markup so the three
- * views stay identical. */
+/** Shared diff row styling + file renderer used by IterationsDiff and GitDiff —
+ * one source of truth for the diff markup so the views stay identical. */
 export const ROW_CLASS = {
   add: 'bg-accepted/10 text-accepted',
   del: 'bg-rejected/10 text-rejected',

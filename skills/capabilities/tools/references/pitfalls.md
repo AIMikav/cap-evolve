@@ -15,6 +15,38 @@ selection at all.
 - **Fix:** keep failure modes in the description. If anything, make them more
   precise and pair each with what the model should do instead.
 
+## Trying to fix a BEHAVIORAL stall with prose
+The agent analyzes, confirms, then fails to call the write tool and stops. This
+is the single most common — and most expensive — failure, and it is *behavioral*:
+the model already "knows" what to do and skips it. Rewording a docstring or
+adding "always act after confirming" does not fix a behavior the model already
+declined; the traces show those edits failing.
+- **Detect:** failing tasks where the trace contains the analysis/confirmation
+  but no write call; "be sure to act"-style edits that don't move the metric.
+- **Fix:** move the whole action into a composite WRITE tool whose body performs
+  every step (examples §3e), then `remove` the raw write primitives so completing
+  the action is the only path.
+
+## Wrapping a primitive but leaving it exposed
+A validation wrapper or composite achieves nothing if the raw primitive it wraps
+is still in the toolset — the model can call the primitive directly and reproduce
+the exact failure the wrapper was meant to prevent. Observed: optimizers add safe
+wrappers but never `remove` the primitives, so the unsafe path survives.
+- **Detect:** a wrapper/composite was added but the primitive it delegates to is
+  still exposed; traces still show direct calls to the primitive.
+- **Fix:** pair every wrapper/composite with a `remove` of the primitive, unless
+  the primitive is still independently needed for a different, safe purpose.
+
+## Wrong arguments to a write (partial-credit failures)
+A task can fail partway — the right write tool called with the wrong unit, a
+missing field, or an unresolved id — scoring partial credit, not zero. These are
+easy to overlook if you only look at fully-failing tasks.
+- **Detect:** partial-credit tasks whose feedback names a malformed write
+  argument (wrong unit, id not on file, missing required field).
+- **Fix:** a normalize-then-call wrapper that coerces units, resolves ids, and
+  checks the field/method is on file *before* calling the primitive, turning a
+  corrupted write into a clean refusal (examples §3c-bis).
+
 ## Cosmetic rewording that adds no always-true information
 Reflowing sentences, adding commas, or restating the obvious changes the text
 without changing what the model knows. It will not move behavior.

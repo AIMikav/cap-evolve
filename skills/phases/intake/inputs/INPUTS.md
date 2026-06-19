@@ -96,7 +96,15 @@ path, how to obtain it, and the alternatives. Never invent a NEEDED input.
   per-iteration optimizer-prompt TEMPLATE. The scaffold already copies a generic
   default to `project/optimizer/INSTRUCTIONS.md`; the agent CUSTOMIZES it for this
   benchmark (keeping the `{{...}}` placeholders the harness fills) rather than
-  authoring one from scratch. Point this key at the customized file.
+  authoring one from scratch. Point this key at the customized file. The authored
+  instructions must direct the optimizer to: READ and USE all chosen capability
+  skills (`./guidance/<cap>/`), the diagnose skill (`./guidance/diagnose/SKILL.md`),
+  and its own features reference (`./guidance/optimizer/<name>.md`); READ
+  `./MEMORY.md` FIRST and never re-propose a rejected approach; understand the
+  prior-iteration run-dir layout; write the rich `## Handover for next iteration`
+  STATE.md section; address ALL failure clusters each iteration (parallel subagents
+  → merge into one candidate where supported); and prefer code-bearing write/workflow
+  tools over prose for behavioral failures (see intake SKILL.md step 5).
 
 - **gate**: `gate_mode` (significant|strict|threshold|simplicity_tiebreak),
   `gate_k_se` (default 1.0). Add `--no-regression` to forbid breaking passing tasks.

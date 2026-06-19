@@ -48,9 +48,35 @@ Downstream, `implement-and-check` consumes `project`; `baseline` consumes
    `.capevolve/project/optimizer/INSTRUCTIONS.md`: KEEP the `{{...}}` placeholders
    intact (`{{FOCUS_SUMMARY}}`, `{{FAILURES}}`, `{{CAP_BRIEF}}`, `{{ALGO_BRIEF}}`,
    `{{BENCH_REPO}}` — the harness fills these per iteration), but tailor the static
-   guidance and the "READ THESE" pointers (`./trajectories/`, `./guidance/<cap>/`,
-   `./STATE.md`, `./MEMORY.md`, and the benchmark repo) to this benchmark's traces,
-   tools, and conventions.
+   guidance and the "READ THESE" pointers to this benchmark's traces, tools, and
+   conventions. The authored instructions MUST tell the optimizer to:
+   - **READ and USE** every chosen capability skill at `./guidance/<cap>/`, the
+     diagnose phase skill at `./guidance/diagnose/SKILL.md`, and its own
+     optimizer-agent features reference at `./guidance/optimizer/<name>.md` —
+     not just `./trajectories/`, `./STATE.md`, `./MEMORY.md`, and the benchmark repo.
+   - **READ `./MEMORY.md` FIRST**, before analyzing, and **never re-propose an
+     approach** listed there as already tried/rejected (the harness also injects
+     recent rejected diffs to block duplicates).
+   - **Explain the prior-iteration run-dir structure** so the optimizer can inspect
+     earlier work: `<run_root>/candidates/<id>/` (capability snapshots),
+     `/work/<id>/` (scratch + STATE), `/rollouts/<split>/<task>__<cand>__t<k>.json`
+     (per-trial traces), `/events.jsonl`, `/rejected.jsonl`, and the per-iteration
+     git diffs.
+   - **Write the rich STATE.md handover** required by the shared contract: end
+     STATE.md with a section headed `## Handover for next iteration` containing
+     Approaches tried this iteration (1 line each, concrete), Lessons learned
+     (general), Recommendation / what to focus on next, and What NOT to retry — the
+     harness parses this into the next iteration's MEMORY note.
+   - **Address ALL failure clusters per iteration**, not one tiny single-theme
+     edit: if the optimizer agent supports parallel subagents (see its
+     `./guidance/optimizer/<name>.md`), fan out one per cluster, analyze
+     concurrently, then merge all the edits into ONE candidate; otherwise handle
+     the clusters in sequence within the iteration.
+   - **Prefer code-bearing tools for behavioral failures** — when the capability is
+     the agent's own tools and a cluster is a BEHAVIORAL/execution failure (e.g. the
+     agent stalls before a write and never issues it), write a composite WRITE /
+     workflow tool that performs the whole action in code and `remove` the raw
+     primitives, rather than rewording prose the model can keep skipping.
 6. **Set the new spec keys** in `capevolve.yaml`: `runner_repo_path` (the
    benchmark/runner source, surfaced read-only to the optimizer) and
    `optimizer_instructions_file` (point it at the customized template — default
@@ -113,12 +139,12 @@ integration*: scaffold → implement the 4 adapter methods → `cap-evolve check
 before any budget is spent. The using-agent (e.g. the chosen optimizer) can run
 this whole integration autonomously.
 
-> **Worked example (onboard a new benchmark from a prompt):**
-> `examples/tau2_airline/` (see its `PROMPT.md`) — the intake/onboarding step
-> **installs the benchmark** (clones tau2-bench) and the **optimizer agent** wires the
-> adapter from the stub until `cap-evolve check` passes, then optimizes the policy +
-> tools. `setup.sh` is the executable transcript of that onboarding; `run.sh` runs the
-> full optimization with the live dashboard.
+> **Worked example (onboard a new benchmark from a prompt):** see `examples/` for
+> an end-to-end onboarding. The intake/onboarding step **installs the benchmark**
+> (clones + installs it) and the **optimizer agent** wires the adapter from the
+> stub until `cap-evolve check` passes, then optimizes the selected capability. The
+> example's `setup.sh` is the executable transcript of that onboarding; `run.sh`
+> runs the full optimization with the live dashboard.
 
 ## What good vs bad intake looks like
 - **Good:** every NEEDED input resolved to a real path or `"adapter"`; splits and

@@ -120,6 +120,41 @@ delegates.
 Why it works: validate → normalize → enforce → delegate, all in code; the model
 hands over an id and an amount and cannot mis-route the call.
 
+## 3e. Make a STALLED action un-skippable — a composite WRITE tool (then remove the primitives)
+
+Trace symptom (the most common behavioral failure): the agent analyzes a
+multi-step change, explains the plan, sometimes even gets the user's
+confirmation — and then **never issues the write calls and stops**, leaving the
+task half-done. No prose rule ("be sure to apply the change", "always act after
+confirming") reliably fixes this; it is behavioral, not a knowledge gap. The fix
+is to encapsulate the WHOLE action as one tool whose body performs every step in
+code, so the moment the agent calls it the action is complete and cannot be
+skipped mid-conversation. Then `remove` the raw write primitives so the composite
+is the only path.
+
+```json
+[
+  { "kind": "compose",
+    "value": {
+      "name": "apply_change_plan",
+      "description": "Apply an ENTIRE multi-step change to one record in a single call: validates every step, then performs them in order via the underlying writes, and returns the final record. Use this for any change of one or more steps instead of issuing the writes yourself — there is no separate per-step write tool.",
+      "parameters": { "type": "object", "properties": {
+          "record_id": { "type": "string" },
+          "steps": { "type": "array", "items": { "type": "object",
+              "properties": { "op": { "type": "string", "enum": ["add","remove","update"] },
+                              "field": { "type": "string" }, "value": {} },
+              "required": ["op","field"] } } },
+        "required": ["record_id","steps"] },
+      "code": "def apply_change_plan(record_id, steps):\n    rec = get_record(record_id)\n    for s in steps:\n        if s['op'] not in ('add','remove','update'):\n            return {'error': 'bad op', 'step': s}\n    for s in steps:\n        rec = update_record(record_id, s['op'], s['field'], s.get('value'))\n    return {'record_id': record_id, 'applied': len(steps), 'record': rec}" } },
+  { "tool": "update_record", "kind": "remove" }
+]
+```
+
+Why it works: the analyze→apply sequence lives entirely in the tool body, so a
+single call performs all of it — the agent can no longer narrate a plan and then
+fail to execute it. Removing the raw `update_record` makes the composite the only
+reachable write path, so the stall cannot recur by routing around it.
+
 ## 3d. Keep failure modes — improve, do not delete, `Raises:`
 
 Anti-symptom: an optimizer "cleaned up" a description by deleting its `Raises:`

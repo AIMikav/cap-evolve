@@ -434,11 +434,25 @@ def reduce_run(run_dir) -> dict:
             "runner_seconds": round(n.get("runner_seconds") or 0.0, 2),
             "runner_tokens": int(n.get("tokens") or 0),
         })
-    intake = {
-        "usd": round(intake_usd, 4),
-        "seconds": round(intake_secs, 2),
-        "tokens": int(intake_tokens),
-    }
+    # Intake: prefer the explicit "intake" event (richer — carries output_summary +
+    # implemented list) and fall back to the spent-derived numbers above when absent.
+    intake_ev = next((e for e in events if e.get("kind") == "intake"), None)
+    if intake_ev is not None:
+        intake = {
+            "usd": round(float(intake_ev.get("usd") or intake_usd or 0.0), 4),
+            "seconds": round(float(intake_ev.get("seconds") or intake_secs or 0.0), 2),
+            "tokens": int(intake_ev.get("tokens") or intake_tokens or 0),
+            "output_summary": intake_ev.get("output_summary") or "",
+            "implemented": list(intake_ev.get("implemented") or []),
+        }
+    else:
+        intake = {
+            "usd": round(intake_usd, 4),
+            "seconds": round(intake_secs, 2),
+            "tokens": int(intake_tokens),
+            "output_summary": "",
+            "implemented": [],
+        }
 
     # --- first-class evaluations (split-oriented, distinct from per_iteration) ---
     # An evaluation is one scoring of a candidate on one split: the seed baseline on
@@ -1140,12 +1154,17 @@ function sec(title){const s=$('section');s.append($('h2',{text:title}));main.app
   const dsec=v=>{v=Math.max(0,Math.round(v||0));if(v<60)return v+'s';
     const m=Math.floor(v/60);if(m<60)return m+'m '+(v%60)+'s';return Math.floor(m/60)+'h '+(m%60)+'m';};
   const intakeRow=$('div',{class:'phase',style:'margin-bottom:12px'});
-  intakeRow.innerHTML='<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'+
+  const esc=t=>String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  let intakeHtml='<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'+
     'background:var(--accent);margin-right:6px;vertical-align:-1px"></span>'+
     '<b>Intake</b> &nbsp; cost <b>$'+(intake.usd||0).toFixed(4)+'</b>'+
     (intake.usd===0?' <span class="muted">(spent $0)</span>':'')+
     ' &nbsp; time <b>'+dsec(intake.seconds)+'</b> &nbsp; <span class="muted">'+
     (intake.tokens||0).toLocaleString()+' tok</span>';
+  if(intake.output_summary)intakeHtml+='<div class="muted" style="margin-top:6px">'+esc(intake.output_summary)+'</div>';
+  if((intake.implemented||[]).length)intakeHtml+='<div style="margin-top:6px"><span class="muted">implemented:</span> '+
+    intake.implemented.map(x=>'<code>'+esc(x)+'</code>').join(' ')+'</div>';
+  intakeRow.innerHTML=intakeHtml;
   s.append(intakeRow);
   if(!rows.length){s.append($('p',{class:'muted',text:'No iterations recorded yet.'}));return;}
   const optMax=Math.max(1e-6,...rows.map(r=>r.optimizer_seconds||0));
@@ -1202,43 +1221,6 @@ function sec(title){const s=$('section');s.append($('h2',{text:title}));main.app
       $('td',{class:'r num',text:(e.n_tasks||0)+' × '+(e.trials||1)})));
   });
   s.append(t);
-})();
-
-/* ---------- 6e. Radial iteration ring (vanilla SVG) ---------- */
-(function(){
-  const nodes=G.nodes;
-  if(nodes.length<2)return;
-  const s=sec('Radial iteration ring');
-  const cands=nodes.filter(n=>n.id!=='seed').sort((a,b)=>(a.iteration||0)-(b.iteration||0));
-  if(!cands.length)return;
-  const W=560,H=560,cx=W/2,cy=H/2,R=210,innerR=110;
-  const el=svg('svg',{viewBox:`0 0 ${W} ${H}`,width:W,height:H});
-  const COL={accepted:'#22c55e',rejected:'#ef4444',failed:'#8b98a9',seed:'#64748b'};
-  // running-best champion drawn on an inner orbit; the rest on the outer ring.
-  let best=-1,champId=S.best_id;
-  const N=cands.length;
-  cands.forEach((n,i)=>{
-    const ang=(i/N)*2*Math.PI-Math.PI/2;
-    const onInner=(n.id===champId);
-    const r=onInner?innerR:R;
-    const x=cx+r*Math.cos(ang),y=cy+r*Math.sin(ang);
-    el.append(svg('line',{x1:cx,y1:cy,x2:x,y2:y,stroke:'#1e2733','stroke-width':1}));
-    const dot=svg('circle',{cx:x,cy:y,r:n.id===champId?9:6,fill:COL[n.status]||'#64748b',
-      stroke:'#07090d','stroke-width':1.5});
-    dot.addEventListener('mousemove',e=>showTip(e,`${n.id}\n${n.status} · val=${fmt(n.val)}\niter ${n.iteration||0}`));
-    dot.addEventListener('mouseleave',hideTip);
-    el.append(dot);
-  });
-  // seed at center
-  el.append(svg('circle',{cx,cy,r:11,fill:'#64748b',stroke:'#07090d','stroke-width':2}));
-  el.append(svg('text',{x:cx,y:cy+4,fill:'#07090d','font-size':9,'text-anchor':'middle','font-weight':700})).textContent='seed';
-  s.append(el);
-  s.append($('div',{class:'legend',html:
-    '<span><i style="background:#22c55e"></i>accepted</span>'+
-    '<span><i style="background:#ef4444"></i>rejected</span>'+
-    '<span><i style="background:#8b98a9"></i>failed</span>'+
-    '<span><i style="background:#64748b;border-radius:50%"></i>seed (center)</span>'+
-    '<span class="muted">champion pulled to inner orbit · hover a node</span>'}));
 })();
 
 /* ---------- 7. Annotations / diagnoses stream ---------- */

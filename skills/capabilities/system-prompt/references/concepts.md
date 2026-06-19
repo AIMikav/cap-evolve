@@ -1,17 +1,28 @@
 # Concepts — optimizing a system prompt
 
-> The system prompt (a.k.a. the instructions, the developer message, or in some
-> agents a "policy") is the cheapest, highest-leverage parameter of most LLM
-> agents: a few words can flip success on a whole class of inputs.
+> The system prompt (a.k.a. the instructions, the developer message, or the
+> decision rules / output contract an agent is held to) is the cheapest,
+> highest-leverage parameter of most LLM agents: a few words can flip success on
+> a whole class of inputs.
 
 ## What the system prompt controls
 - **Role & task framing** — who the agent is and what "done" means.
 - **Output contract** — the exact format the downstream/eval expects. A frequent
   *silent* failure is a capable agent that formats its answer wrong and scores 0.
-- **Decision policy** — when to call which tool, when to ask vs. act, refusal and
-  safety rules. (Tool/customer-service agents are scored on following such a policy.)
+- **Decision rules** — when to call which tool, when to ask vs. act, refusal and
+  safety rules. (Many agents are scored on adherence to such decision rules.)
 - **Reasoning scaffolds & few-shot exemplars** — added inline to shape how the
   model thinks before it answers.
+
+## Knowledge gaps vs. behavioral gaps (what prose can and cannot fix)
+Prose is the right tool for KNOWLEDGE/format/decision-criteria gaps: a missing
+output contract, an unstated rule, an ambiguous criterion — telling the agent
+fixes it. Prose is WEAK for BEHAVIORAL failures the model already "knows" but
+skips: it analyzes, explains, confirms, then fails to perform the action (the
+classic stall before a write). You cannot instruct a model out of a behavior it
+already agreed to and then declined — that class belongs in the tools/code
+capability (encapsulate the action so it executes in code). Classify each failure
+cluster before editing: knowledge → here; behavioral → tools.
 
 ## How agents consume it
 The system prompt is prepended to context every turn, so the model is highly
@@ -48,4 +59,4 @@ at least one non-empty prompt file.
   https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview
 - "Large Language Models Are Human-Level Prompt Engineers" (APE), arXiv:2211.01910.
 - "Large Language Models as Optimizers" (OPRO), arXiv:2309.03409.
-- tau-bench (policy adherence as a scored behavior), arXiv:2406.12045.
+- tau-bench (adherence to decision rules as a scored behavior), arXiv:2406.12045.

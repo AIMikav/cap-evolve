@@ -159,7 +159,6 @@ class Adapter(CapabilityAdapter):
 
         import rits  # sibling module
         from tau2.data_model.simulation import TextRunConfig
-        from tau2.data_model.simulation import TerminationReason
         from tau2.runner import run_tasks
 
         by_id = self._tau2_tasks_by_id()
@@ -206,49 +205,9 @@ class Adapter(CapabilityAdapter):
                 console_display=False,
             )
 
-        infra_reasons = {
-            TerminationReason.INFRASTRUCTURE_ERROR,
-            TerminationReason.UNEXPECTED_ERROR,
-        }
-
         for sim in sim_results.simulations:
-            task_id = str(sim.task_id)
-            reward_info = sim.reward_info
-            reward = (
-                float(reward_info.reward)
-                if reward_info is not None and reward_info.reward is not None
-                else 0.0
-            )
-            agent_cost = sim.agent_cost or 0.0
-            user_cost = sim.user_cost or 0.0
-            term = sim.termination_reason
-            error = None
-            if term in infra_reasons:
-                error = f"tau2 terminated for infrastructure reason: {term}"
-
-            try:
-                messages = [m.model_dump() for m in sim.get_messages()]
-            except Exception:
-                messages = None
-
-            reward_info_dump = (
-                reward_info.model_dump(mode="json") if reward_info is not None else None
-            )
-
-            results[task_id] = Rollout(
-                task_id=task_id,
-                output=messages,
-                trace=messages,
-                cost_usd=float(agent_cost) + float(user_cost),
-                tokens=0,
-                error=error,
-                metadata={
-                    "domain": DOMAIN,
-                    "tau2_reward": reward,
-                    "tau2_reward_info": reward_info_dump,
-                    "termination_reason": str(term),
-                },
-            )
+            rollout = self._sim_to_rollout(sim)
+            results[str(rollout.task_id)] = rollout
 
         # Any requested task with no simulation -> infra error rollout.
         for t in tasks:
@@ -258,6 +217,138 @@ class Adapter(CapabilityAdapter):
                     error="no simulation produced for task (tau2 returned nothing)",
                     metadata={"domain": DOMAIN, "tau2_reward": 0.0},
                 )
+        return results
+
+    @staticmethod
+    def _sim_to_rollout(sim) -> Rollout:
+        """Map one tau2 ``SimulationRun`` to a cap-evolve ``Rollout`` (pure).
+
+        Shared by ``run_batch`` and ``run_trials`` so the sim→Rollout contract
+        (reward stashed in metadata for ``score``, infra-error detection, message
+        trace, agent+user cost) is defined in exactly one place.
+        """
+        from tau2.data_model.simulation import TerminationReason
+
+        infra_reasons = {
+            TerminationReason.INFRASTRUCTURE_ERROR,
+            TerminationReason.UNEXPECTED_ERROR,
+        }
+
+        task_id = str(sim.task_id)
+        reward_info = sim.reward_info
+        reward = (
+            float(reward_info.reward)
+            if reward_info is not None and reward_info.reward is not None
+            else 0.0
+        )
+        agent_cost = sim.agent_cost or 0.0
+        user_cost = sim.user_cost or 0.0
+        term = sim.termination_reason
+        error = None
+        if term in infra_reasons:
+            error = f"tau2 terminated for infrastructure reason: {term}"
+
+        try:
+            messages = [m.model_dump() for m in sim.get_messages()]
+        except Exception:
+            messages = None
+
+        reward_info_dump = (
+            reward_info.model_dump(mode="json") if reward_info is not None else None
+        )
+
+        return Rollout(
+            task_id=task_id,
+            output=messages,
+            trace=messages,
+            cost_usd=float(agent_cost) + float(user_cost),
+            tokens=0,
+            error=error,
+            metadata={
+                "domain": DOMAIN,
+                "tau2_reward": reward,
+                "tau2_reward_info": reward_info_dump,
+                "termination_reason": str(term),
+            },
+        )
+
+    def run_trials(
+        self, tasks: list[Task], ctx, *, n_trials: int, base_seed: int
+    ) -> dict[str, list[Rollout]]:
+        """Run ALL trials of a task batch in ONE tau2 ``run_tasks`` call.
+
+        Builds a single ``TextRunConfig`` with ``num_trials=n_trials`` and
+        ``seed=int(base_seed)``, calls tau2 ``run_tasks`` once, then groups the
+        returned ``SimulationRun``s by ``(task_id, trial)``. Returns
+        ``{task_id: [rollout_t0, rollout_t1, ...]}`` — a list of length ``n_trials``
+        in trial order, None-filling any (task, trial) tau2 didn't produce. This is
+        much faster than looping ``run_batch`` per trial because tau2 schedules the
+        whole task×trial grid under one concurrency pool.
+        """
+        import os
+
+        import rits  # sibling module
+        from tau2.data_model.simulation import TextRunConfig
+        from tau2.runner import run_tasks
+
+        n_trials = int(n_trials)
+        by_id = self._tau2_tasks_by_id()
+        tau2_tasks = [by_id[t.id] for t in tasks if t.id in by_id]
+
+        # Pre-seed every requested task with a None-filled trial list so missing
+        # (task, trial) pairs surface as None (the harness records them as failures).
+        results: dict[str, list[Rollout]] = {t.id: [None] * n_trials for t in tasks}
+
+        # Tasks we couldn't map -> infra error rollout for every trial.
+        for t in tasks:
+            if t.id not in by_id:
+                results[t.id] = [
+                    Rollout(task_id=t.id, error=f"task id {t.id} not found in airline task set")
+                    for _ in range(n_trials)
+                ]
+        if not tau2_tasks or n_trials <= 0:
+            return results
+
+        llm_args = rits.llm_args()
+        max_concurrency = int(os.environ.get("TAU2_MAX_CONCURRENCY", "125"))
+
+        config = TextRunConfig(
+            domain=DOMAIN,
+            agent="llm_agent",
+            llm_agent=rits.LITELLM_MODEL,
+            llm_args_agent=dict(llm_args),
+            user="user_simulator",
+            llm_user=rits.LITELLM_MODEL,
+            llm_args_user=dict(llm_args),
+            num_trials=n_trials,
+            max_steps=100,
+            max_errors=10,
+            max_concurrency=max_concurrency,
+            seed=int(base_seed),
+        )
+
+        # tau2 prints progress to stdout; the cap-evolve skills' stdout is a pure-JSON
+        # contract, so redirect tau2's stdout to stderr for the duration.
+        import contextlib
+        import sys
+        with contextlib.redirect_stdout(sys.stderr):
+            sim_results = run_tasks(
+                config,
+                tau2_tasks,
+                save_path=None,
+                console_display=False,
+            )
+
+        # Group each SimulationRun into its task's per-trial slot by sim.trial.
+        for sim in sim_results.simulations:
+            task_id = str(sim.task_id)
+            trial = int(getattr(sim, "trial", 0) or 0)
+            slot = results.get(task_id)
+            if slot is None:
+                slot = results[task_id] = [None] * n_trials
+            if 0 <= trial < n_trials:
+                slot[trial] = self._sim_to_rollout(sim)
+
         return results
 
     def run_target(self, task: Task, ctx, *, seed: int = 0) -> Rollout:
