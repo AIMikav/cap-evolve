@@ -221,6 +221,15 @@ def _cmd_run(argv):
                           "report": chk.to_dict()}))
         return 1
 
+    # Start the live dashboard BEFORE baseline so the run is watchable from the very
+    # start: the server scans the base dir and shows the run as soon as baseline
+    # creates it. Best-effort — never blocks or fails the run. (Absolute base: the
+    # subprocess inherits THIS process's cwd, not workdir.)
+    if dash_mode == "auto":
+        status = dashboard_launch.maybe_launch(
+            proj_abs.parent, mode=dash_mode, port=dash_port, open_browser=True)
+        print(json.dumps(status))
+
     # 1) baseline (creates the run dir; capture its relative path)
     base_cmd = [py, skill_run("baseline"), "--base", base, "--project", project,
                 "--capability", cap_path, "--seed", str(spec.get("split_seed", 0)),
@@ -238,16 +247,6 @@ def _cmd_run(argv):
         print(json.dumps({"step": "baseline", "error": proc.stderr[-1500:]}))
         return 1
     run_dir = json.loads(proc.stdout)["run_dir"]
-
-    # Auto-start the live dashboard now (the run dir exists) so the whole
-    # evolution is watchable. Best-effort: never blocks or fails the run.
-    if dash_mode == "auto":
-        # Absolute base: the dashboard subprocess inherits THIS process's cwd
-        # (not workdir), so a relative ".capevolve" would resolve wrongly when
-        # `cap-evolve run` is invoked from outside workdir.
-        status = dashboard_launch.maybe_launch(
-            proj_abs.parent, mode=dash_mode, port=dash_port, open_browser=True)
-        print(json.dumps(status))
 
     # 2) algorithm (hill-climb variants select their schedule via --focus)
     alg_cmd = [py, skill_run(algorithm_name), "--run-dir", run_dir, "--project", project,

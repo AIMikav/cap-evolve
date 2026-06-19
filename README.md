@@ -59,16 +59,20 @@ Requires **Python 3.10+** and **git**.
 
 ```bash
 git clone <repo> cap-evolve && cd cap-evolve
-pip install ./core            # the honest-eval core (package: cap-evolve-core, CLI: cap-evolve)
-./install.sh                  # optional: copy skills into your agent host's skills dir
+python3 -m venv .venv && source .venv/bin/activate   # recommended (isolated env)
+pip install ./core                  # the honest-eval core (package: cap-evolve-core, CLI: cap-evolve)
+pip install ./dashboard/backend     # optional: the live dashboard UI (cap-evolve run --dashboard auto)
+./install.sh                        # optional: copy skills into your agent host's skills dir
+cap-evolve version                  # verify the install
 ```
 
-> If your default pip index requires auth, use
-> `pip install ./core --index-url https://pypi.org/simple`.
+> **If your default pip index requires auth**, append `--index-url https://pypi.org/simple`
+> to the `pip install` lines (cap-evolve-core itself has zero runtime deps).
 
-Optimizing a real agent additionally needs a coding-agent CLI to act as the
-optimizer (e.g. `claude`, `codex`, `gemini`) and any model credentials in a
-repo-root `.env`. The toy example below needs **neither**.
+Optimizing a real agent additionally needs: a coding-agent CLI to act as the
+**optimizer** (e.g. `claude`, `codex`, `gemini`) with its credentials, and your
+**runner**'s model credentials — all in a repo-root `.env` (e.g. `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `RITS_API_KEY`, `WATSONX_*`). The toy example below needs **none** of this.
 
 ## Toy example (zero-API)
 
