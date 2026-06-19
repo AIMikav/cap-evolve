@@ -9,6 +9,7 @@ run with `cwd=<workdir>`. `-p/--print` runs non-interactively and exits;
 
 - **Install:** https://docs.claude.com/claude-code
 - **Auth:** a logged-in Claude Code session, or `ANTHROPIC_API_KEY`.
+- **Native skills:** `.claude/skills/<name>/SKILL.md`; agents: `.claude/agents/`; instructions: `CLAUDE.md`. cap-evolve copies the capability + diagnose skills there and writes a pointer into `CLAUDE.md` so headless `-p` runs load them natively.
 - **JSON / cost:** `--output-format json` makes the result a JSON object with
   `total_cost_usd`, `usage` (input/output tokens), and per-model cost under
   `modelUsage`. The runner appends this when called with `--json` and parses
@@ -54,17 +55,30 @@ context. The optimizer can be told (in its INSTRUCTIONS prompt) to:
   model, so this is cheap. Phrase it as: *"Research the failures in clusters A,
   B, and C in parallel using separate subagents, then synthesize the root
   causes."*
-- **One subagent per edit hypothesis or candidate tool.** Generate several
-  **candidate edits in parallel** — one subagent drafts each hypothesis
-  (different prompt wording, tool-doc fix, restructure, or — for the `tools`
-  capability — a different **candidate code-bearing tool**: a validation/wrapper
-  tool that enforces a rule then delegates, or a loop tool that collapses N calls
-  into one, each with a real body). Then the main agent compares the returned
-  diffs/rationales and **synthesizes the single best edit**, writing only that
-  one. This turns "guess one edit serially" into "explore N edits, keep the best".
-  Concretely: spawn one subagent per trajectory-failure cluster AND/OR one per
-  candidate tool/edit hypothesis, explore in parallel, then synthesize and land
-  exactly one edit.
+- **One subagent per FAILURE CLUSTER → propose → merge into ONE candidate (the
+  primary parallel pattern).** This is the strong default for an iteration that
+  must address ALL recurring clusters at once. Spawn **one subagent per failure
+  cluster** (from diagnose), each working concurrently in its **own context
+  window** — and, when competing edits touch the same files, each in its **own
+  git worktree** (`isolation: "worktree"`, below) so their changes don't collide
+  while drafting. Each subagent analyzes its cluster and proposes a **general,
+  non-overfitting** edit for that cluster — for the `tools` capability, prefer a
+  code-bearing tool (a validation/wrapper tool that enforces a rule then delegates
+  and removes the raw primitive, a loop tool that collapses N calls into one, or a
+  composite WRITE tool that performs a stalled action in code — each with a real
+  body), never a one-task patch. The **main agent then MERGES all of the
+  per-cluster edits into ONE coherent candidate**, resolving any overlap so the
+  combined diff applies cleanly with **no conflicts**, and writes that single
+  merged candidate. One iteration thus fixes every cluster, not just the biggest —
+  while each edit stays general because it was reasoned about in isolation.
+- **One subagent per edit hypothesis or candidate tool (explore-then-pick).** When
+  a *single* cluster has several plausible fixes, generate the **candidate edits
+  in parallel** — one subagent drafts each hypothesis (different prompt wording,
+  tool-doc fix, restructure, or a different candidate code-bearing tool, each with
+  a real body). Then the main agent compares the returned diffs/rationales and
+  **synthesizes the single best edit** for that cluster. This turns "guess one edit
+  serially" into "explore N edits, keep the best", and composes with the
+  per-cluster pattern above (best-of-N within a cluster, then merge across clusters).
 - **Isolate high-volume work.** Delegate re-reading long rollouts or large logs
   to a subagent so only the relevant summary returns; keeps the main agent's
   budget focused on deciding and writing the edit.
@@ -75,7 +89,17 @@ context. The optimizer can be told (in its INSTRUCTIONS prompt) to:
 How to trigger it from the prompt: Claude auto-delegates based on task phrasing.
 Explicit, parallel phrasing ("in parallel using separate subagents") is what
 actually fans out. Independent investigations parallelize well; dependent ones
-should be chained, not fanned out.
+should be chained, not fanned out. To fan out per cluster with isolation, phrase
+it as: *"spawn one subagent per failure cluster, each in its own worktree,
+proposing one general edit; then merge all edits into a single candidate with no
+conflicts."*
+
+> Generic note: this is Claude Code's realization of the cap-evolve flow where one
+> iteration addresses ALL failure clusters at once (parallel analysis → merge into
+> one candidate). Every other optimizer's reference file
+> (`./guidance/optimizer/<name>.md`) should document its OWN equivalent
+> parallelism / isolation / merge features (or note their absence), so the authored
+> INSTRUCTIONS can lean on whatever that agent actually supports.
 
 ### Defining custom agent types headlessly
 

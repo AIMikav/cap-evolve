@@ -29,15 +29,29 @@ or system-prompt rule only makes the model *more likely* to comply — it can be
 forgotten, mis-read, or out-reasoned on the next task. A tool whose body is
 **real code** (loops, validation, calls to existing tools) makes the right
 behavior *the only thing that can happen* — it cannot be "forgotten." When the
-traces show a rule the agent keeps breaking or a multi-step sequence it keeps
-fumbling, **do not just reword a description — write a tool with a real body.**
-This is the first edit to reach for, not the last.
+traces show a rule the agent keeps breaking, a multi-step action it keeps
+fumbling, or — most importantly — an action it *stalls on and never executes*,
+**do not just reword a description — write a tool with a real body.** This is the
+first edit to reach for, not the last.
 
-Two patterns carry almost all the gain (worked bodies below and in
+**Prose cannot fix a BEHAVIORAL failure.** There is a sharp distinction the
+optimizer must make. If the agent *does not know* something (a format, a rule, a
+decision criterion), prose can teach it — that is a KNOWLEDGE gap, and it belongs
+in the prompt. But if the agent demonstrably *knows* what to do and still doesn't
+do it — it analyzes the situation, explains the plan, even gets the user's
+confirmation, and then simply **fails to CALL the action tool and stops** — that
+is a BEHAVIORAL failure, and *more prose does not fix it*. You cannot instruct a
+model out of a behavior it already "agreed" to and then skipped. The only
+reliable fix is to move the behavior into CODE: encapsulate the whole action in a
+tool whose body performs it, so executing it is no longer a choice the model can
+decline mid-conversation. Telling the agent to "be sure to act" is exactly the
+kind of edit the traces show failing.
+
+Three patterns carry almost all the gain (worked bodies below and in
 [`references/examples.md`](references/examples.md)):
 
-1. **Validation / rule-enforcement tool (wrap, then delegate).** When a policy
-   or precondition that today lives only in the prompt is GENERAL — it always
+1. **Validation / rule-enforcement tool (wrap, then delegate).** When a rule or
+   precondition that today lives only in the prompt is GENERAL — it always
    applies, not just to one task — implement it as code in a NEW tool that:
    validates / normalizes the inputs → enforces the rule → calls the existing
    primitive → returns a clear result (or a clean refusal). Then **remove the raw
@@ -51,6 +65,23 @@ Two patterns carry almost all the gain (worked bodies below and in
    loops/code that calls the existing tools internally and returns the finished
    result. Example: a tool that loops over a list of ids calling `get_record`
    once each and returns them aligned, instead of the agent issuing N calls.
+
+3. **Write / workflow COMPOSITE tool — make a stalled action un-skippable
+   (co-equal PRIMARY pattern).** This is the fix for the single most common
+   BEHAVIORAL failure: the agent reliably **stalls at the action/write boundary**
+   — it analyzes, explains, even confirms with the user, then never issues the
+   write call and stops, leaving the task half-done. The cure is *not* a stronger
+   rule. Encapsulate the ENTIRE multi-step action (analyze → confirm → act) as
+   ONE composite tool whose body performs *all* the steps in code — calling the
+   existing primitives in the right sequence and looping where needed — so the
+   action completes the moment the tool is called and **cannot be skipped
+   mid-conversation**. Then **`remove` the raw primitives** so the composite is
+   the only path; the safe, complete behavior is then the only behavior reachable.
+   Generic example: an `apply_change_plan(record_id, steps)` that performs a
+   multi-step update atomically — validating each step, applying them in order via
+   the existing write primitives, and returning the final state — so the agent
+   hands over the plan in one call instead of narrating it and then failing to
+   execute. (Worked body in [`references/examples.md`](references/examples.md) §3e.)
 
 **Lean caveat — replace, don't accumulate.** Every exposed tool enters the
 agent's context, and too many tools degrade selection (see §3 of concepts.md).
@@ -66,10 +97,43 @@ tools (`get_record(i)` — or `self.get_record(i)` if your adapter binds tools a
 methods). Worked examples with full bodies are below under
 [Add tools that call existing tools](#add-tools-that-call-existing-tools-the-highest-leverage-edit).
 
+**SECONDARY (last resort): passthrough / "think" / reasoning-only tools.** A tool
+whose body just returns (or echoes) its argument, with the actual rule living only
+in the *docstring* (e.g. a `think(thought)`/`check_policy(text)` tool that does no
+real work), is the WEAKEST form of this edit — it is prose wearing a tool's
+costume, and the model can ignore or mis-apply it exactly like any prompt sentence.
+**If a rule can be encoded as code, encode it as code** — validate, normalize, and
+enforce it in the body (patterns 1 and 2 above), don't leave it as docstring prose.
+Reach for a reasoning-only tool only when the behavior genuinely cannot be made
+deterministic (e.g. you want to *prompt* a planning step), never as a substitute
+for a check you could have written in a few lines of code.
+
+## How agents fail (and how tools fix it)
+
+Map the trace symptom to the code-bearing edit. Each row is a failure the model
+*could* "know" how to avoid yet keeps producing — so the fix is code, not prose:
+
+| Trace symptom | Fix |
+|---------------|-----|
+| **Execution stalls at the action boundary** — the agent analyzes, explains, even confirms, then never calls the write tool and stops (the task is left half-done). | **Composite WRITE tool** (pattern 3): one tool whose body performs the whole analyze→confirm→act sequence, then `remove` the raw primitives so the action is un-skippable. |
+| **The same primitive called N times in a row** — looping over a list in the agent's own context, dropping or mis-threading results. | **Loop tool** (pattern 2): one tool that takes the list and loops inside a single call. |
+| **A rule stated in the prompt but repeatedly violated** — a required order ("read before write"), a precondition the API doesn't enforce. | **Validation wrapper** (pattern 1): enforce the rule in the tool body; `remove` the unguarded primitive. |
+| **Wrong arguments to a write** (partial credit) — right tool, wrong unit / missing field / unresolved id. | **Normalize-then-call tool**: a wrapper that validates and normalizes the args (coerce units, resolve ids, check the field is on file) before calling the primitive, so a malformed call becomes a clean refusal instead of a corrupted write. |
+
+The throughline: a failure the agent *knows better than* but still commits is
+behavioral, and behavioral failures are fixed by removing the choice — putting the
+behavior in code and `remove`-ing the path that let it go wrong.
+
 ## When to use this
 
 Reach for `tools` when a trace shows one of these failure signatures:
 
+- **Execution stall at the action/write boundary (BEHAVIORAL)** — the agent
+  reaches the point of acting, narrates or confirms the action, then **fails to
+  call the write tool and stops**. This is not a knowledge gap and prose will not
+  fix it; encapsulate the whole action in a composite WRITE tool and remove the
+  raw primitives so completing it is the only path (§"highest-leverage edit",
+  pattern 3).
 - **Mis-selection** — the agent calls the wrong tool, or calls none when one
   applied, or invents a tool that does not exist. Selection is driven almost
   entirely by the tool *name* and *description*, so this is a documentation fix.
@@ -106,7 +170,7 @@ optimize the [`system-prompt`](../system-prompt/SKILL.md) instead.
 | `examples` | example call strings | shows concrete well-formed calls |
 | `schema` | the full JSON Schema (types, `required`, `enum`) | constrains/guides the model's output |
 | `code` | the handler implementation | fix behavior, bugs, or return shape |
-| `compose` | **add a code-bearing tool that calls existing tools** | **highest leverage** — enforce a rule or collapse a multi-call chain in code |
+| `compose` | **add a code-bearing tool that calls existing tools** | **highest leverage** — enforce a rule, collapse a multi-call chain, or perform a whole stalled WRITE action in code |
 | `add` / `remove` | introduce / delete a tool | shape and shrink the toolset (replace primitives; keep it lean) |
 
 The `compose`/`code`/`add` rows are the **first edits to reach for** — a
@@ -245,11 +309,19 @@ all benchmark-agnostic, and each shows a REAL body you are expected to write:
    glue the model otherwise improvises (resolve an id, attach the related record,
    coerce units), so the model gets a result it can act on directly.
 
-**Then remove the error-prone original** deliberately (the lean caveat). To
-*replace* a confusing or now-redundant tool, `add`/`compose` the clearer one and
-`remove` the old name so it leaves the choice set — don't keep both, or selection
-gets harder (§3 of concepts.md). Net tool count should stay small and sharp:
-prefer one tool that subsumes a primitive over two that overlap.
+**Then remove the error-prone original** deliberately (the lean caveat). This
+`remove` step is not optional polish — it is what makes the safe/complete tool the
+*only* path. A wrapper that enforces a rule, or a composite that performs a whole
+write, achieves nothing if the raw primitive is still exposed: the model can (and
+under pressure will) route around the guard straight to the primitive and
+reproduce the exact failure. Observed in real runs, optimizers add wrappers but
+**never `remove` the primitives they wrap**, so the unsafe path survives and the
+metric barely moves. To *replace* a confusing or now-redundant tool,
+`add`/`compose` the clearer one and `remove` the old name so it leaves the choice
+set — don't keep both, or selection gets harder (§3 of concepts.md). Net tool
+count should stay small and sharp: prefer one tool that subsumes a primitive over
+two that overlap. Pair every wrapper/composite with the matching `remove` unless
+the primitive is still independently needed for a *different*, safe purpose.
 
 ## What good vs bad tool edits look like
 

@@ -35,186 +35,67 @@ DOMAIN = "airline"
 # ---------------------------------------------------------------------------
 
 
-def _load_candidate_module(tools_path: Path):
-    """Import a candidate ``tools/tools.py`` as an isolated module (or None)."""
+def _load_candidate_tools_class(tools_path: Path):
+    """Import a candidate ``tools/tools.py`` and return its ``AirlineTools`` class.
+
+    Each call execs the file FRESH (unique module name) so the candidate's live
+    code — including any edits the optimizer made — is reloaded and no module
+    state leaks between ``apply`` calls. Returns ``(AirlineTools_class, REMOVE_TOOLS)``
+    or ``(None, set())`` when the file is absent (pristine fallback).
+    """
     if not tools_path.exists():
-        return None
+        return None, set()
     spec = importlib.util.spec_from_file_location(
-        f"capevolve_candidate_tools_{abs(hash(str(tools_path)))}", tools_path
+        f"capevolve_candidate_tools_{abs(hash(str(tools_path)))}_{id(object())}",
+        tools_path,
     )
     mod = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
-    return mod
-
-
-def _is_real_body(func) -> bool:
-    """True if a candidate method has a real body (more than a docstring + ``...``).
-
-    Parses the function with ``ast`` (robust to multi-line signatures and long
-    docstrings, unlike text stripping) and inspects the statements that remain
-    after dropping a leading docstring. A "docstring-only stub" is a function
-    whose entire executable body is a lone ``...`` (Ellipsis) or ``pass`` — for
-    those we MUST reuse the pristine tool (real annotations + behavior) rather
-    than rebuild from the stub's (possibly stringified) signature.
-    """
-    import ast
-    import inspect
-    import textwrap
-
-    try:
-        src = textwrap.dedent(inspect.getsource(func))
-    except (OSError, TypeError):
-        return True
-
-    try:
-        tree = ast.parse(src)
-    except SyntaxError:
-        return True
-
-    # Find the function definition node (skip decorators that ast keeps attached).
-    func_node = None
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            func_node = node
-            break
-    if func_node is None:
-        return True
-
-    body = list(func_node.body)
-    # Drop a leading docstring expression.
-    if (
-        body
-        and isinstance(body[0], ast.Expr)
-        and isinstance(body[0].value, ast.Constant)
-        and isinstance(body[0].value.value, str)
-    ):
-        body = body[1:]
-
-    # Empty (docstring only) -> stub.
-    if not body:
-        return False
-    # A single ``...`` or ``pass`` -> stub.
-    if len(body) == 1:
-        only = body[0]
-        if isinstance(only, ast.Pass):
-            return False
-        if (
-            isinstance(only, ast.Expr)
-            and isinstance(only.value, ast.Constant)
-            and only.value.value is Ellipsis
-        ):
-            return False
-    return True
-
-
-def _docstring_override(base_func, new_doc):
-    """Wrap pristine ``base_func`` keeping its REAL signature/annotations/behavior.
-
-    Only the live tool DESCRIPTION (``__doc__``) is swapped for the candidate's.
-    The pristine function's resolved annotations (real ``Literal``/``List[...]``
-    objects, not stringified forward refs) are preserved so tau2's
-    ``Tool.parse_data`` -> ``create_model("parameters", ...)`` -> ``model_json_schema()``
-    resolves cleanly. Tau2 tool-decoration attributes are carried over verbatim.
-    """
-    import functools
-    import inspect
-
-    @functools.wraps(base_func)
-    def _wrapper(self, *args, **kwargs):
-        return base_func(self, *args, **kwargs)
-
-    # Live description the agent sees = candidate docstring.
-    _wrapper.__doc__ = new_doc
-    # Preserve the pristine signature + annotations (REAL objects, resolvable).
-    try:
-        _wrapper.__signature__ = inspect.signature(base_func)
-    except (TypeError, ValueError):
-        pass
-    _wrapper.__annotations__ = dict(getattr(base_func, "__annotations__", {}))
-    # Carry tau2 tool-decoration attributes from the pristine function.
-    for attr in (
-        "__tool__",
-        "__tool_type__",
-        "__mutates_state__",
-        "__discoverable__",
-    ):
-        if hasattr(base_func, attr):
-            setattr(_wrapper, attr, getattr(base_func, attr))
-    return _wrapper
+    cls = getattr(mod, "AirlineTools", None)
+    remove = set(getattr(mod, "REMOVE_TOOLS", set()) or set())
+    return cls, remove
 
 
 def _build_candidate_tools(candidate_dir: Path):
-    """Build an ``AirlineTools`` instance reflecting the candidate ``tools/tools.py``.
+    """Instantiate the candidate ``AirlineTools`` from ``tools/tools.py`` on the FlightDB.
 
-    Starts from a pristine ``AirlineTools(db)`` and applies the candidate:
-      * override docstrings (live tool descriptions),
-      * replace non-trivial method bodies (real behavior),
-      * add new @is_tool-decorated composite methods,
-      * remove tools listed in ``REMOVE_TOOLS``.
+    The candidate file IS the implementation: its ``AirlineTools`` class carries the
+    real tool bodies (and any optimizer edits / added composite tools). We exec it
+    fresh, instantiate it with a freshly-loaded ``FlightDB`` (so state resets each
+    apply), and optionally drop tools listed in the module's ``REMOVE_TOOLS`` set.
+    Falls back to tau2's pristine ``AirlineTools`` when no candidate file exists.
     """
     from tau2.domains.airline.data_model import FlightDB
-    from tau2.domains.airline.tools import AirlineTools
+    from tau2.domains.airline.tools import AirlineTools as _PristineAirlineTools
     from tau2.domains.airline.utils import AIRLINE_DB_PATH
-    from tau2.environment.toolkit import TOOL_ATTR
 
     db = FlightDB.load(AIRLINE_DB_PATH)
 
     tools_path = candidate_dir / "tools" / "tools.py"
-    mod = _load_candidate_module(tools_path)
-    if mod is None:
-        # No candidate tools file: pristine tools.
-        return AirlineTools(db)
+    cand_cls, remove = _load_candidate_tools_class(tools_path)
+    AirlineToolsClass = cand_cls or _PristineAirlineTools
 
-    cand_cls = getattr(mod, "AirlineToolsCandidate", None)
-    remove = set(getattr(mod, "REMOVE_TOOLS", set()) or set())
+    if not remove:
+        return AirlineToolsClass(db)
 
-    # Build a dynamic subclass of AirlineTools carrying candidate overrides.
-    overrides: dict = {}
-    pristine_names = set(AirlineTools(db).get_tools().keys())
+    # Remove tools from the exposed set by filtering at the get_tools boundary
+    # (``_func_tools`` is a metaclass-managed class property with no setter).
+    _remove = set(remove)
+    _base_get_tools = AirlineToolsClass.get_tools
 
-    if cand_cls is not None:
-        import inspect
+    def get_tools(self, include=None):
+        tools_map = _base_get_tools(self, include=include)
+        return {k: v for k, v in tools_map.items() if k not in _remove}
 
-        for name, member in inspect.getmembers(cand_cls, predicate=inspect.isfunction):
-            if not getattr(member, TOOL_ATTR, False):
-                continue
-            if name in pristine_names:
-                # Existing tool: keep tau2 body unless candidate gave a real body,
-                # but always adopt the candidate docstring + tool-type decoration.
-                base_func = getattr(AirlineTools, name)
-                if _is_real_body(member):
-                    overrides[name] = member  # full behavior + docstring override
-                else:
-                    # Docstring-only stub: REUSE the pristine tau2 function object
-                    # so its REAL (resolved) annotations + behavior are preserved.
-                    # We only swap the live DESCRIPTION (docstring) the agent sees;
-                    # the parameter schema is built from the pristine signature, so
-                    # ``create_model("parameters", ...)`` / ``model_json_schema()``
-                    # resolve cleanly (no stringified forward refs from the stub).
-                    overrides[name] = _docstring_override(base_func, member.__doc__)
-            else:
-                # Brand-new composite tool.
-                overrides[name] = member
+    def has_tool(self, tool_name: str) -> bool:
+        return tool_name not in _remove and tool_name in self.tools
 
-    if remove:
-        # Remove tools from the exposed set by overriding get_tools to drop them.
-        # ``_func_tools`` is a metaclass-managed class property (no setter), so we
-        # filter at the get_tools boundary instead of mutating it.
-        _remove = set(remove)
-        _base_get_tools = AirlineTools.get_tools
-
-        def get_tools(self, include=None):
-            tools_map = _base_get_tools(self, include=include)
-            return {k: v for k, v in tools_map.items() if k not in _remove}
-
-        def has_tool(self, tool_name: str) -> bool:
-            return tool_name not in _remove and tool_name in self.tools
-
-        overrides["get_tools"] = get_tools
-        overrides["has_tool"] = has_tool
-
-    CandidateTools = type("CandidateAirlineTools", (AirlineTools,), overrides)
+    CandidateTools = type(
+        "CandidateAirlineTools",
+        (AirlineToolsClass,),
+        {"get_tools": get_tools, "has_tool": has_tool},
+    )
     return CandidateTools(db)
 
 
@@ -278,7 +159,6 @@ class Adapter(CapabilityAdapter):
 
         import rits  # sibling module
         from tau2.data_model.simulation import TextRunConfig
-        from tau2.data_model.simulation import TerminationReason
         from tau2.runner import run_tasks
 
         by_id = self._tau2_tasks_by_id()
@@ -325,49 +205,9 @@ class Adapter(CapabilityAdapter):
                 console_display=False,
             )
 
-        infra_reasons = {
-            TerminationReason.INFRASTRUCTURE_ERROR,
-            TerminationReason.UNEXPECTED_ERROR,
-        }
-
         for sim in sim_results.simulations:
-            task_id = str(sim.task_id)
-            reward_info = sim.reward_info
-            reward = (
-                float(reward_info.reward)
-                if reward_info is not None and reward_info.reward is not None
-                else 0.0
-            )
-            agent_cost = sim.agent_cost or 0.0
-            user_cost = sim.user_cost or 0.0
-            term = sim.termination_reason
-            error = None
-            if term in infra_reasons:
-                error = f"tau2 terminated for infrastructure reason: {term}"
-
-            try:
-                messages = [m.model_dump() for m in sim.get_messages()]
-            except Exception:
-                messages = None
-
-            reward_info_dump = (
-                reward_info.model_dump(mode="json") if reward_info is not None else None
-            )
-
-            results[task_id] = Rollout(
-                task_id=task_id,
-                output=messages,
-                trace=messages,
-                cost_usd=float(agent_cost) + float(user_cost),
-                tokens=0,
-                error=error,
-                metadata={
-                    "domain": DOMAIN,
-                    "tau2_reward": reward,
-                    "tau2_reward_info": reward_info_dump,
-                    "termination_reason": str(term),
-                },
-            )
+            rollout = self._sim_to_rollout(sim)
+            results[str(rollout.task_id)] = rollout
 
         # Any requested task with no simulation -> infra error rollout.
         for t in tasks:
@@ -377,6 +217,138 @@ class Adapter(CapabilityAdapter):
                     error="no simulation produced for task (tau2 returned nothing)",
                     metadata={"domain": DOMAIN, "tau2_reward": 0.0},
                 )
+        return results
+
+    @staticmethod
+    def _sim_to_rollout(sim) -> Rollout:
+        """Map one tau2 ``SimulationRun`` to a cap-evolve ``Rollout`` (pure).
+
+        Shared by ``run_batch`` and ``run_trials`` so the sim→Rollout contract
+        (reward stashed in metadata for ``score``, infra-error detection, message
+        trace, agent+user cost) is defined in exactly one place.
+        """
+        from tau2.data_model.simulation import TerminationReason
+
+        infra_reasons = {
+            TerminationReason.INFRASTRUCTURE_ERROR,
+            TerminationReason.UNEXPECTED_ERROR,
+        }
+
+        task_id = str(sim.task_id)
+        reward_info = sim.reward_info
+        reward = (
+            float(reward_info.reward)
+            if reward_info is not None and reward_info.reward is not None
+            else 0.0
+        )
+        agent_cost = sim.agent_cost or 0.0
+        user_cost = sim.user_cost or 0.0
+        term = sim.termination_reason
+        error = None
+        if term in infra_reasons:
+            error = f"tau2 terminated for infrastructure reason: {term}"
+
+        try:
+            messages = [m.model_dump() for m in sim.get_messages()]
+        except Exception:
+            messages = None
+
+        reward_info_dump = (
+            reward_info.model_dump(mode="json") if reward_info is not None else None
+        )
+
+        return Rollout(
+            task_id=task_id,
+            output=messages,
+            trace=messages,
+            cost_usd=float(agent_cost) + float(user_cost),
+            tokens=0,
+            error=error,
+            metadata={
+                "domain": DOMAIN,
+                "tau2_reward": reward,
+                "tau2_reward_info": reward_info_dump,
+                "termination_reason": str(term),
+            },
+        )
+
+    def run_trials(
+        self, tasks: list[Task], ctx, *, n_trials: int, base_seed: int
+    ) -> dict[str, list[Rollout]]:
+        """Run ALL trials of a task batch in ONE tau2 ``run_tasks`` call.
+
+        Builds a single ``TextRunConfig`` with ``num_trials=n_trials`` and
+        ``seed=int(base_seed)``, calls tau2 ``run_tasks`` once, then groups the
+        returned ``SimulationRun``s by ``(task_id, trial)``. Returns
+        ``{task_id: [rollout_t0, rollout_t1, ...]}`` — a list of length ``n_trials``
+        in trial order, None-filling any (task, trial) tau2 didn't produce. This is
+        much faster than looping ``run_batch`` per trial because tau2 schedules the
+        whole task×trial grid under one concurrency pool.
+        """
+        import os
+
+        import rits  # sibling module
+        from tau2.data_model.simulation import TextRunConfig
+        from tau2.runner import run_tasks
+
+        n_trials = int(n_trials)
+        by_id = self._tau2_tasks_by_id()
+        tau2_tasks = [by_id[t.id] for t in tasks if t.id in by_id]
+
+        # Pre-seed every requested task with a None-filled trial list so missing
+        # (task, trial) pairs surface as None (the harness records them as failures).
+        results: dict[str, list[Rollout]] = {t.id: [None] * n_trials for t in tasks}
+
+        # Tasks we couldn't map -> infra error rollout for every trial.
+        for t in tasks:
+            if t.id not in by_id:
+                results[t.id] = [
+                    Rollout(task_id=t.id, error=f"task id {t.id} not found in airline task set")
+                    for _ in range(n_trials)
+                ]
+        if not tau2_tasks or n_trials <= 0:
+            return results
+
+        llm_args = rits.llm_args()
+        max_concurrency = int(os.environ.get("TAU2_MAX_CONCURRENCY", "125"))
+
+        config = TextRunConfig(
+            domain=DOMAIN,
+            agent="llm_agent",
+            llm_agent=rits.LITELLM_MODEL,
+            llm_args_agent=dict(llm_args),
+            user="user_simulator",
+            llm_user=rits.LITELLM_MODEL,
+            llm_args_user=dict(llm_args),
+            num_trials=n_trials,
+            max_steps=100,
+            max_errors=10,
+            max_concurrency=max_concurrency,
+            seed=int(base_seed),
+        )
+
+        # tau2 prints progress to stdout; the cap-evolve skills' stdout is a pure-JSON
+        # contract, so redirect tau2's stdout to stderr for the duration.
+        import contextlib
+        import sys
+        with contextlib.redirect_stdout(sys.stderr):
+            sim_results = run_tasks(
+                config,
+                tau2_tasks,
+                save_path=None,
+                console_display=False,
+            )
+
+        # Group each SimulationRun into its task's per-trial slot by sim.trial.
+        for sim in sim_results.simulations:
+            task_id = str(sim.task_id)
+            trial = int(getattr(sim, "trial", 0) or 0)
+            slot = results.get(task_id)
+            if slot is None:
+                slot = results[task_id] = [None] * n_trials
+            if 0 <= trial < n_trials:
+                slot[trial] = self._sim_to_rollout(sim)
+
         return results
 
     def run_target(self, task: Task, ctx, *, seed: int = 0) -> Rollout:

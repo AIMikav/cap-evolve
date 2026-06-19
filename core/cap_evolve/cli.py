@@ -106,6 +106,9 @@ def _cmd_run(argv):
     p.add_argument("--dry-run", action="store_true",
                    help="print a pre-run cost estimate (call counts + $ range) and exit")
     p.add_argument("--run-ts", default=None)
+    p.add_argument("--reuse-baseline", default=None,
+                   help="prior run dir: reuse its baseline (split/baseline/seed/val-rollouts) "
+                        "and skip the baseline eval")
     # Budget overrides — when set, take precedence over the spec's values. Defaults
     # are None so "not passed" is distinguishable from an explicit 0 (= unlimited).
     p.add_argument("--max-iterations", type=int, default=None)
@@ -134,6 +137,8 @@ def _cmd_run(argv):
         v = getattr(args, flag)
         if v is not None:
             spec[key] = v
+    if args.reuse_baseline is not None:
+        spec["reuse_baseline"] = args.reuse_baseline
 
     if args.dry_run:
         print(json.dumps(_estimate_core(spec, Path(args.project)), indent=2))
@@ -157,6 +162,16 @@ def _cmd_run(argv):
     workdir = proj_abs.parent.parent
     project = str(proj_abs.relative_to(workdir))      # ".capevolve/project"
     base = str(proj_abs.parent.relative_to(workdir))  # ".capevolve"
+
+    # Start the live dashboard at the very TOP of the run — before the check gate and
+    # the phase sequence — so it is up first and the run is watchable from the start
+    # (the server scans the base dir and shows the run as soon as baseline creates it).
+    # Best-effort: never blocks or fails the run. (Absolute base: the subprocess
+    # inherits THIS process's cwd, not workdir.)
+    if dash_mode == "auto":
+        status = dashboard_launch.maybe_launch(
+            proj_abs.parent, mode=dash_mode, port=dash_port, open_browser=True)
+        print(json.dumps(status))
     cap_path = spec.get("capability_path", "seed_capability")
     ratios = f"{spec.get('split_train',0.5)},{spec.get('split_val',0.25)},{spec.get('split_test',0.25)}"
 
@@ -221,15 +236,6 @@ def _cmd_run(argv):
                           "report": chk.to_dict()}))
         return 1
 
-    # Start the live dashboard BEFORE baseline so the run is watchable from the very
-    # start: the server scans the base dir and shows the run as soon as baseline
-    # creates it. Best-effort — never blocks or fails the run. (Absolute base: the
-    # subprocess inherits THIS process's cwd, not workdir.)
-    if dash_mode == "auto":
-        status = dashboard_launch.maybe_launch(
-            proj_abs.parent, mode=dash_mode, port=dash_port, open_browser=True)
-        print(json.dumps(status))
-
     # 1) baseline (creates the run dir; capture its relative path)
     base_cmd = [py, skill_run("baseline"), "--base", base, "--project", project,
                 "--capability", cap_path, "--seed", str(spec.get("split_seed", 0)),
@@ -240,6 +246,10 @@ def _cmd_run(argv):
                 "--max-optimizer-usd", str(spec.get("max_optimizer_usd", 0.0))]
     if spec.get("split_ids_file"):
         base_cmd += ["--split-ids", str(spec["split_ids_file"])]
+    # reuse_baseline: copy a prior run's split/baseline/seed/val-rollouts and skip the
+    # baseline eval (algorithm starts at iter 1 on the reused baseline).
+    if spec.get("reuse_baseline"):
+        base_cmd += ["--reuse-baseline", str(spec["reuse_baseline"])]
     if args.run_ts:
         base_cmd += ["--run-ts", args.run_ts]
     proc = run(base_cmd)
@@ -247,6 +257,25 @@ def _cmd_run(argv):
         print(json.dumps({"step": "baseline", "error": proc.stderr[-1500:]}))
         return 1
     run_dir = json.loads(proc.stdout)["run_dir"]
+
+    # Record the intake phase's spend + summary into the run, if the intake phase
+    # wrote <project>/intake.json. Best-effort: a missing/malformed file is ignored so
+    # it never breaks the run. (run_dir is workdir-relative; resolve under workdir.)
+    try:
+        intake_path = proj_abs / "intake.json"
+        if intake_path.exists():
+            data = json.loads(intake_path.read_text(encoding="utf-8")) or {}
+            from .rundir import RunDir as _RunDir
+            rd = _RunDir.open(workdir / run_dir)
+            usd = float(data.get("usd") or 0.0)
+            tokens = int(data.get("tokens") or 0)
+            seconds = float(data.get("seconds") or 0.0)
+            rd.update_spent(intake_usd=usd, intake_tokens=tokens, intake_seconds=seconds)
+            rd.log_event("intake", usd=usd, seconds=seconds, tokens=tokens,
+                         output_summary=str(data.get("output_summary") or ""),
+                         implemented=list(data.get("implemented") or []))
+    except Exception:  # noqa: BLE001 — intake tracking is best-effort
+        pass
 
     # 2) algorithm (hill-climb variants select their schedule via --focus)
     alg_cmd = [py, skill_run(algorithm_name), "--run-dir", run_dir, "--project", project,
@@ -266,6 +295,27 @@ def _cmd_run(argv):
         caps = [c.strip() for c in caps.split(",") if c.strip()]
     if caps and algorithm_name == "hill-climb":
         alg_cmd += ["--capabilities", ",".join(str(c) for c in caps)]
+    # Thread the resolved optimizer NAME so the harness can copy that optimizer's
+    # features reference (parallel-subagent capabilities etc.) into each iteration's
+    # workdir. Only hill-climb accepts the flag; other algorithms ignore it.
+    if algorithm_name == "hill-climb":
+        alg_cmd += ["--optimizer-name", str(optimizer_name)]
+    # Optimizer-instructions template (intake-authored, per benchmark) + benchmark repo
+    # as read-only optimizer context. Both are resolved project-relative if not absolute.
+    # The instructions file defaults to the scaffolded project/optimizer/INSTRUCTIONS.md.
+    if algorithm_name == "hill-climb":
+        instr = spec.get("optimizer_instructions_file") or "optimizer/INSTRUCTIONS.md"
+        instr_p = Path(instr)
+        if not instr_p.is_absolute() and not instr_p.exists():
+            instr_p = Path(project) / instr
+        if instr_p.exists():
+            alg_cmd += ["--instructions-file", str(instr_p)]
+        repo = spec.get("runner_repo_path")
+        if repo:
+            repo_p = Path(str(repo))
+            if not repo_p.is_absolute() and not repo_p.exists():
+                repo_p = Path(project) / str(repo)
+            alg_cmd += ["--bench-repo", str(repo_p)]
     # gepa treats metric-calls as its PRIMARY budget; forward it explicitly (hill-climb
     # has no such flag and enforces the same cap via run_dir.budget_exhausted()).
     if algorithm_name == "gepa" and spec.get("max_metric_calls"):

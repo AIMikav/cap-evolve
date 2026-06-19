@@ -24,13 +24,16 @@ class RejectedMemory:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def add(self, candidate_id: str, summary: str, reason: str, val: Optional[float] = None) -> None:
+    def add(self, candidate_id: str, summary: str, reason: str, val: Optional[float] = None,
+            note: Optional[str] = None) -> None:
         rec = {
             "candidate_id": candidate_id,
             "summary": summary.strip(),
             "reason": reason.strip(),
             "val": val,
         }
+        if note and note.strip():
+            rec["note"] = note.strip()
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
 
@@ -53,6 +56,9 @@ class RejectedMemory:
         for e in items:
             v = f" (val={e['val']:.4f})" if e.get("val") is not None else ""
             lines.append(f"- **{e['summary']}** — rejected: {e['reason']}{v}")
+            note = (e.get("note") or "").strip()
+            if note:
+                lines.append(f"  - approach + lesson: {note}")
         return "\n".join(lines)
 
 
@@ -61,8 +67,11 @@ class History:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def add(self, candidate_id: str, summary: str, val: float) -> None:
+    def add(self, candidate_id: str, summary: str, val: float,
+            note: Optional[str] = None) -> None:
         rec = {"candidate_id": candidate_id, "summary": summary.strip(), "val": val}
+        if note and note.strip():
+            rec["note"] = note.strip()
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
 
@@ -83,4 +92,7 @@ class History:
         lines = ["## Accepted edits so far (what worked)"]
         for e in items:
             lines.append(f"- {e['summary']} → val={e['val']:.4f}")
+            note = (e.get("note") or "").strip()
+            if note:
+                lines.append(f"  - approach + lesson: {note}")
         return "\n".join(lines)

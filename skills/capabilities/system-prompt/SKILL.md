@@ -20,9 +20,21 @@ optimizable artifact.
 - **Task framing & role** — who the agent is and what "done" means.
 - **Output contract** — exact format the downstream/eval expects (a frequent
   silent failure: the agent is *capable* but formats wrong).
-- **Decision policy** — when to call which tool, when to ask vs. act, refusal
-  rules (tool/customer-service agents are scored on following such a policy).
+- **Decision rules** — when to call which tool, when to ask vs. act, refusal
+  rules (many agents are scored on adherence to such decision rules).
 - **Few-shot exemplars / reasoning scaffolds** — added inline.
+
+## Prose fixes KNOWLEDGE gaps, not BEHAVIORAL ones
+The system prompt is the right lever when a failure is a *knowledge* gap — the
+agent doesn't know the required output format, a decision criterion, or a rule.
+Telling it teaches it, and behavior changes. The prompt is the WRONG lever when a
+failure is *behavioral* — the agent already "knows" what to do (it analyzes,
+explains, even confirms) but then skips the action (e.g. stalls before issuing a
+write and stops). More prose does not fix a behavior the model already agreed to
+and declined; that class of failure belongs in the agent's tools/code (see the
+[`tools`](../tools/SKILL.md) capability — encapsulate the action so it can't be
+skipped). Diagnose every cluster as KNOWLEDGE (fix here) vs BEHAVIORAL (fix in
+code) before reaching for a prompt edit.
 
 ## How agents use it
 The prompt is prepended to context every turn. Agents read it literally and are
