@@ -77,6 +77,26 @@ plan the model must reconstruct each time for a single deterministic call. It is
 only worth it when the chain is *frequent and error-prone* — otherwise it just
 enlarges the choice set and hurts selection (§3).
 
+Three sub-cases, all benchmark-agnostic, recur in practice:
+
+- **Loop-in-one-call.** When the agent calls the *same* primitive N times in its
+  own context — once per id, once per date, once per route — a tool that takes
+  the list and loops inside one call removes N−1 turns and the chance of dropping
+  a result. This is the single most common waste in real traces.
+- **Rule/invariant enforcement.** When the backend does not itself enforce a
+  precondition or a required order (read-before-write, "only if cancellable"),
+  put the check in the composite's code. A violation becomes a clean refusal the
+  model can react to, instead of a silent wrong-state write.
+- **Normalization / richer return.** Resolve ids, attach related records, or
+  coerce units inside the tool so the model gets a ready-to-use result.
+
+Keeping error information matters here too: a tool's documented failure modes
+(what it `Raises`/returns on error) are part of the contract the model reasons
+over — "Tool Documentation Enables Zero-Shot Tool-Usage" (arXiv:2308.00675)
+finds documentation, not examples, is what carries usage. Deleting error
+conditions to shorten a description removes guidance and is a common
+*non-improving* edit.
+
 ## 5. The action policy is the safety boundary
 
 `inputs/policy.json` lists the allowed edit kinds. It exists because the same
