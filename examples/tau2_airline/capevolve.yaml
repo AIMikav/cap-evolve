@@ -32,7 +32,7 @@ num_trials: 10              # gpt-oss is stochastic; 10 trials → mean+stderr +
 
 # --- acceptance gate --------------------------------------------------------
 gate_mode: significant                   # significant | strict | threshold | simplicity_tiebreak
-gate_k_se: 0.5                           # significance bar (project tau2 setting)
+gate_k_se: 0.2                           # accept gains that clear a 0.2·SE bar
 
 # --- budget -----------------------------------------------------------------
 # Run `cap-evolve estimate --spec capevolve.yaml` first to preview call counts + a

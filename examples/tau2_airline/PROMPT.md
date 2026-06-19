@@ -50,7 +50,7 @@ exists). Here is everything intake needs:
 - per-iteration optimizer $ cap:  optimizer_usd_per_iter 40   (claude --max-budget-usd, enforced by the CLI itself)
 - optimizer_max_turns: 400      (generous; the $ cap is the real per-iteration ceiling)
 - max_usd: 400      max_optimizer_usd: 400
-- gate:             significant (paired), k_se 1.0
+- gate:             significant (paired), k_se 0.2
 - store:            git          (every iteration committed for an inspectable process)
 ```
 
