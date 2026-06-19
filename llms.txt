@@ -23,7 +23,7 @@ score the test split except at finalize; gate acceptance on val.
 - [CONTRIBUTING.md](CONTRIBUTING.md): dev setup and house rules.
 - [docs/ROADMAP.md](docs/ROADMAP.md): prioritized next work.
 
-## Skills (19; each is skills/<component>/<name>/SKILL.md)
+## Skills (18; each is skills/<component>/<name>/SKILL.md)
 - phases: intake, implement-and-check, baseline, evaluate, diagnose, gate, finalize, report
 - capabilities: system-prompt, skill-package, tools, mcp-tool
 - algorithms: hill-climb (--focus all|cyclic|hardest-first), gepa, skillopt
