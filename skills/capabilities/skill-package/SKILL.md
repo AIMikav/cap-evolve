@@ -36,6 +36,15 @@ skill never triggers; a bloated body → wasted context and worse behavior.
 with a "use when" clause), body ≤500 lines, references one level deep + TOC for
 long ones, and that linked files exist.
 
+## Optimizing it each iteration (analyze → ideate → edit)
+The optimizer should **analyze before editing**: from the traces + the current
+skill, identify (a) the recurring failures clustered by root cause (the step the
+agent skips, the wrong trigger, the part of SKILL.md it misreads) and (b) the good
+behavior seen only on some trials that should be made consistent; then make ONE
+targeted edit (description/body/reference) that fixes the biggest cluster and
+reinforces (b), staying within the skill-creator rules. Be economical: one good
+edit, then stop.
+
 ## How to run
 ```
 python scripts/check.py

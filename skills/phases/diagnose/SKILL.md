@@ -36,6 +36,25 @@ rollouts.
 - **kept_good:** tasks already passing — the set the gate's no-regression check
   must protect, so a fix for one cluster does not silently break a passing task.
 
+## The signal the optimizer iterates on (analyze → ideate → edit)
+The reflective dataset feeds a fixed three-step shape the algorithm encodes into
+the per-iteration optimizer INSTRUCTIONS — the optimizer must **analyze before it
+edits**, never patch blindly:
+1. **Analyze first.** From the traces + the current capability, name (a) the MAIN
+   RECURRING problems (the failure *clusters* above, biggest first, with evidence)
+   and (b) the GOOD behaviors that occur only *sometimes* — tasks whose mean reward
+   is between 0 and 1 pass on some trials and fail on others; identify what the
+   good runs do so it can be made CONSISTENT. (Always-failing tasks, mean ≈ 0, are
+   a root-cause fix; flaky tasks are a consistency/reinforcement fix — a different
+   edit. Note the per-task `Feedback` line is from the *last* trial and can disagree
+   with a graded mean; the reward is the honest signal.)
+2. **Then ideate.** Propose the single best targeted edit (or tight set) that
+   directly addresses the biggest cluster from (a) and reinforces (b) — concrete
+   edits to the capability, generalizing across the class, not vague advice and not
+   a one-off patch to one task.
+3. **Then edit and stop.** Apply it; the harness re-scores. Be economical — no
+   narration, no exploring unrelated files, do exactly what's needed and finish.
+
 ## Turning traces into an actionable signal (the real work)
 A good diagnosis is **specific, causal, and general**:
 - **Specific:** name the concrete failure (the wrong tool call, the missing step,

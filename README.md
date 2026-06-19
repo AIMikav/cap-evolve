@@ -6,364 +6,386 @@
 
 <p align="center"><em>watch capability evolve</em></p>
 
-<!-- badges: replace OWNER/REPO once published -->
-![status](https://img.shields.io/badge/status-beta%20(0.x)-orange)
-![tests](https://img.shields.io/badge/tests-28%20passing-brightgreen)
-![python](https://img.shields.io/badge/python-3.10%2B-blue)
-![deps](https://img.shields.io/badge/runtime%20deps-0%20(stdlib)-success)
-![license](https://img.shields.io/badge/license-MIT-informational)
-![skills](https://img.shields.io/badge/agent%20skills-19-7c5cff)
+<p align="center">
+  <img src="https://img.shields.io/badge/status-beta%20(0.x)-orange" alt="status">
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="python">
+  <img src="https://img.shields.io/badge/runtime%20deps-0%20(stdlib)-success" alt="deps">
+  <img src="https://img.shields.io/badge/license-MIT-informational" alt="license">
+  <img src="https://img.shields.io/badge/agent%20skills-18-7c5cff" alt="skills">
+</p>
 
-**Optimize any AI agent's capabilities — its skills, tools/MCP, and prompts —
-against your own eval. Host-agnostic. Honest train/val/test. Every iteration
-versioned in git.**
+**cap-evolve is a skills-based, host-agnostic harness that optimizes *any* agent
+capability — a system prompt, its tools/MCP, or a whole skill package — against
+*your* eval, with honesty enforced in code and every iteration git-versioned.**
 
-cap-evolve is a library of [Agent Skills](https://www.anthropic.com/news/skills)
-(plus a tiny stdlib core) that turns "make this agent better at X" into a
-disciplined loop *any* coding agent can run: collect inputs → wire a small
-adapter → evaluate → diagnose failures → propose edits → keep only what beats a
-held-out set → report. It optimizes what your agent *reads*, and reports a single,
-honest number you can trust.
+You wire a tiny adapter once (or let a coding agent write it for you). cap-evolve
+runs the loop: evaluate → diagnose failures → propose an edit → keep it only if it
+beats a held-out split by a significant margin → commit → report a single honest
+number. It optimizes what your agent *reads*, not its weights.
 
-> **Status:** beta (`0.x`) — APIs may change. Working end to end; proven on a real
-> benchmark (see [Results](#results)).
+**Contents:** [Why](#why-cap-evolve) · [Install](#install) ·
+[Toy example](#toy-example-zero-api) · [tau2-bench example](#tau2-bench-example-real) ·
+[Optimize your own](#optimize-your-own) · [How it works](#how-it-works) ·
+[Comparison](#how-it-compares) · [Skill library](#skill-library) ·
+[Results](#results) · [License](#license)
 
-**Contents:** [Quickstart](#quickstart-60-seconds) ·
-[Optimize your own](#optimize-your-own-skill-tool-or-agent) · [Results](#results) ·
-[Supported agent hosts](#supported-agent-hosts) · [Install](#install) ·
-[Usage](#usage-swap-one-word) · [How it works](#how-it-works) ·
-[Dashboard](#dashboard) · [Comparison](#how-it-compares) ·
-[Skill library](#skill-library) · [Examples](#examples) ·
-[Extending](#extending) · [Contributing](#contributing) · [Citation](#citation)
+## Why cap-evolve
 
-## Quickstart (60 seconds)
+- **Optimizes prompts, tools/MCP, *and* skill packages** — not just prompts.
+  Pick one or several (`[system-prompt, tools, mcp-tool, skill-package]`) and
+  optimize them jointly.
+- **Onboard any benchmark/agent from a single prompt.** Paste one intake brief to
+  your coding agent; it installs the benchmark, wires a tiny adapter, and runs the
+  loop. No pre-integration.
+- **Honesty enforced in code, not docs.** The sealed test split is scored exactly
+  once and a paired significance gate (Δ > k·SE) decides every acceptance — both
+  live in the `cap_evolve` core, the only place rewards are aggregated.
+- **Host- and agent-agnostic.** The optimizer is *any* coding-agent CLI
+  (claude-code, codex, gemini, opencode, ibm-bob, …) resolved by one registry row.
+  No framework lock-in.
+- **Git-versioned iterations + optimizer memory** — every candidate is a commit;
+  rejected approaches are remembered and never re-proposed.
+- **Per-iteration optimizer $ budget**, enforced by the optimizer CLI itself
+  (e.g. claude `--max-budget-usd`), plus hard total caps and a dry-run estimate.
+- **Live dashboard** — per-iteration optimizer & runner cost + time, intake cost,
+  lineage tree, per-iteration diffs, and a tasks × iterations pass/fail heatmap.
+- **Skills-native & trivially extensible** — a new capability, algorithm, or
+  optimizer is one folder or one registry row.
+- **Zero runtime dependencies** — the core is pure Python stdlib.
 
-**Prerequisites:** Python 3.10+ and git — that's all for this example (it's
-**zero-API**, so no model key needed). A *real* optimization additionally needs a
-coding-agent CLI to act as the optimizer (e.g. `claude`, `codex`, `gemini`) plus
-its API key — see [Optimize your own](#optimize-your-own-skill-tool-or-agent). Some
-benchmarks (e.g. skills-bench) also need Docker.
+## Install
 
-**Step 1 — verify the install with a real, zero-API run** (the `toy_calc` example:
-a deterministic agent whose score depends on its system prompt; the `mock` optimizer
-edits the prompt, so no API is called):
+Requires **Python 3.10+** and **git**.
 
 ```bash
 git clone <repo> cap-evolve && cd cap-evolve
-pip install ./core                         # the honest-eval substrate (CLI: cap-evolve)
-./install.sh                               # place skills into your agent host
-bash examples/toy_calc/run.sh              # scaffold a tmp project dir and run end-to-end
+python3 -m venv .venv && source .venv/bin/activate   # recommended (isolated env)
+pip install ./core                  # the honest-eval core (package: cap-evolve-core, CLI: cap-evolve)
+pip install ./dashboard/backend     # optional: the live dashboard UI (cap-evolve run --dashboard auto)
+./install.sh                        # optional: copy skills into your agent host's skills dir
+cap-evolve version                  # verify the install
 ```
-```jsonc
-{
-  "baseline_val": 0.0,        // seed prompt fails every task
-  "test_reward": 1.0,         // optimized prompt, scored ONCE on the sealed test split
-  "test_pass_k": {"1": 1.0},
-  "dashboard": ".capevolve/run_*/dashboard.html"   // open in any browser
-}
+
+> **If your default pip index requires auth**, append `--index-url https://pypi.org/simple`
+> to the `pip install` lines (cap-evolve-core itself has zero runtime deps).
+
+Optimizing a real agent additionally needs: a coding-agent CLI to act as the
+**optimizer** (e.g. `claude`, `codex`, `gemini`) with its credentials, and your
+**runner**'s model credentials — all in a repo-root `.env` (e.g. `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `RITS_API_KEY`, `WATSONX_*`). The toy example below needs **none** of this.
+
+## Toy example (zero-API)
+
+Verify the install with a deterministic, no-key run. `toy_calc` is a stand-in
+agent that only answers correctly when its system prompt contains a `[CALC]`
+marker; the `mock` optimizer adds it, so the score provably rises — no model is
+called.
+
+```bash
+bash examples/toy_calc/run.sh
 ```
-Open the printed `dashboard.html` to see the run. That confirms the install works.
 
-**Step 2 — optimize your own skill / tool / agent:** see the next section.
-Or, host-agnostic: point any agent at [`RUN.md`](RUN.md) and say *"follow RUN.md."*
-
-## Optimize your own skill, tool, or agent
-
-The Quickstart runs a *bundled* example. To optimize **your** capability against
-**your** benchmark, you supply three things and cap-evolve runs the loop:
-
-1. **The capability to optimize** — a skill (`SKILL.md` package), a tool's code, an
-   MCP tool definition, or a system prompt. A *copy* is edited each iteration; your
-   original is never touched.
-2. **Tasks** — your benchmark's eval cases (each with an id + a gold/criterion).
-3. **A scorer** — how one run becomes a reward in `[0,1]` (+ short feedback).
-
-You connect these once through a tiny **adapter** (`tasks · run_target · score`
-plus a pure `materialize` + a `live` context manager; `apply` is kept as a
-back-compat hook). There are two ways to get there — pick one:
-
-### Path A — let your coding agent build and run it (no Python from you)
-Open the coding agent you already use (**Claude Code**, Codex, Gemini CLI, opencode,
-…) at the repo root and tell it to follow `RUN.md`. It loads the `intake` skill, asks
-you for anything missing, **writes the adapter for you**, runs the `cap-evolve check` gate,
-then the full optimize → significance-gate → sealed-test → report loop, and prints the
-dashboard path. (This is exactly how [`examples/date_tool`](examples/date_tool) was
-built — the optimizer agent wrote the adapter from scratch and improved the tool
-**0.125 → 1.0**, no human edits.)
-
-Give it the details `intake` needs up front (anything you omit, it will ask for — and
-will **never fabricate a NEEDED input**). Copy this template and fill it in:
+Expected: the seed prompt scores `0.0` on val; the optimized prompt is gate-accepted
+and scores `1.0` on the sealed test split.
 
 ```text
-Follow RUN.md to run a cap-evolve optimization. Here is everything intake needs:
+baseline_val 0.0  ->  test_reward 1.0   (gate-accepted, test sealed) + dashboard.html
+```
 
-# 1. CAPABILITY TO OPTIMIZE  (what gets edited each iteration)
-- type:            system-prompt | tools | mcp-tool | skill-package   (one or a list)
-- local path:      <path to the skill dir / tool file / prompt / policy to optimize>
+This is exactly what `core/tests/test_e2e_slice.py` asserts. Open the printed
+`dashboard.html` in any browser to see the run.
 
-# 2. BENCHMARK / DATASET  (the eval)
-- benchmark repo:  <local path or git URL of the benchmark, e.g. ./my-bench>
-- tasks:           <tasks.jsonl path>  OR  "adapter" (the adapter builds them from the benchmark)
-- task format:     each case has an id, an input, and a gold/criterion
-- splits:          ratio 0.5/0.25/0.25 (seeded)  |  explicit ids file  |  all-in-each (no holdout, fit metric)
+## tau2-bench example (real)
+
+The bundled [`examples/tau2_airline`](examples/tau2_airline) takes a **brand-new
+benchmark** from one prompt to an honest, optimized result. It optimizes the
+airline **policy + tools together** with a `claude-opus-4-6` optimizer, using
+`gpt-oss-120b` over IBM RITS as **both** the agent and the user simulator.
+
+```bash
+# RITS creds in repo-root .env (RITS_API_KEY, RITS_API_URL); be logged into Claude Code.
+bash examples/tau2_airline/setup.sh   # intake: clone + pip install -e tau2-bench, scaffold
+                                      # the project, wire adapter + RITS shim + seed,
+                                      # then cap-evolve check (the hard gate)
+bash examples/tau2_airline/run.sh     # cap-evolve run --dashboard auto: full loop + live UI
+```
+
+This two-command path is simply the executable transcript of pasting
+[`PROMPT.md`](examples/tau2_airline/PROMPT.md) to your coding agent and saying
+*"follow [`RUN.md`](RUN.md)."* Intake onboards tau2-bench (recording the resolved
+commit), wires the adapter, passes `cap-evolve check`, then optimizes over all 50
+airline tasks (10 trials each) under a per-iteration `--max-budget-usd` cap, with a
+paired significance gate and a git commit per iteration. `--dashboard auto` serves
+the live capybara UI; the `setup.sh` flag `--dashboard` / `--no-dashboard` toggles
+installing that server. Full walkthrough: [`DEMO.md`](examples/tau2_airline/DEMO.md);
+reproduce from zero: [`docs/REPRODUCE_tau2.md`](docs/REPRODUCE_tau2.md).
+
+This is the exact prompt that produced this example — paste it to your coding agent
+and say *"follow RUN.md"*:
+
+```text
+Follow RUN.md to run a cap-evolve optimization. Onboard this as a brand-new
+benchmark — the intake/integration step should CLONE + INSTALL it (not assume it
+exists). Here is everything intake needs:
+
+# 1. CAPABILITY TO OPTIMIZE  (a copy is edited each iteration; the original is never touched)
+- type:         [system-prompt, tools]      # the airline POLICY and the TOOLS, jointly
+- tools means:  edit tool docstrings/descriptions; edit tool behavior/code; and
+                ADD/REMOVE tools, including composite tools that call existing tools
+- seed:         tau2-bench's canonical airline policy + its airline tool set
+
+# 2. BENCHMARK / DATASET  (the eval) — INSTALL IT DURING INTAKE
+- benchmark:    tau2-bench, airline domain
+- repo:         https://github.com/sierra-research/tau2-bench   (latest main; record the resolved commit)
+- install:      git clone as a sibling dir ../tau2-bench, then `pip install -e ../tau2-bench`
+- tasks:        "adapter" — the adapter loads all 50 airline tasks from tau2
+                (tau2.domains.airline.environment.get_tasks)
+- splits:       all 50 tasks as train = val = test  (no-holdout fit metric; the engine
+                logs a splits_warning and the report flags the test number as a fit metric)
 
 # 3. RUNNER  (the agent under test) + MODELS + CREDENTIALS
-- how to run one task: <your agent's CLI/SDK/HTTP entrypoint, or the benchmark's own batch runner>
-- runner model(s): <e.g. watsonx/openai/gpt-oss-120b>
-- credentials:     <env vars / .env keys the runner needs, e.g. RITS_API_KEY, WATSONX_*>
+- how to run:   tau2's own batch runner (adapter.run_batch -> tau2.runner.run_tasks)
+- agent AND user simulator:  openai/gpt-oss-120b  via IBM RITS
+- RITS wiring:  litellm model "hosted_vllm/openai/gpt-oss-120b" + per-call api_base +
+                extra_headers {"RITS_API_KEY": ...}  (NO litellm monkeypatch, NO tau2 fork)
+- credentials:  RITS_API_KEY (+ RITS_API_URL) in the repo-root .env
+- concurrency:  TAU2_MAX_CONCURRENCY=100
 
 # 4. SCORER  (what to optimize against)
-- metric:          <exact-match | task reward in [0,1] | rubric | a pass/fail rule>
-- where it comes from: <the benchmark's verifier, or your scoring function>
-- objective:       maximize mean reward on the VAL split
+- metric:       tau2's own task reward in [0,1] (required actions performed + info communicated)
+- feedback:     gold-AWARE but gold-SAFE — which required actions/info were missed (the learning signal)
+- objective:    maximize mean reward on the VAL split
 
 # 5. OPTIMIZER  (proposes the edits) + MODEL + CREDENTIALS
-- optimizer:       claude-code | codex | gemini-cli | opencode | openclaw | ibm-bob | generic | mock
-                   (one runner — `run-optimizer` — resolves the name via optimizers/registry.yaml)
-- optimizer model: <e.g. claude-opus-4-6>   (omit to use the optimizer's default)
-- credentials:     <e.g. ANTHROPIC_API_KEY, or BOBSHELL_API_KEY for ibm-bob>
+- optimizer:    claude-code
+- model:        claude-opus-4-6
+- credentials:  a logged-in Claude Code session (or ANTHROPIC_API_KEY)
 
 # 6. BUDGET / GATE
-- algorithm:       hill-climb (--focus all|cyclic|hardest-first) | gepa | skillopt
-                   (gepa & skillopt are the sample-efficient flagships)
-- max_iterations:  <N>     num_trials: <K, use >=3 for a stochastic agent>
-- max_metric_calls:<N, 0=unlimited>   max_usd: <$, 0=unlimited; runner+optimizer+intake>
-- max_optimizer_usd:<$, 0=off>        optimizer_max_turns: <N, per-iteration agent-CLI cap>
-- gate:            significant (k_se, e.g. 1.0) | strict | threshold   (paired sig is the default)
+- algorithm:        hill-climb  (--focus all)
+- max_iterations:   10          num_trials: 10
+- per-iteration optimizer $ cap:  optimizer_usd_per_iter 40   (claude --max-budget-usd, enforced by the CLI itself)
+- optimizer_max_turns: 400      (generous; the $ cap is the real per-iteration ceiling)
+- max_usd: 400      max_optimizer_usd: 400
+- gate:             significant (paired), k_se 0.2
+- store:            git          (every iteration committed for an inspectable process)
 ```
 
-**Preview the spend before you run.** `cap-evolve estimate --spec capevolve.yaml`
-prints the call counts (`val × trials × iterations` runner calls, `iterations`
-optimizer calls) and a $ range — calibrated from your prior runs' *actual* reported
-cost when available, else priced from a bundled table (or `--price-in/--price-out`).
-Every cap is a hard stop, and soft `budget_warning` events fire at 50%/80% of
-`max_usd`. Optimizer spend is tracked per role (intake / optimizer / runner) and
-counts toward `max_usd`. Any cap can also be overridden at the command line:
+## Optimize your own
 
-```bash
-cap-evolve estimate --spec capevolve.yaml          # dry-run cost preview (spends nothing)
-cap-evolve run --spec capevolve.yaml --max-usd 10 --max-iterations 5 \
-               --optimizer-max-turns 30            # claude-code → --max-turns 30 per step
+To optimize **your** capability against **your** benchmark, you wire one small
+**adapter** ([`docs/ADAPTER_CONTRACT.md`](docs/ADAPTER_CONTRACT.md)) — three
+required methods plus optional hooks:
+
+```python
+tasks(split)                   -> list[Task]   # your eval cases for 'train'|'val'|'test'|'all'
+run_target(task, ctx, *, seed) -> Rollout      # run your agent with the candidate LIVE as ctx;
+                                               #   forward `seed` if stochastic; set Rollout.error on infra failure
+score(task, rollout)           -> Score        # reward in [0,1] + feedback (never leak the gold)
+
+# optional (working defaults provided):
+materialize(cand_dir, edits)   -> None         # PURE write of edits into cand_dir
+live(cand_dir)                 -> ctx (CM)      # make the candidate live for ONE eval
+run_batch(tasks, ctx, *, seed) -> ...           # implement INSTEAD of run_target to drive a
+                                               #   benchmark's OWN batch runner (as tau2 does)
 ```
 
-**Worked example — tau2-bench airline, from scratch** (this is the bundled
-[`examples/tau2_airline`](examples/tau2_airline); the adapter is provided, so the agent
-just wires the inputs and runs):
+Everything else — splits, trials, gating, pass^k, the sealed test, memory, and the
+dashboard — is provided by the core and must not be reimplemented (that is what
+keeps eval honest). Two ways to get there:
+
+**A — let your coding agent build it (no Python from you).** Open the coding agent
+you already use at the repo root and tell it to follow `RUN.md`. It loads the
+`intake` skill, asks for anything missing (never fabricating a NEEDED input),
+writes the adapter, runs `cap-evolve check`, then the full loop.
+[`examples/tau2_airline/PROMPT.md`](examples/tau2_airline/PROMPT.md) is a complete
+worked brief (also embedded verbatim in the
+[tau2-bench section](#tau2-bench-example-real) above).
+
+Fill this in and paste it to your coding agent with *"follow RUN.md"* — intake asks
+for anything you omit and never fabricates a needed input:
 
 ```text
-Follow RUN.md to run a cap-evolve optimization:
-# 1. CAPABILITY: [system-prompt, tools]  (optimize the airline policy AND the tool docstrings/code)
-#    local path: examples/tau2_airline/seed_caps   (policy/policy.md + tools/tools.py)
-# 2. BENCHMARK: tau2-bench airline; repo local at ../tau2-bench; tasks via "adapter" (50 airline tasks)
-#    splits: an honest holdout (e.g. 30/10/10) via a split_ids.json, or all 50 as
-#    train/val/test for a no-holdout fit metric (the engine logs a splits_warning)
-# 3. RUNNER: agent AND user simulator = watsonx/openai/gpt-oss-120b via IBM RITS;
-#    credential RITS_API_KEY in the repo-root .env; tau concurrency 7 (TAU2_MAX_CONCURRENCY=7)
-# 4. SCORER: tau2's own task reward in [0,1] (required actions performed + info communicated);
-#    objective = maximize mean reward on val
-# 5. OPTIMIZER: ibm-bob  (or claude-code @ claude-opus-4-6); credential BOBSHELL_API_KEY (or ANTHROPIC_API_KEY)
-# 6. BUDGET: algorithm hill-climb (--focus all); max_iterations 20; num_trials 5; gate significant (k_se 0.5)
-#            max_usd 50 (total cap); optimizer_max_turns 40 (claude-code per-step cap); max_metric_calls 0
-#            (or algorithm gepa / skillopt for the sample-efficient flagships)
+Follow RUN.md to run a cap-evolve optimization on MY benchmark/agent. If the
+benchmark is not installed yet, the intake/integration step should CLONE + INSTALL
+it. Here is everything intake needs (fill each field; leave a field blank only if
+you want intake to ask):
+
+# 1. CAPABILITY  (what gets optimized — a COPY is edited each iteration; the original is never touched)
+- type:    <one or a list of: system-prompt | tools | mcp-tool | skill-package>
+           # system-prompt = a prompt/policy text file; tools = the agent's OWN tools;
+           # mcp-tool = tools served by an EXTERNAL MCP server (only docs/exposed-set edits);
+           # skill-package = an Agent Skill dir (SKILL.md + refs + scripts). Combine, e.g. [system-prompt, tools].
+- seed:    <path to the seed artifact to optimize, e.g. policy/policy.md | tools.json | skills/<name>/>
+- NOTE for `tools`: the optimizer may edit tool docstrings/descriptions AND tool
+           behavior/code, AND add/remove COMPOSITE tools that call existing tools
+           (wrapping rules, loops, argument normalization) — not just reword docs.
+
+# 2. BENCHMARK / DATASET  (the eval)
+- benchmark:  <name, e.g. my-bench / SWE-bench-lite / a homegrown suite>
+- repo:       <local path OR git URL>            # where the benchmark code/data lives
+- install:    <how to install it, e.g. `pip install -e ../<bench>`; RECORD the resolved commit for reproducibility>
+- tasks:      <path to tasks.jsonl  OR  "adapter">   # "adapter" = adapter.tasks(split) builds them in-code
+- task format: each task = id + input + gold/criterion
+              # one JSON object per line: {"id": ..., "input": ..., "target"/"criterion": ...}
+- splits:     <one of:>
+              #  seeded ratio   -> split_seed + split_train/val/test (default 0.5/0.25/0.25)
+              #  explicit       -> split_ids.json  {"train":[...],"val":[...],"test":[...]} (e.g. an official split)
+              #  no-holdout fit -> train == val == test == all ids (report FLAGS the test number as a fit metric)
+
+# 3. RUNNER  (the agent under test) + MODELS + CREDENTIALS
+- how to run one task:  <in-process call | subprocess | HTTP endpoint
+                         | the benchmark's OWN batch runner -> implement adapter.run_batch instead of run_target>
+- runner model(s):      <model id(s) the agent under test uses>
+- credentials:          <env vars / repo-root .env keys, e.g. OPENAI_API_KEY, WATSONX_*, RITS_API_KEY — never hardcode a secret>
+- custom/OpenAI-compatible endpoint (vLLM, IBM RITS, a gateway):
+                        <api_base + any custom auth header>
+                        # pass via the runner's LLM config (most benchmarks forward extra kwargs to litellm);
+                        # prefer PER-CALL config — no monkeypatch, no benchmark fork
+- concurrency knob:     <e.g. an env var / max-concurrency setting the runner honors>
+
+# 4. SCORER  (what to optimize against)
+- metric:     <exact-match | reward in [0,1] | rubric | pass/fail rule>
+- source:     <the benchmark's own verifier  OR  your score() function in adapter.py>
+- feedback:   must be GENERAL and gold-SAFE — it is the learning signal; never leak the gold answer
+- objective:  maximize mean reward on the VAL split
+
+# 5. OPTIMIZER  (proposes the edits) + MODEL + CREDENTIALS
+- optimizer:   <claude-code | codex | gemini-cli | opencode | openclaw | ibm-bob | generic | mock>
+- model:       <backend-specific model id>
+- credentials: <e.g. ANTHROPIC_API_KEY or a logged-in Claude Code session; BOBSHELL_API_KEY for ibm-bob>
+
+# 6. BUDGET / GATE
+- algorithm:            <hill-climb (--focus all|cyclic|hardest-first) | gepa | skillopt>
+- max_iterations:       <N — dominant cost knob>
+- num_trials:           <>=3 for a stochastic agent; 1 only for a deterministic one>   # enables pass^k
+- max_metric_calls:     <0 = unlimited; else stop after N runner evals>
+- max_usd:              <total $ cap over runner + optimizer + intake; 0 = unlimited>
+- max_optimizer_usd:    <cumulative optimizer-only $ cap; 0 = unlimited>
+- optimizer_usd_per_iter: <PER-ITERATION $ cap enforced by the optimizer CLI itself, e.g. claude `--max-budget-usd N`>
+- optimizer_max_turns:  <per-iteration WORK cap passed to the agent CLI, e.g. claude `--max-turns N`>
+- gate:                 <significant (k_se) | strict | threshold>
+                        # significant: accept only if Δ > k_se · SE — k_se is how many standard errors
+                        # the val gain must clear (e.g. 0.2 = lenient, 1.0 = strict) so noise isn't mistaken for progress
+- stall:                <stop after N consecutive rejects; 0 = run all max_iterations>
+- store:                git          # versions every iteration as a commit for an inspectable process
 ```
 
-The exact, copy-pasteable commands plus two real autonomous runs (hill-climb/ibm-bob
-and gepa/claude-code, with dashboards) are in
-[`examples/tau2_airline/run_full/README.md`](examples/tau2_airline/run_full/README.md).
+**B — drive the `cap-evolve` CLI yourself.**
 
-### Path B — drive it yourself with the `cap-evolve` CLI
 ```bash
-# 1. scaffold a project (adapter STUB + capevolve.yaml + PROJECT.md)
-python3 skills/phases/intake/scripts/run.py --base .capevolve
-
-# 2. implement the methods in .capevolve/project/adapters/adapter.py:
-#      tasks(split)                 -> your benchmark's tasks  (id, input, target)
-#      run_target(task, ctx, *,seed)-> run YOUR agent on the task with the candidate live as ctx;
-#                                      forward `seed` to a stochastic runner so trials vary (real pass^k)
-#      score(task, rollout)         -> reward in [0,1] + feedback
-#      materialize(cand_dir, edits) -> PURE write of edits into cand_dir (no global effect)
-#      live(cand_dir)               -> context manager: make cand_dir live for ONE eval, yields ctx
-#    (apply(cand_dir, edits) is still supported as a back-compat hook; the default live() calls it.)
-#    Fastest path: copy the closest example adapter below and edit it.
-
-# 3. fill .capevolve/project/capevolve.yaml  (capabilities / optimizer / algorithm / splits)
-
-# 4. hard gate, then run
-cap-evolve check .capevolve/project
-cap-evolve run --spec .capevolve/project/capevolve.yaml --project .capevolve/project
+python3 skills/phases/intake/scripts/run.py --base .capevolve   # scaffold adapter STUB + capevolve.yaml
+# 1. implement tasks / run_target (or run_batch) / score in
+#    .capevolve/project/adapters/adapter.py  (copy the closest example below)
+# 2. set capabilities / optimizer / algorithm / splits in capevolve.yaml
+cap-evolve check .capevolve/project                              # hard gate — must print {"ok": true}
+cap-evolve estimate --spec .capevolve/project/capevolve.yaml     # dry-run cost preview (spends nothing)
+cap-evolve run   --spec .capevolve/project/capevolve.yaml --project .capevolve/project
 open .capevolve/run_*/dashboard.html
 ```
 
-**Start from the closest worked example** — copy its `adapter.py`, point it at your
-data, swap `capabilities` in `capevolve.yaml`:
+Start from the closest example and edit its `adapter.py`:
 
-| You want to optimize… | Copy this example | `capabilities:` |
-|---|---|---|
-| a **tool's code** | [`examples/date_tool`](examples/date_tool) | `[tools]` |
-| a **skill package** (`SKILL.md`) | [`examples/skills_bench`](examples/skills_bench) | `[skill-package]` |
-| a **system prompt + tools** (real agent) | [`examples/tau2_airline`](examples/tau2_airline) | `[system-prompt, tools]` |
-| a simple **prompt** / extractor | [`examples/toy_calc`](examples/toy_calc) · [`examples/json_extract`](examples/json_extract) | `[system-prompt]` |
+| You want to optimize…                       | Copy                                              | `capabilities:`          |
+|---------------------------------------------|---------------------------------------------------|--------------------------|
+| a **prompt** (zero-API proof)               | [`examples/toy_calc`](examples/toy_calc)          | `[system-prompt]`        |
+| a **system prompt + tools** (real agent)    | [`examples/tau2_airline`](examples/tau2_airline)  | `[system-prompt, tools]` |
 
-### Pointing it at your own benchmark
-Your benchmark plugs in **only** through the adapter — nothing else changes:
-- `tasks(split)` reads your benchmark's cases (its files, or an API call).
-- `run_target(task, ctx, *, seed)` runs your agent on one task **with the candidate
-  capability live** (`ctx` is what `live()` yielded), capturing output/trace into a
-  `Rollout`; forward `seed` if the runner is stochastic, and set `Rollout.error` when
-  a run fails for an infrastructure reason so the gate treats it as noise.
-- `score(task, rollout)` turns that into a reward using your benchmark's metric.
-
-If your benchmark ships its **own batch runner**, implement `run_batch` instead of
-per-task `run_target` (see [`examples/tau2_airline/adapter.py`](examples/tau2_airline/adapter.py))
-so cap-evolve drives the benchmark's runner directly. Splits, trials, the gate,
-pass^k, the sealed test, and the dashboard are all handled for you.
-
-## Results
-
-Real [tau2-bench](https://github.com/sierra-research/tau2-bench) **airline** run —
-optimizing the airline **policy + tools together** with a Claude-Opus optimizer and
-`gpt-oss-120b` as both agent and user simulator, over all 50 tasks:
-
-| | reward |
-|---|---|
-| baseline (seed policy + default tool docs) | **0.46** |
-| **optimized** (policy + tool docstrings, 8 iterations) | **0.80** · pass^1 0.80 · pass@2 0.87 |
-
-**+0.34** on 50 tasks (31/50 fully solved) — every iteration a git commit, the
-optimizer's reasoning kept in `STATE.md` / `rejected.jsonl`. Exact commands, inputs,
-and intake answers: [docs/REPRODUCE_tau2.md](docs/REPRODUCE_tau2.md); measured
-numbers: [examples/tau2_airline/RESULTS.md](examples/tau2_airline/RESULTS.md).
-
-## Supported agent hosts
-
-Any of these can drive the **optimizer** (the agent that proposes edits). One skill
-(`run-optimizer`) resolves the optimizer name to a verified headless command via
-`optimizers/registry.yaml` (one row per optimizer); per-CLI install/auth prose lives
-in `skills/optimizers/run-optimizer/references/<name>.md`. Adding an optimizer is one
-YAML row — no new skill.
-
-| Host (optimizer) | Registry name | Headless command | Status |
-|---|---|---|---|
-| Claude Code | `claude-code` | `claude -p … --permission-mode acceptEdits` | stable |
-| OpenAI Codex CLI | `codex` | `codex exec --sandbox workspace-write …` | stable |
-| Gemini CLI | `gemini-cli` | `gemini -p … --approval-mode=yolo` | stable |
-| opencode | `opencode` | `opencode run --dangerously-skip-permissions …` | stable |
-| OpenClaw | `openclaw` | configurable (`CAPEVOLVE_OPENCLAW_CMD`) | beta |
-| IBM Bob | `ibm-bob` | `bob --accept-license --yolo --chat-mode code …` | beta |
-| Any CLI agent | `generic` | `CAPEVOLVE_OPTIMIZER_CMD` template | stable |
-| (tests / CI) | `mock` | deterministic, zero-API | stable |
-
-`install.sh` auto-detects each host's skill dir (Claude Code `.claude/skills`,
-Codex `.agents/skills`, opencode native, Gemini extensions, …).
-
-## Install
-```bash
-pip install ./core            # package: cap-evolve-core, CLI: cap-evolve
-./install.sh                  # copy skills into your host's skills dir (optionally --host <name>)
-```
-
-**Claude Code plugin (one command):** `claude --plugin-dir ./plugins/cap-evolve`
-exposes every skill as `/cap-evolve:<skill>` (each phase is dual-mode: standalone
-slash command **+** orchestrator-callable **+** headless JSON), ships honesty **hooks**
-(PreToolUse denies edits to the sealed test split / gold; Stop/SubagentStop blocks
-finishing until `cap-evolve check` / the gate is green), a read-only diagnoser and a
-writer proposer subagent, and a `using-cap-evolve` session-start router. The honesty
-enforcement lives in **core-owned scripts**, never in editable skill markdown.
-
-## Usage (swap one word)
-
-Name the optimizer in `capevolve.yaml`; the loop is identical — only the optimizer
-NAME changes (one runner, `run-optimizer`, resolves it via `optimizers/registry.yaml`):
+**Swapping the optimizer is one word** in `capevolve.yaml` — one runner
+(`run-optimizer`) resolves the name via `skills/optimizers/registry.yaml`:
 
 ```yaml
-# .capevolve/project/capevolve.yaml
-capabilities: [system-prompt, tools]   # list of capabilities to optimize jointly
-                                       #   any of: system-prompt | tools | mcp-tool | skill-package
-optimizer:        claude-code      # ← swap the NAME: codex | gemini-cli | opencode | openclaw | ibm-bob | generic | mock
-algorithm_skill:  hill-climb       # hill-climb (--focus all|cyclic|hardest-first) | gepa | skillopt
+capabilities:    [system-prompt, tools]   # any of: system-prompt | tools | mcp-tool | skill-package
+optimizer_skill: claude-code              # ← swap: codex | gemini-cli | opencode | openclaw | ibm-bob | generic | mock
+algorithm_skill: hill-climb               # hill-climb (--focus all|cyclic|hardest-first) | gepa | skillopt
 num_trials: 4
-store: git                         # versions every iteration; or: copy | command (e.g. a skills store)
+store: git                                # versions every iteration
 ```
-```bash
-python3 -m cap_evolve.cli run --spec .capevolve/project/capevolve.yaml --project .capevolve/project
-```
+
+**Extending is just as small:** a new capability, algorithm, or optimizer is one
+folder or one `optimizers/registry.yaml` row — see
+[`docs/EXTENDING.md`](docs/EXTENDING.md).
 
 ## How it works
-1. **Intake** — interview the user, scaffold `.capevolve/project/`, gather inputs (ask if missing).
-2. **Implement & check** — fill the adapter (`tasks · run_target · score` + `materialize`/`live`; `apply` back-compat); `cap-evolve check` is a hard gate.
-3. **Baseline** — freeze seeded train/val/test (test **sealed**), score the seed on val.
-4. **Optimize** — each iteration: diagnose failing traces → the optimizer edits a candidate → score on **val** (each trial gets its own `seed`, so pass^k measures real variance) → a **paired significance gate** (Δ > k·SE, auto-selected because candidate & current share val tasks) accepts or rejects → commit to git, update memory.
-5. **Finalize** — score the best candidate on the **sealed test split, exactly once** (**seal-on-success**: a finalize crash never burns the headline number).
-6. **Report** — `report.md` + a self-contained `dashboard.html`.
 
-Honesty is enforced in code, not docs: the only place rewards are aggregated,
-splits are made, the gate is applied, and test is sealed is `cap_evolve` —
-see [docs/HONEST_EVAL.md](docs/HONEST_EVAL.md). Infra-vs-capability failures are
-distinguished by a structured `Rollout.error` signal, not by substring-matching
-feedback prose. You implement the adapter once; everything else is provided
-([docs/ADAPTER_CONTRACT.md](docs/ADAPTER_CONTRACT.md)).
+**intake → implement-and-check → baseline → optimize → finalize → report.**
 
-## Dashboard
-Every run writes a **self-contained** `dashboard.html` (run data inlined, no CDN —
-opens offline): a KPI strip (best / baseline / %Δ / counts by status / frontier /
-epoch), a **cumulative-best stair** over the per-iteration score scatter, a
-**tasks × iterations pass/fail heatmap** (surfaces the regressions and specialists
-the mean hides), a per-iteration **diff** view, a **lineage tree** (parents →
-children; merges show as multi-parent), **optimizer-vs-runner cost / tokens /
-latency**, and an annotations/diagnoses stream. For in-chat progress, run
-`cap-evolve report --terminal` for an ANSI report (CLAUDECODE margin-aware).
+Intake collects inputs and scaffolds the project. Implement-and-check is a hard
+gate: `cap-evolve check` refuses to proceed until the adapter is real and
+deterministic. Baseline freezes a seeded train/val/test split (test **sealed**) and
+scores the seed on val. Each optimize iteration **diagnoses** failing val traces →
+the optimizer **proposes** one edit → the candidate is **evaluated** on val (each
+trial gets its own seed, so pass^k measures real variance) → a **paired
+significance gate** (Δ > k·SE) accepts or rejects → the iteration is committed and
+memory updated. Finalize scores the best candidate on the **sealed test split
+exactly once**; report writes `report.md` and a self-contained `dashboard.html`.
+
+> **Honesty is enforced in code, not docs.** Splitting, reward aggregation, the
+> gate, and sealing test all live in `cap_evolve`
+> ([`docs/HONEST_EVAL.md`](docs/HONEST_EVAL.md)). Infra-vs-capability failures are
+> distinguished by a structured `Rollout.error` signal, never by string-matching
+> feedback prose.
 
 ## How it compares
 
 | | cap-evolve | DSPy | GEPA | promptfoo |
 |---|:--:|:--:|:--:|:--:|
 | Optimizes prompts | ✅ | ✅ | ✅ | ❌ (eval only) |
-| Optimizes tools/MCP + skills | ✅ | ➖ | ➖ | ❌ |
-| **Sealed test + significance gate enforced in code** | ✅ | ➖ | ➖ | ➖ |
-| pass^k *and* pass@k + bootstrap CI | ✅ | ❌ | ❌ | ❌ |
-| Reflective Pareto evolution (GEPA) | ✅ | ✅ | ✅ | — |
-| **Runs on any agent host (no framework)** | ✅ | ❌ | ❌ | ➖ |
+| Optimizes tools/MCP + skill packages | ✅ | ➖ | ➖ | ❌ |
+| Sealed test + significance gate enforced in code | ✅ | ➖ | ➖ | ➖ |
+| Host- & agent-agnostic (no framework lock-in) | ✅ | ❌ | ❌ | ➖ |
+| Onboard a benchmark from a single prompt | ✅ | ❌ | ❌ | ➖ |
 | Git-versioned iterations + optimizer memory | ✅ | ❌ | ❌ | ❌ |
+| Live cost-aware dashboard | ✅ | ❌ | ❌ | ➖ |
 | Zero runtime dependencies | ✅ | ❌ | ❌ | ❌ |
 
-Whitespace: **skills-native + host-agnostic + honesty enforced in code.** Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md).
+Roadmap: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Skill library
 
-**19 skills.** The library was deliberately collapsed: the 8 per-CLI optimizer
-skills became **one** `run-optimizer` skill + a one-row-per-optimizer
-`optimizers/registry.yaml`, and the three hill-climb clones became **one**
-`hill-climb` skill with `--focus`.
+cap-evolve is a library of **18** [Agent Skills](https://www.anthropic.com/news/skills)
+over a tiny stdlib core. The 8 per-CLI optimizers collapsed into one
+`run-optimizer` skill + a one-row-per-optimizer registry; the three hill-climb
+variants collapsed into one `hill-climb` skill with `--focus`.
 
 | Component | Skills |
 |-----------|--------|
-| orchestrate | `orchestrate` · `using-cap-evolve` (session-start router) |
-| phases | `intake` · `implement-and-check` · `baseline` · `evaluate` · `diagnose` · `gate` · `finalize` · `report` |
+| orchestrate  | `orchestrate` · `using-cap-evolve` (session-start router) |
+| phases       | `intake` · `implement-and-check` · `baseline` · `evaluate` · `diagnose` · `gate` · `finalize` · `report` |
 | capabilities | `system-prompt` · `skill-package` · `tools` · `mcp-tool` |
-| algorithms | `hill-climb` (`--focus all\|cyclic\|hardest-first`) · `gepa` · `skillopt` |
-| optimizers | `run-optimizer` + `optimizers/registry.yaml` (`claude-code`, `codex`, `gemini-cli`, `opencode`, `openclaw`, `ibm-bob`, `generic`, `mock`) |
+| algorithms   | `hill-climb` (`--focus all\|cyclic\|hardest-first`) · `gepa` · `skillopt` |
+| optimizers   | `run-optimizer` + `optimizers/registry.yaml` (`claude-code`, `codex`, `gemini-cli`, `opencode`, `openclaw`, `ibm-bob`, `generic`, `mock`) |
 
-`gepa` (real GEPA — two-stage minibatch-then-full-val economy, per-instance Pareto
-frontier, reflective dataset, system-aware merge; arXiv:2507.19457) and `skillopt`
-(epochs × mini-batches, decaying textual-LR edit budget, rejected-edit buffer, gated
-slow update; arXiv:2605.23904) are the sample-efficient **flagships**; `hill-climb`
-(`--focus all|cyclic|hardest-first`) is the simple global-best baseline climber.
+`gepa` (real GEPA — reflective Pareto search, two-stage minibatch-then-full-val
+economy; arXiv:2507.19457) and `skillopt` (epochs × mini-batches with a decaying
+textual learning rate; arXiv:2605.23904) are the sample-efficient **flagships**;
+`hill-climb` is the simple global-best baseline climber.
 
-## Examples
-- [`examples/toy_calc`](examples/toy_calc) — zero-API deterministic proof (the CI gate).
-- [`examples/json_extract`](examples/json_extract) — a new benchmark from scratch (adapter + data only).
-- [`examples/tau2_airline`](examples/tau2_airline) — the real tau2-bench run above.
+**Claude Code plugin:** `claude --plugin-dir ./plugins/cap-evolve` exposes every
+skill as `/cap-evolve:<skill>` and arms honesty **hooks** (PreToolUse denies edits
+to the sealed test/gold; Stop/SubagentStop block finishing until `cap-evolve check`
+and the gate are green) — all in **core-owned scripts**, never in editable skill
+markdown.
 
-## Extending
-A new capability / algorithm / optimizer is **one folder** — clone `templates/skill`,
-fill `meta.yaml`, drop it in; the registry auto-discovers it by `needs`/`provides`.
-See [docs/EXTENDING.md](docs/EXTENDING.md).
+## Results
+
+<!-- RESULTS: filled from examples/tau2_airline/run_full -->
+
+> Real [tau2-bench](https://github.com/sierra-research/tau2-bench) airline run —
+> optimizing the airline policy + tools with a `claude-opus-4-6` optimizer and
+> `gpt-oss-120b` (agent + user simulator, via IBM RITS) over all 50 tasks. Numbers
+> come from the latest run in
+> [`examples/tau2_airline/run_full/`](examples/tau2_airline/run_full/) (`report.md` /
+> `dashboard.html`); every iteration is a git commit. Reproduce from zero:
+> [`docs/REPRODUCE_tau2.md`](docs/REPRODUCE_tau2.md).
 
 ## Contributing
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md).
 Report security issues via [SECURITY.md](SECURITY.md). Changes: [CHANGELOG.md](CHANGELOG.md).
 
 ## Citation
+
 ```bibtex
 @software{cap-evolve,
   title  = {cap-evolve: a skills-native, host-agnostic harness for honestly
@@ -372,11 +394,13 @@ Report security issues via [SECURITY.md](SECURITY.md). Changes: [CHANGELOG.md](C
   note   = {https://github.com/skillberry-ai/cap-evolve}
 }
 ```
-**Acknowledgements.** The `gepa` and `skillopt` algorithm skills are independent
-implementations of the methods described in the GEPA (arXiv:2507.19457) and SkillOpt
-(arXiv:2605.23904) papers — no third-party code is included; both reference projects
-are MIT-licensed. cap-evolve also draws on ideas from DSPy, tau-bench/tau2-bench, and
-the Agent Skills standard. Full citations: [docs/sources.bib](docs/sources.bib).
+
+**Acknowledgements.** The `gepa` and `skillopt` skills are independent
+implementations of the GEPA (arXiv:2507.19457) and SkillOpt (arXiv:2605.23904)
+papers — no third-party code is included; both reference projects are MIT-licensed.
+cap-evolve also draws on ideas from DSPy, tau-bench/tau2-bench, and the Agent Skills
+standard. Full citations: [docs/sources.bib](docs/sources.bib).
 
 ## License
+
 MIT.

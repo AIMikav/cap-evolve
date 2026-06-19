@@ -28,8 +28,8 @@ prioritizes what makes cap-evolve best-in-class and widely adopted.
 - Rich **self-contained** `dashboard.html` + `cap-evolve report --terminal` ANSI report.
 - Host-agnostic installer + Claude Code plugin (honesty hooks in core-owned scripts,
   diagnoser/proposer subagents, router) — `claude --plugin-dir ./plugins/cap-evolve`.
-- Real proof: tau2-bench airline (gpt-oss-120b) A/B 0.20→0.60 reward; a second
-  from-scratch benchmark (json_extract) green in CI.
+- Real proof: tau2-bench airline (gpt-oss-120b agent + user simulator) optimized
+  policy + tools jointly with a claude-opus optimizer; toy_calc zero-API gate green in CI.
 
 ## Next (prioritized from the research)
 1. **Optimizer strategy registry + one `optimize(seed, train, val)` API** (DSPy

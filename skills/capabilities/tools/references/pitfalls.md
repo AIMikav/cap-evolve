@@ -3,6 +3,33 @@
 Failure modes that make a tool edit a regression rather than an improvement, and
 how to detect each from traces or from `validate`.
 
+## Stripping error info / `Raises:` to "clean up" the description
+The error conditions a tool can raise are *guidance for the model*, not clutter.
+Knowing a call raises "gift card balance too low" or "reservation not found" is
+what lets the model pick a different argument or a different tool instead of
+failing. Deleting that text removes a guard rail and typically does not improve
+selection at all.
+- **Detect:** an edit's only change is removing `Raises:`/error lines or other
+  failure-mode text; the metric is flat or the model now makes the same bad call
+  the error described.
+- **Fix:** keep failure modes in the description. If anything, make them more
+  precise and pair each with what the model should do instead.
+
+## Cosmetic rewording that adds no always-true information
+Reflowing sentences, adding commas, or restating the obvious changes the text
+without changing what the model knows. It will not move behavior.
+- **Detect:** the diff has no new trigger, unit, allowed-value, default, or
+  failure mode — just reworded prose.
+- **Fix:** add genuinely new, always-true content (when/when-not, argument
+  semantics, an always-valid example), or reach for a loop/rule/composite tool.
+
+## Overfitting a description to one task
+Putting a specific id, date, or city from a single task into a description
+overfits and can mislead on the next input.
+- **Detect:** the description names literal values that came from one trace.
+- **Fix:** describe the *shape* and *rules* that hold for every input; if you
+  show an example, make it a generic well-formed one.
+
 ## Over-describing into contradiction
 Piling on "use when" clauses until two of them conflict makes selection *worse*,
 not better. A model resolves contradictory instructions unpredictably.

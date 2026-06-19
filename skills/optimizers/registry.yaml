@@ -18,6 +18,12 @@
 #   budget_flag      : flag(s) with a {budget} placeholder to cap one optimization
 #                      iteration's work (e.g. claude --max-turns N), or "" if the CLI
 #                      has no such knob. Appended only when run-optimizer gets --budget.
+#   usd_budget_flag  : flag(s) with a {usd} placeholder for a native per-iteration
+#                      DOLLAR cap enforced by the CLI itself (e.g. claude
+#                      --max-budget-usd N), or "" if the CLI has none. Appended only
+#                      when run-optimizer gets --usd-budget. Optimizers without one
+#                      (e.g. ibm-bob) are bounded by budget_flag / the cumulative
+#                      max_optimizer_usd instead.
 #   offline          : "true" only for `mock` (never shells a network CLI).
 #
 # Per-CLI install/auth/flag prose lives in references/<name>.md.
@@ -47,6 +53,7 @@ claude-code:
   auth_notes: "Logged-in Claude Code session or ANTHROPIC_API_KEY."
   json_flag: "--output-format json"
   budget_flag: "--max-turns {budget}"
+  usd_budget_flag: "--max-budget-usd {usd}"   # native per-iteration $ cap (works with -p/--print)
   offline: "false"
 
 codex:

@@ -54,6 +54,10 @@ def main(argv=None) -> int:
     p.add_argument("--resume", action="store_true",
                    help="continue from the run's current best candidate (read its val "
                         "from rollouts) instead of baseline")
+    p.add_argument("--capabilities", default="",
+                   help="comma-separated capability skills under optimization (e.g. "
+                        "'system-prompt,tools'); surfaced to the optimizer so it knows "
+                        "the allowed edit space")
     args = p.parse_args(argv)
 
     focus = _LEGACY_FOCUS.get(args.focus, args.focus)
@@ -77,6 +81,7 @@ def main(argv=None) -> int:
         gate_kwargs=({"k_se": args.k_se} if args.gate_mode == "auto"
                      else {"mode": args.gate_mode, "k_se": args.k_se}),
         algorithm=f"{ALGO}:{focus}", no_regression=args.no_regression, store=store,
+        capabilities=[c.strip() for c in args.capabilities.split(",") if c.strip()],
     )
     print(json.dumps(result, indent=2))
     return 0

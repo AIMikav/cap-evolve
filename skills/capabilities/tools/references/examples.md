@@ -49,6 +49,58 @@ often forgets the second call.
     "code": "def find_order(q):\n    hit = search_orders(q)[0]\n    return get_order(hit['id'])" } }
 ```
 
+## 3b. Collapse repeated primitive calls — a loop-in-one-call tool
+
+Trace symptom: the agent calls `get_record(id)` once per id (e.g. fetching every
+record a user owns, one at a time), or calls `search(origin, dest, date)` once
+per route/date combination — many calls, results sometimes dropped or
+mis-threaded.
+
+```json
+{ "kind": "compose",
+  "value": {
+    "name": "get_records",
+    "description": "Fetch the FULL details of EVERY record in `ids` in ONE call. Use this instead of calling get_record once per id when you have several ids (e.g. all of a user's records). Returns a list aligned with `ids`; an entry is {\"id\":..., \"error\":...} if that id is not found.",
+    "parameters": { "type": "object", "properties": { "ids": { "type": "array", "items": { "type": "string" } } }, "required": ["ids"] },
+    "code": "def get_records(ids):\n    out = []\n    for i in ids:\n        try:\n            out.append(get_record(i))\n        except Exception as e:\n            out.append({'id': i, 'error': str(e)})\n    return out" } }
+```
+
+Why it works: N fragile turns become 1 deterministic call; the loop and the
+error handling live in code the model cannot get wrong.
+
+## 3c. Enforce an invariant the API does not — a rule-checking tool
+
+Trace symptom: a write that must be preceded by a read, or whose precondition the
+backend does not itself enforce, keeps producing wrong-state failures (the agent
+skips the check or mis-reads it).
+
+```json
+{ "kind": "compose",
+  "value": {
+    "name": "cancel_record_checked",
+    "description": "Cancel a record after verifying it is cancellable. Reads the record first and REFUSES (returns an error) if the cancellation preconditions are not met — so you never need to read the record yourself before cancelling.",
+    "parameters": { "type": "object", "properties": { "record_id": { "type": "string" } }, "required": ["record_id"] },
+    "code": "def cancel_record_checked(record_id):\n    rec = get_record(record_id)\n    if not rec.get('cancellable'):\n        return {'error': 'not cancellable', 'record': rec}\n    return cancel_record(record_id)" } }
+```
+
+Why it works: the read-before-write order and the precondition are guaranteed in
+code; a violation is a clean refusal, not a corrupted write.
+
+## 3d. Keep failure modes — improve, do not delete, `Raises:`
+
+Anti-symptom: an optimizer "cleaned up" a description by deleting its `Raises:`
+section. Do the opposite — keep the error conditions and pair each with the
+recovery action.
+
+```json
+{ "tool": "charge_payment", "kind": "description",
+  "value": "Charge `amount` (whole US cents) to the payment method `payment_id` from the user's profile. Use after the user confirms the total. Fails if the payment method is not on file (pick another from get_user_details) or if a gift-card balance is below `amount` (split across methods or choose a card). Example: charge_payment(payment_id='gift_card_42', amount=1299)." }
+```
+
+Why it works: the model now knows the units (cents), the precondition (method on
+file), and exactly what to do on each failure — instead of retrying the same bad
+call.
+
 ## 4. Shrink an overlapping toolset — remove + consolidate
 
 Trace symptom: `create_pr`, `review_pr`, `merge_pr` all present; agent keeps

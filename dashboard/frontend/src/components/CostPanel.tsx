@@ -85,9 +85,108 @@ export function CostPanel({ summary }: { summary: RunSummaryDetail }) {
       </motion.div>
 
       <motion.div variants={fadeUpItem}>
+        <PerIterationCostTime summary={summary} />
+      </motion.div>
+
+      <motion.div variants={fadeUpItem}>
         <BudgetMeters summary={summary} />
       </motion.div>
     </motion.div>
+  )
+}
+
+/** Per-iteration optimizer vs runner cost + time, plus an explicit intake row.
+ * Time is always shown; cost only when a real number is present ("—" otherwise,
+ * since RITS runner cost is frequently $0/null). */
+function PerIterationCostTime({ summary }: { summary: RunSummaryDetail }) {
+  const rows = summary.per_iteration ?? []
+  const intake = summary.intake ?? { usd: 0, seconds: 0, tokens: 0 }
+  const optMaxSec = Math.max(1e-6, ...rows.map((r) => r.optimizer_seconds))
+  const runMaxSec = Math.max(1e-6, ...rows.map((r) => r.runner_seconds))
+
+  return (
+    <Card className="p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-sm font-medium">Cost &amp; time per iteration</h3>
+        <span className="text-[11px] text-muted">optimizer vs runner · $ when available · time always</span>
+      </div>
+
+      {/* Intake row — always shown, even at $0, so it's clear intake spent nothing. */}
+      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded bg-surface-2 px-3 py-2 text-xs">
+        <span className="inline-flex items-center gap-1.5 font-medium">
+          <span className="inline-block h-2 w-2 rounded-full" style={{ background: 'var(--seed)' }} />
+          Intake
+        </span>
+        <span className="tnum text-muted">
+          cost <span className="font-semibold text-foreground">{usd(intake.usd)}</span>
+          {intake.usd === 0 ? <span className="ml-1 text-muted">(spent $0)</span> : null}
+        </span>
+        <span className="tnum text-muted">
+          time <span className="font-semibold text-foreground">{duration(intake.seconds)}</span>
+        </span>
+        <span className="tnum text-muted">
+          {compactNum(intake.tokens || null)} tok
+        </span>
+      </div>
+
+      {rows.length === 0 ? (
+        <p className="py-6 text-center text-sm text-muted">No iterations recorded yet.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border text-left text-[11px] uppercase tracking-wide text-muted">
+                <th className="py-1.5 pr-2">iter</th>
+                <th className="py-1.5 pr-2">candidate</th>
+                <th className="py-1.5 pr-2 text-right">opt $</th>
+                <th className="py-1.5 pr-2">
+                  <span className="inline-flex items-center gap-1">
+                    <span className="inline-block h-2 w-2 rounded-full" style={{ background: 'var(--accent)' }} />
+                    opt time
+                  </span>
+                </th>
+                <th className="py-1.5 pr-2 text-right">run $</th>
+                <th className="py-1.5 pr-2">
+                  <span className="inline-flex items-center gap-1">
+                    <span className="inline-block h-2 w-2 rounded-full" style={{ background: 'var(--accepted)' }} />
+                    run time
+                  </span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.candidate} className="border-b border-border/50">
+                  <td className="tnum py-1.5 pr-2 text-muted">{r.iteration}</td>
+                  <td className="py-1.5 pr-2 font-mono text-[11px]">{r.candidate}</td>
+                  <td className="tnum py-1.5 pr-2 text-right">{r.optimizer_usd != null ? usd(r.optimizer_usd) : '—'}</td>
+                  <td className="py-1.5 pr-2">
+                    <TimeBar seconds={r.optimizer_seconds} max={optMaxSec} color="var(--accent)" />
+                  </td>
+                  <td className="tnum py-1.5 pr-2 text-right">{r.runner_usd != null ? usd(r.runner_usd) : '—'}</td>
+                  <td className="py-1.5 pr-2">
+                    <TimeBar seconds={r.runner_seconds} max={runMaxSec} color="var(--accepted)" />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+/** A tiny inline bar + label so time is legible per iteration without a full chart. */
+function TimeBar({ seconds, max, color }: { seconds: number; max: number; color: string }) {
+  const frac = max > 0 ? Math.min(1, seconds / max) : 0
+  return (
+    <div className="flex items-center gap-2">
+      <div className="h-1.5 w-16 overflow-hidden rounded-full bg-surface-2">
+        <div className="h-full rounded-full" style={{ width: `${frac * 100}%`, background: color }} />
+      </div>
+      <span className="tnum text-muted">{duration(seconds)}</span>
+    </div>
   )
 }
 

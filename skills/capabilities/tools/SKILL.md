@@ -35,6 +35,16 @@ Reach for `tools` when a trace shows one of these failure signatures:
 - **Repeated multi-call sequences the agent fumbles** — the agent must chain
   `search` → `filter` → `fetch` every time and keeps getting the order or the
   glue wrong. A single well-named **composite** tool collapses the sequence.
+- **The same primitive called N times in a row** — the agent loops over a list
+  in *its own context* (calls `get_record(id)` once per id, or `search(a,b,date)`
+  once per date/route combination), burning turns and often dropping or
+  mis-threading a result. A tool that takes the **list** and loops *inside one
+  call* collapses N calls into 1.
+- **An invariant the model keeps violating** — a required order of operations
+  ("read before write"), a precondition the API does not itself enforce, or a
+  normalization the model forgets. A tool that **enforces the rule in code**
+  (validates, normalizes, or performs the steps in the right order) makes the
+  mistake impossible rather than merely discouraged.
 - **A bloated or overlapping toolset** — too many tools, or several that do
   nearly the same thing, distracting the agent. Remove or consolidate.
 - **A real behavioral bug in a handler** — the tool returns the wrong thing.
@@ -81,6 +91,28 @@ follow, and each is driven by a different part of that block:
    closed set." A per-field description ("ISO-8601 date, e.g. 2025-06-14") turns
    a malformed argument into a correct one.
 
+**The description is the model's contract, not flavor text.** It is the *only*
+information the model has about *which* tool to call and *what argument values
+are legal*. A good description always states, in always-true terms (never one
+task's specifics):
+
+- **When to use / when not to use** — explicit triggers, and the boundary
+  against the nearest sibling tool ("use X for a single record by id; use Y to
+  search across records").
+- **Argument semantics** — for each parameter: its meaning, **units**, **allowed
+  values / format**, and **default**. "amount in whole US cents" beats "the
+  amount"; "ISO-8601 date `YYYY-MM-DD`" beats "the date".
+- **Preconditions and failure modes** — what must be true *before* the call, and
+  what the tool **raises / returns on error**. This is the model's chance to
+  avoid a bad call. **Do NOT strip `Raises:`/error-condition text to make the
+  description "cleaner."** Knowing a call raises `ValueError: gift card balance
+  too low` is exactly what lets the model pick a different payment method instead
+  of failing the task. Stripping error info removes a guard rail; it does not
+  improve selection.
+- **A short, always-valid usage example** — one concrete well-formed call that is
+  correct for *any* input (e.g. the shape of a list element), never a single
+  benchmark task's literal values.
+
 Selection degrades as the toolset grows: benchmarks like the Berkeley
 Function-Calling Leaderboard include a dedicated "relevance detection" category
 precisely because models hallucinate calls when no tool fits, and ToolLLM had to
@@ -122,6 +154,82 @@ this capability: **fewer, sharper, non-overlapping tools beat many vague ones.**
     "code": "def find_order(q):\n    hit = search_orders(q)[0]\n    return get_order(hit['id'])"
 }}
 ```
+
+## Add tools that call existing tools (the highest-leverage edit)
+
+A docstring edit can only make the model *more likely* to do the right thing.
+A new tool whose body calls existing tools can make the right thing *the only
+thing the model can do*, and can turn many calls into one. Three patterns, all
+benchmark-agnostic:
+
+1. **Collapse repeated primitive calls into one list call.** If the agent calls
+   `get_record(id)` once per id, or `search(origin, dest, date)` once per
+   route/date combination, add a tool that takes the **list** and loops inside a
+   single call, returning all results together. The agent makes one call instead
+   of N; nothing is dropped or mis-threaded.
+   ```json
+   { "kind": "compose", "value": {
+       "name": "get_records",
+       "description": "Fetch the FULL details of EVERY record in `ids` in one call. Use this instead of calling get_record once per id when you have several ids (e.g. all of a user's records). Returns a list aligned with `ids`; an entry is an error object if that id is not found.",
+       "parameters": {"type":"object","properties":{"ids":{"type":"array","items":{"type":"string"}}},"required":["ids"]},
+       "code": "def get_records(ids):\n    out = []\n    for i in ids:\n        try:\n            out.append(get_record(i))\n        except Exception as e:\n            out.append({'id': i, 'error': str(e)})\n    return out" }}
+   ```
+
+2. **Enforce a rule / required order deterministically.** If a write must be
+   preceded by a read, or a precondition the API does not itself check must hold,
+   put the check in code so a violation returns a clear error instead of
+   corrupting state. The model literally cannot skip the step.
+   ```json
+   { "kind": "compose", "value": {
+       "name": "cancel_record_checked",
+       "description": "Cancel a record after verifying it is cancellable. Reads the record first and refuses (returns an error) if the cancellation preconditions are not met, so you never need to call get_record yourself before cancelling.",
+       "parameters": {"type":"object","properties":{"record_id":{"type":"string"}},"required":["record_id"]},
+       "code": "def cancel_record_checked(record_id):\n    rec = get_record(record_id)\n    if not rec.get('cancellable'):\n        return {'error': 'not cancellable', 'record': rec}\n    return cancel_record(record_id)" }}
+   ```
+
+3. **Normalize / return richer, ready-to-use results.** Have the new tool do the
+   glue the model otherwise improvises (resolve an id, attach the related record,
+   coerce units), so the model gets a result it can act on directly.
+
+**Then remove the error-prone original** (or leave it) deliberately. To *replace*
+a confusing tool, `add`/`compose` the clearer one and `remove` the old name so it
+leaves the choice set — don't keep both, or selection gets harder (§3 of
+concepts.md).
+
+## What good vs bad tool edits look like
+
+Drawn from real runs where the optimizer left most of the gain on the table.
+
+**Bad — what under-performs (do not stop here):**
+
+- **Stripping `Raises:` / error info** "to clean up" the docstring. Observed: an
+  accepted candidate deleted every `Raises:` section. It barely moved the metric
+  and left the model blind to why calls fail. Error conditions are guidance, not
+  clutter — keep them.
+- **Cosmetic description rewording** — reflowing sentences, adding commas,
+  restating the obvious ("Cancel the reservation" → "Cancel an entire
+  reservation"). No new always-true information, so no behavior change.
+- **Baking one task's specifics into a description** — naming a particular id,
+  date, or city. It overfits and can mislead on the next task.
+- **Adding tools that duplicate ones the agent already uses fine** — enlarges the
+  choice set and *hurts* selection for no gain.
+
+**Good — what actually moves accuracy and cuts calls:**
+
+- **A loop/composite tool** that collapses the repeated-primitive pattern from the
+  traces (e.g. the agent fetching a user's records one id at a time, or sweeping
+  flight searches across many date/route combinations) into a single list call.
+- **A rule-enforcing tool** that reads-before-writes or validates a precondition
+  the underlying API does not, turning a silent bad write into a clear refusal.
+- **Precise descriptions** that add genuinely new, always-true content: explicit
+  when/when-not triggers, per-argument units/allowed-values/defaults, retained
+  failure modes, and one always-valid example call.
+- **Replace, don't accumulate** — add the clearer tool and `remove` the
+  error-prone original so the surface stays small and sharp.
+
+The test: *would this edit help on a task the optimizer has never seen?* A loop
+tool, a precondition check, and a unit-pinned argument description pass. A comma
+and a deleted `Raises:` line do not.
 
 ## Failure modes to avoid
 

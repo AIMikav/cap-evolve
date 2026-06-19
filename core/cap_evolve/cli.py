@@ -176,6 +176,12 @@ def _cmd_run(argv):
     # budget_flag_template (e.g. claude-code → --max-turns N), bounding each step's cost.
     if spec.get("optimizer_max_turns"):
         opt_cmd += f" --budget {int(spec['optimizer_max_turns'])}"
+    # Per-iteration optimizer USD cap: run-optimizer maps --usd-budget to the row's
+    # usd_budget_flag (e.g. claude-code → --max-budget-usd N), enforced by the optimizer
+    # CLI itself. Rows without one (e.g. ibm-bob) ignore it — bound those via
+    # optimizer_max_turns and/or the cumulative max_optimizer_usd instead.
+    if spec.get("optimizer_usd_per_iter"):
+        opt_cmd += f" --usd-budget {float(spec['optimizer_usd_per_iter'])}"
 
     # Algorithm semantics: the three hill-climb variants are one ``hill-climb``
     # skill selected by ``--focus``. Back-compat: translate the old skill names. An
@@ -215,6 +221,15 @@ def _cmd_run(argv):
                           "report": chk.to_dict()}))
         return 1
 
+    # Start the live dashboard BEFORE baseline so the run is watchable from the very
+    # start: the server scans the base dir and shows the run as soon as baseline
+    # creates it. Best-effort — never blocks or fails the run. (Absolute base: the
+    # subprocess inherits THIS process's cwd, not workdir.)
+    if dash_mode == "auto":
+        status = dashboard_launch.maybe_launch(
+            proj_abs.parent, mode=dash_mode, port=dash_port, open_browser=True)
+        print(json.dumps(status))
+
     # 1) baseline (creates the run dir; capture its relative path)
     base_cmd = [py, skill_run("baseline"), "--base", base, "--project", project,
                 "--capability", cap_path, "--seed", str(spec.get("split_seed", 0)),
@@ -233,16 +248,6 @@ def _cmd_run(argv):
         return 1
     run_dir = json.loads(proc.stdout)["run_dir"]
 
-    # Auto-start the live dashboard now (the run dir exists) so the whole
-    # evolution is watchable. Best-effort: never blocks or fails the run.
-    if dash_mode == "auto":
-        # Absolute base: the dashboard subprocess inherits THIS process's cwd
-        # (not workdir), so a relative ".capevolve" would resolve wrongly when
-        # `cap-evolve run` is invoked from outside workdir.
-        status = dashboard_launch.maybe_launch(
-            proj_abs.parent, mode=dash_mode, port=dash_port, open_browser=True)
-        print(json.dumps(status))
-
     # 2) algorithm (hill-climb variants select their schedule via --focus)
     alg_cmd = [py, skill_run(algorithm_name), "--run-dir", run_dir, "--project", project,
                "--optimizer", opt_cmd, "--max-iterations", str(spec.get("max_iterations", 10)),
@@ -252,6 +257,15 @@ def _cmd_run(argv):
                "--store", str(spec.get("store", "git"))]
     if algorithm_focus is not None:
         alg_cmd += ["--focus", algorithm_focus]
+    # Surface the selected capability skills to the optimizer prompt so it knows the
+    # allowed edit space (e.g. tools → may add composite tools). hill-climb consumes
+    # --capabilities; algorithms without the flag ignore the extra arg via argparse error,
+    # so only pass it to those that accept it.
+    caps = spec.get("capabilities") or []
+    if isinstance(caps, str):
+        caps = [c.strip() for c in caps.split(",") if c.strip()]
+    if caps and algorithm_name == "hill-climb":
+        alg_cmd += ["--capabilities", ",".join(str(c) for c in caps)]
     # gepa treats metric-calls as its PRIMARY budget; forward it explicitly (hill-climb
     # has no such flag and enforces the same cap via run_dir.budget_exhausted()).
     if algorithm_name == "gepa" and spec.get("max_metric_calls"):
@@ -316,12 +330,20 @@ def _val_size(spec: dict, project: Path) -> int | None:
     reports the formula with an unknown val size instead of failing.
     """
     ids_file = spec.get("split_ids_file")
-    if ids_file and Path(ids_file).exists():
-        try:
-            d = json.loads(Path(ids_file).read_text(encoding="utf-8"))
-            return len(d.get("val") or [])
-        except Exception:  # noqa: BLE001
-            pass
+    if ids_file:
+        # Resolve as given (absolute/cwd-relative) else relative to the project dir,
+        # matching how baseline resolves it — so the preview reflects the real split.
+        p = Path(ids_file)
+        if not p.exists():
+            cand = Path(project) / ids_file
+            if cand.exists():
+                p = cand
+        if p.exists():
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+                return len(d.get("val") or [])
+            except Exception:  # noqa: BLE001
+                pass
     try:
         from .check import load_adapter
         from .splits import make_splits
