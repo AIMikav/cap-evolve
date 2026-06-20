@@ -30,6 +30,31 @@ Metadata (name+description) is always in context; the body loads when the skill
 triggers; references/scripts load only as needed. So a vague description → the
 skill never triggers; a bloated body → wasted context and worse behavior.
 
+## The description is the trigger — optimize it as a separable step
+The `description` is the decision boundary: it is what makes the skill fire. Most
+triggering failures are fixed by editing the *description*, not the body.
+
+- **Under-trigger** (the skill didn't fire when it should have) → make the
+  description more explicit about *when* it applies: enumerate the phrasings and
+  contexts that should fire it, including when the user doesn't name the skill.
+- **Over-trigger** (it fired when it shouldn't have) → tighten the boundary and
+  state the near-miss cases it does NOT cover.
+- **Over-trigger caveat for newer models.** `CRITICAL`/`ALWAYS`/`MUST` in a
+  description now causes over-triggering on current models — prefer plain
+  "Use this when …". Reserve pushy phrasing for genuine under-triggering.
+- **Evaluate triggering on held-out prompts.** Build a small set of should-trigger
+  and should-NOT-trigger prompts including **near-miss negatives** (prompts that
+  look close but shouldn't fire), and select the description that scores best —
+  don't overfit to the handful of iteration examples. (Note: trivial one-step
+  tasks may not trigger any skill regardless of description.)
+
+## Bundle a script when traces show repeated re-implementation
+If across runs the agent independently re-writes the same helper, or a step is
+deterministic and repetitive, **bundle it as a script in `scripts/`** and have the
+skill call it — code is consistent and repeatable where prose is only *likely*.
+**State the intent explicitly**: whether the agent should *execute* the script or
+*read it as reference*. (Scripts can run without their code entering context.)
+
 ## Handlers (scripts/abstract.py)
 `materialize(dir)` → {SKILL.md, references/*} · `apply(dir, edits)` ·
 `validate(dir)` → checks frontmatter (`name` ≤64/[a-z0-9-]; `description` ≤1024

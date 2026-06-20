@@ -32,13 +32,38 @@ resolve unpredictably; instructions that fight the model's defaults produce
 inconsistent behavior. This is why "more instructions" is not "better."
 
 ## What to optimize (and how)
+- Add a one-sentence **role line** if absent — a cheap, well-documented win that
+  focuses behavior and tone.
 - Sharpen the **task framing** and make the **output contract** explicit and
-  unambiguous (this alone recovers many "capable-but-mis-formatted" failures).
+  unambiguous (this alone recovers many "capable-but-mis-formatted" failures);
+  diagnose output-shape failures *before* content failures.
 - Tighten the **decision policy**: name the precondition for each tool/action.
 - **Remove** instructions that don't pull their weight (measure, don't assume).
 - Prefer explaining the *why* over piling on ALL-CAPS MUSTs — modern models follow
   reasoning better than brittle rules, and over-constraining hurts generalization.
 - Add a **minimal** exemplar only when the format/behavior is hard to describe.
+
+## How to phrase the edit
+- **Positive instruction.** Tell the model what TO do, not only what not to do —
+  "respond in flowing prose paragraphs" steers better than "don't use markdown,"
+  because a prohibition fences off one path while a positive instruction names the
+  target. Treat the model as a brilliant new hire with no context: if a colleague
+  with minimal context would be confused by the instruction, so will the model.
+- **Explain the WHY.** A rule paired with its rationale generalizes to unseen
+  cases; a bare `MUST`/`CRITICAL` does not. "Output is read by a TTS engine that
+  can't pronounce ellipses" beats "never use ellipses."
+- **Model-sensitivity.** Newer models over-comply, so stale anti-laziness phrasing
+  (`CRITICAL`/`ALWAYS`/`MUST`) now over-triggers — prefer plain "Use … when …".
+  When a cluster shows over-eagerness or over-engineering, the right edit is to
+  **remove or soften** an instruction, not add one.
+- **Ordering / structure.** Long context first, query / output contract last;
+  separate instructions / context / examples with `<xml>` tags. End-placed
+  instructions are acted on more reliably on long inputs.
+- **Clarify, don't invent.** Edits may only clarify or reorganize rules already
+  present (or grounded in a cited source). Never introduce a normative rule that
+  conflicts with, or isn't supported by, the existing instructions — invented rules
+  are the most common regressor. Behavioral failures (the model knows the rule but
+  skips the action) belong in **code/tools**, not more prose.
 
 ## Edit model
 Artifact = one or more text files (`prompt.txt`, `policy.md`, `SYSTEM.md`). Edit

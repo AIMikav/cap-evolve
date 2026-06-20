@@ -17,12 +17,43 @@ or more prompt/policy text files (`prompt.txt`, `policy.md`, `SYSTEM.md`) as the
 optimizable artifact.
 
 ## What can be optimized
-- **Task framing & role** — who the agent is and what "done" means.
+- **Role line** — a single sentence stating who the agent is. A known cheap win:
+  one role sentence focuses behavior and tone.
+- **Task framing** — what "done" means.
 - **Output contract** — exact format the downstream/eval expects (a frequent
-  silent failure: the agent is *capable* but formats wrong).
+  silent failure: the agent is *capable* but formats wrong). **Diagnose
+  output-shape failures first** — right content / wrong shape scores zero, and is
+  the cheapest class to fix.
 - **Decision rules** — when to call which tool, when to ask vs. act, refusal
   rules (many agents are scored on adherence to such decision rules).
-- **Few-shot exemplars / reasoning scaffolds** — added inline.
+- **Few-shot exemplars / reasoning scaffolds** — 3–5 diverse, relevant examples
+  wrapped in `<example>` tags steer format (caveat: long example dumps can hurt
+  reasoning models — keep it to a handful).
+
+## How to write the edit (authoring rules)
+These are *how* to phrase a prompt edit so it actually changes behavior:
+
+- **State instructions positively — say what TO do, not just what not to do.**
+  "Respond in flowing prose paragraphs" beats "don't use markdown." Positive
+  phrasing gives the model a target; prohibitions only fence off one wrong path.
+- **Explain the WHY, not bare MUSTs.** A rule with its reason generalizes; a bare
+  `MUST`/`CRITICAL` does not. "Never use ellipses" works far better as "your output
+  is read by a TTS engine that can't pronounce ellipses." Teach the optimizer to
+  write the reason, not the command.
+- **Model-sensitivity caveat — sometimes the fix is to REMOVE or soften an
+  instruction.** Newer models over-comply: stale anti-laziness phrasing
+  (`CRITICAL`/`MUST`/`ALWAYS`) now causes over-eagerness and over-engineering.
+  Prefer plain "Use … when …". If a cluster shows over-doing rather than
+  under-doing, the edit is to *cut or soften* an instruction, not add one.
+- **Ordering / structure.** Put long context first and the query / output contract
+  last (end-placement can lift quality on long inputs); separate
+  instructions / context / examples with lightweight `<xml>` tags so the model
+  doesn't conflate them.
+- **CLARIFY, DON'T INVENT.** A prompt edit may only *clarify or reorganize* rules
+  already present (or grounded in a source the prompt cites) — never add a new
+  normative rule, exception, or workaround that conflicts with, or isn't supported
+  by, the existing instructions. Unsupported invented rules are the #1 regressor.
+  If two existing rules conflict, resolve toward the more restrictive one.
 
 ## Prose fixes KNOWLEDGE gaps, not BEHAVIORAL ones
 The system prompt is the right lever when a failure is a *knowledge* gap — the

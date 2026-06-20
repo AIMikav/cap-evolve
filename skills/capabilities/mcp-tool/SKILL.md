@@ -108,6 +108,43 @@ six the agent actually needs stand out:
   { "tool": "debug_dump",       "kind": "remove" } ]
 ```
 
+## Tool annotations (behavior hints the server supplies)
+
+An MCP tool may carry `annotations` — server-supplied **behavior hints** the
+host/model can read for UX and gating. The four standard hints and their defaults:
+
+| Annotation | Meaning | Default |
+|------------|---------|:-------:|
+| `readOnlyHint` | the tool does not modify its environment | `false` |
+| `destructiveHint` | may perform destructive/irreversible updates (only meaningful when not read-only) | `true` |
+| `idempotentHint` | repeated identical calls have no additional effect | `false` |
+| `openWorldHint` | interacts with an external/open world (e.g. the web) | `true` |
+
+Use these to drive gating and presentation — e.g. confirm before a
+`destructiveHint:true` call, allow safe retries on `idempotentHint:true`. But they
+are **hints, and UNTRUSTED unless the server is trusted**: never rely on them for
+safety decisions a malicious server could subvert. They are not editable here (the
+server owns them); read them, don't trust them blindly.
+
+## Human-in-the-loop on sensitive calls
+
+The MCP spec says clients SHOULD **show the tool inputs to the user before
+invoking** and **confirm sensitive / destructive operations**, so a poisoned
+description or a `list_changed`-injected tool can't silently exfiltrate or act. A
+safe consumer-side practice the optimizer can document/encourage in descriptions:
+state that a tool is destructive and that its inputs should be reviewed first.
+
+## Errors are a steering surface (execution vs protocol)
+
+MCP separates two error kinds. A **tool-execution error** is a normal result with
+`isError: true` and an actionable message ("departure date must be in the future;
+current date is 2026-06-20") — the client surfaces it to the model so it can retry
+with adjusted args. A **protocol error** is a JSON-RPC failure (bad method, malformed
+request) the model can't act on. Prefer/encourage the self-correcting execution
+error: when you can only re-describe (not change the handler), document the failure
+mode in the description so the model self-corrects, and expect the host to surface
+`isError` results back to the model rather than swallowing them.
+
 ## Failure modes to avoid
 
 - **Documenting behavior the server doesn't actually have.** A client-side

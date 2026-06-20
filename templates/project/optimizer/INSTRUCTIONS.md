@@ -53,19 +53,48 @@ If your optimizer supports parallel sub-agents / worktrees (check
 `./guidance/optimizer/<name>.md`), spawn ONE per cluster to analyze concurrently, then
 synthesize their findings. It makes each costly iteration deeper and faster.
 
-## Step 2 — Address ALL clusters in ONE candidate
-Make a single candidate that fixes every cluster from Step 1 at its ROOT — merge the
-per-cluster sub-edits into one coherent set of changes WITHOUT conflicts — aiming for a
-large, generalizing gain across whole CLASSES of failures (never a one-off patch to a
-single task; that overfits and gets rejected or hurts the held-out test).
+## Step 2 — Address ALL clusters in ONE candidate, ACCRETING on the current best
+Build on the CURRENT BEST candidate — keep its wins. Make a single candidate that fixes
+every cluster from Step 1 at its ROOT — merge the per-cluster sub-edits into one coherent
+set of changes WITHOUT conflicts — aiming for a large, generalizing gain across whole
+CLASSES of failures (never a one-off patch to a single task; that overfits and gets
+rejected or hurts the held-out test). Still change multiple things this iteration — but
+every part must be defensible as NON-REGRESSING (see Step 2b).
 
 Prefer CODE-BEARING tools over prose. ESPECIALLY: when the agent reliably FAILS TO
 EXECUTE a known multi-step action — it analyzes or confirms the right thing but never
 actually CALLS the action — encode the WHOLE action as ONE composite/workflow tool that
-performs all the steps in code, and REMOVE_TOOLS the raw primitives so the safe,
-complete path is the ONLY path. A prose rule cannot force a behavior the model skips at
+performs all the steps in code. A prose rule cannot force a behavior the model skips at
 runtime; code can. Also REINFORCE good-but-inconsistent behaviors — in code, via the
 `tools` capability, wherever possible — so they happen every time.
+
+ENFORCE behavioral rules IN CODE, not in conflicting prose. If a rule the agent keeps
+breaking can be checked in code, add a validation/enforcement wrapper rather than another
+prose MUST that can contradict an existing instruction.
+
+CLARIFY, DON'T INVENT (the #1 regressor). Edits to prompt/rules may only CLARIFY or
+REORGANIZE rules ALREADY present (or rules grounded in the benchmark source the prompt
+cites). NEVER invent a new normative rule, exception, or workaround that the existing
+capability/source does not support — unsupported claims are the single biggest cause of
+regressions. If two existing rules conflict, resolve by the MORE RESTRICTIVE one unless
+the cited source says otherwise.
+
+SAFE TOOL REPLACEMENT — never bare-remove a tool. To replace a tool, ADD a wrapper tool
+whose code CALLS the existing tool (after validation/extra steps), verify the wrapper,
+THEN swap the registration (remove the raw tool from the active set and register the
+wrapper). Bare-removing a tool the agent still relies on breaks passing tasks. See
+`./guidance/tools/SKILL.md` for the full protocol.
+
+## Step 2b — NON-REGRESSION self-check (protect the wins)
+Before finalizing, review the "Currently PASSING" block below and the "Per-task impact of
+prior candidates" block (appended after these instructions). Then:
+  - For EACH currently-passing task, briefly argue why your edit cannot change its
+    trajectory (it touches a different code path / rule / tool than that task exercises).
+    If you cannot make that argument, narrow the edit until you can.
+  - Cross-check the per-task impact block: NEVER repeat a change that BROKE a task before
+    (a task another candidate dropped from passing). Re-introducing a known regressor is
+    the failure mode this whole process exists to prevent.
+A net gain that breaks as many tasks as it fixes is rejected — protect the passing set.
 
 ## Step 3 — Write the handover, make the edit, and stop
 Write the rich `STATE.md` handover (the sections below), APPLY the edit to the
@@ -79,6 +108,7 @@ re-scores you. Your `STATE.md` MUST end with:
     - What NOT to retry:
 
 {{FAILURES}}
+{{PASSING}}
 {{CAP_BRIEF}}
 
 ## If you are editing `tools`: prefer NEW CODE over prose (highest leverage)
@@ -89,11 +119,13 @@ write/replace a tool with a REAL body. Two go-to patterns:
   1. **Validation / rule-enforcement tool** — wrap a primitive: validate & normalize
      inputs, enforce the GENERAL rule in code, then delegate to the existing primitive
      (e.g. `cancel_record_safely(id)` checks cancellable in code, then calls
-     `cancel_record`). Then REMOVE the raw primitive so the only path is the safe one.
+     `cancel_record`). Use SAFE TOOL REPLACEMENT to retire the raw primitive: add the
+     wrapper that CALLS it, verify the wrapper, THEN swap the registration — never
+     bare-remove a tool the agent still relies on.
   2. **Workflow / composite tool** — collapse a recurring multi-step sequence (or N
      repeated calls) the agent gets wrong or skips into ONE call with real loops that
-     performs every step in code; REMOVE the raw primitives so the agent cannot stop
-     half-way.
+     performs every step in code; then SAFELY swap the raw primitives for the wrapper
+     (add → verify → swap registration) so the agent cannot stop half-way.
 Keep the toolset LEAN: replace/consolidate, don't accumulate (every tool costs context).
 The body must be real executable code — never `...`, never docstring-only, and a
 passthrough "reasoning"/"think" tool (a body that just returns its argument, with the
