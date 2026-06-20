@@ -16,6 +16,15 @@ exists). Here is everything intake needs:
 - tools means:  edit tool docstrings/descriptions; edit tool behavior/code; and
                 ADD/REMOVE tools, including composite tools that call existing tools
 - seed:         tau2-bench's canonical airline policy + its airline tool set
+- seed tools:   the seed tools file must be CLEAN, runnable code as intake would
+                produce it — real tool bodies, no baked-in optimizer/editing
+                instructions in its docstrings (what the optimizer may change to the
+                tools lives in the tools capability SKILL.md, not in the seed file)
+- capability_sources:  set `capability_sources` to the benchmark's data-model/types
+                module(s) the tools import (here tau2's airline data_model — the source
+                of FlightDB, Reservation, Passenger, Payment, etc.). cap-evolve copies
+                these verbatim into the optimizer's workdir so it can write correct
+                new-tool code against the real types.
 
 # 2. BENCHMARK / DATASET  (the eval) — INSTALL IT DURING INTAKE
 - benchmark:    tau2-bench, airline domain

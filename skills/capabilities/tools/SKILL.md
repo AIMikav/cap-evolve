@@ -22,6 +22,51 @@ when the tools come from an external Model Context Protocol server you can only
 re-describe, not re-implement. The two share the same `tools.json` artifact and
 handlers; the only difference is which edits the action policy permits.
 
+## What you can change here
+
+**The tool's docstring AND its return value are what the agent SEES — make both
+clear and recovery-oriented.** The doc surface (description, important-notes,
+per-param, `Raises:`, examples) drives *which* tool the model calls and *how* it
+fills the arguments; the return value (and especially the error text) steers the
+*next* turn. Each lever below is an edit class; pick the one that fixes the biggest
+failure cluster. (1-line generic examples; worked bodies in
+[`references/examples.md`](references/examples.md), depth below and in
+[`references/concepts.md`](references/concepts.md).)
+
+1. **Add a new tool** — give the agent a capability it lacks, built as a thoughtful
+   workflow tool, not a thin wrapper around one endpoint. *Ex:* add `search_logs`
+   that returns only the relevant lines instead of a raw dump.
+2. **Replace / wrap a tool** — superset an existing tool and route the old behavior
+   through it. *Ex:* wrap `find_record`+`charge_payment` behind one
+   `charge_record(record_id)` that resolves then charges.
+3. **Edit a tool's code / logic** — bake validation/enforcement into the body so
+   correctness doesn't depend on the LLM. *Ex:* reject a past date inside the tool
+   rather than hoping the prompt prevents it.
+4. **Improve a tool's documentation** — sharpen description / important-notes /
+   `Raises:` / per-param docs / examples; rename for least surprise. *Ex:*
+   `lookup(record)` → `get_record(record_id: str)` with "returns an error object if
+   not found."
+5. **Improve RETURN VALUES for recoverability** — high-signal fields, stable
+   human-readable ids, and **actionable error text with a next-step hint and what
+   NOT to do**. *Ex:* error returns "payment method not on file; available:
+   ['card_1'] — pass one of these" instead of a raw traceback.
+6. **Add a loop tool** — replace N repeated single-item calls with one list call.
+   *Ex:* `get_records(ids: [...])` replaces N× `get_record(id)`.
+7. **Add a workflow tool** — for a *recurring*, failure-prone multi-step sequence,
+   a deterministic tool that calls several tools in order. *Ex:*
+   `apply_change_plan(record_id, steps)` runs validate → apply-each → return final
+   state as one reliable step.
+8. **Remove-with-replacement** — remove a redundant/overlapping tool *only* after a
+   replacement preserving its capability exists. *Ex:* drop `query` once
+   `get_record` + `search_records` cover it.
+
+**Guardrails (depth below):** encode deterministic logic in code, not prose (a
+tool body the model cannot skip beats a sentence it can forget); keep the toolset
+small and namespaced (aim **< ~20** active tools); ship correct, bug-free code
+(every code edit needs validation + a `validate` run); and **never remove a tool
+without a capability-preserving replacement** (add → verify → swap, see the SAFE
+TOOL-REPLACEMENT PROTOCOL).
+
 ## The highest-leverage edit: write a NEW code-bearing tool
 
 **Start here. A deterministic tool beats a sentence in the prompt.** A docstring
@@ -401,8 +446,8 @@ Drawn from real runs where the optimizer left most of the gain on the table.
   and left the model blind to why calls fail. Error conditions are guidance, not
   clutter — keep them.
 - **Cosmetic description rewording** — reflowing sentences, adding commas,
-  restating the obvious ("Cancel the reservation" → "Cancel an entire
-  reservation"). No new always-true information, so no behavior change.
+  restating the obvious ("Cancel the record" → "Cancel an entire record"). No new
+  always-true information, so no behavior change.
 - **Baking one task's specifics into a description** — naming a particular id,
   date, or city. It overfits and can mislead on the next task.
 - **Adding tools that duplicate ones the agent already uses fine** — enlarges the

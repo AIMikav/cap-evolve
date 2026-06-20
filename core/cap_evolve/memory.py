@@ -3,9 +3,10 @@
 Two append-only records that survive across iterations:
 
 - ``RejectedMemory`` — every candidate the gate rejected, with the reason. Its
-  ``render()`` produces a markdown block fed into the *next* proposal prompt so
-  the optimizer never re-proposes a dead end (prior agent-optimization work's RejectedMemory / evo-graph's
-  Rejected Memory Store).
+  ``render()`` produces a markdown block fed into the *next* proposal prompt as
+  STEERING: don't re-submit a regressed edit verbatim, but a better-designed version
+  of the same idea may still work — so a high-value cluster is not permanently
+  abandoned (prior agent-optimization work's RejectedMemory / evo-graph's Rejected Memory Store).
 - ``History`` — every accepted candidate, so the loop can show the optimizer
   what worked and reconstruct the best-so-far lineage.
 
@@ -80,11 +81,18 @@ class RejectedMemory:
         return out
 
     def render(self, limit: int = 20) -> str:
-        """Markdown block for the proposal prompt: 'do not try these again'."""
+        """Markdown block for the proposal prompt: approaches that regressed AS
+        IMPLEMENTED — steering, not a permanent ban-list."""
         items = self.entries()[-limit:]
         if not items:
-            return "_No rejected approaches yet._"
-        lines = ["## Rejected approaches (do NOT re-propose these)"]
+            return "_No regressed approaches yet._"
+        lines = [
+            "## Approaches that regressed AS IMPLEMENTED",
+            "These exact edits were rejected by the gate. Don't re-submit them verbatim — "
+            "but a better-designed version of the same idea MAY still work, so don't "
+            "permanently abandon a high-value cluster. Each shows its reject reason "
+            "(and per-task impact) so you can redesign rather than repeat.",
+        ]
         for e in items:
             v = f" (val={e['val']:.4f})" if e.get("val") is not None else ""
             lines.append(f"- **{e['summary']}** — rejected: {e['reason']}{v}")

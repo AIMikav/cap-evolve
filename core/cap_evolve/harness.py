@@ -457,7 +457,8 @@ _STATE_SEED = (
     "- Approaches tried this iteration (1 concrete line each):\n"
     "- Lessons learned (general):\n"
     "- Recommendation / what to focus on next:\n"
-    "- What NOT to retry:\n"
+    "- Approaches that regressed AS IMPLEMENTED (a better-designed version may still "
+    "work — don't permanently abandon a high-value cluster):\n"
 )
 
 
@@ -700,7 +701,8 @@ def _extract_handover(state_path: Path, *, max_chars: int = 800) -> str | None:
     seed_labels = ("approaches tried this iteration (1 concrete line each):",
                    "lessons learned (general):",
                    "recommendation / what to focus on next:",
-                   "what not to retry:")
+                   "approaches that regressed as implemented (a better-designed version may still "
+                   "work — don't permanently abandon a high-value cluster):")
     residual = section.lower()
     for lbl in seed_labels:
         residual = residual.replace(lbl, "")
@@ -753,9 +755,10 @@ def _augment_instructions(instructions: str, workdir: Path, run_dir: RunDir,
     rej_block = ""
     if rej_diffs:
         rej_block = (
-            "\n\n## Recently rejected edits — do NOT re-propose these\n"
-            "These exact edits were already tried and rejected by the gate. Propose "
-            "something materially different.\n\n" + rej_diffs
+            "\n\n## Recently rejected edits — don't re-submit these verbatim\n"
+            "These exact diffs were already tried and rejected by the gate. Don't "
+            "re-submit them as-is; a better-designed version of the same idea may still "
+            "work, so redesign rather than abandon a high-value cluster.\n\n" + rej_diffs
         )
 
     return (
@@ -768,26 +771,58 @@ def _augment_instructions(instructions: str, workdir: Path, run_dir: RunDir,
     )
 
 
-def _inject_optimizer_context(adapter, run_dir: RunDir, workdir: Path, *, split: str,
-                              capabilities=None, optimizer_name: str | None = None) -> None:
-    """Give the optimizer everything it needs to read, inside its own working dir.
+def _copy_step_trajectories(adapter, run_dir: RunDir, workdir: Path, split: str) -> None:
+    """Copy ONLY the current best/parent candidate's per-tag rollouts for ``split``
+    into ``workdir/trajectories/`` — the single step the optimizer builds on.
 
-    Copies, VERBATIM and without parsing:
-      - the runner's native trajectories for the most recent ``split`` eval into
-        ``workdir/trajectories/`` (path from ``adapter.trajectories(split)``; falls
-        back to cap-evolve's own per-rollout JSON under ``rollouts/<split>/`` — which
-        already embeds each rollout's full trace — so there is always something);
-      - the selected capability skill(s) into ``workdir/guidance/<cap>/`` so the
-        optimizer can read the full edit-space guidance + examples without leaving
-        its dir;
-      - the diagnose phase skill into ``workdir/guidance/diagnose/`` (the
-        failure-clustering method);
-      - the resolved optimizer's features reference into
-        ``workdir/guidance/optimizer/<optimizer_name>.md`` (parallel-subagent
-        capabilities etc.), when ``optimizer_name`` is known and the file exists.
-    No benchmark assumptions: the trajectory directory may be any structure / format.
+    The run dir's ``rollouts/<split>/`` mixes the seed plus every accepted AND
+    rejected candidate's trials, so copying it wholesale would make the optimizer
+    analyze stale, irrelevant trajectories. We scope to the BEST candidate's tag
+    (``rollouts/<split>/*__<best_id>__t*.json``) — the parent this iteration forks
+    from. Fallbacks preserve the existing "always something to read" guarantee:
+      1. per-tag rollout copy for the resolved best tag (preferred — scoped);
+      2. if no best tag has rollouts yet, the ``seed`` tag;
+      3. if neither exists on disk, the adapter's native trajectories dir (if any);
+      4. as a last resort, the whole ``rollouts/<split>/`` dir.
+    The per-tag copy is preferred even when the adapter returns a native dir, because
+    the native dir generally cannot be scoped to one candidate.
     """
-    # 1) trajectories (verbatim)
+    dst = workdir / "trajectories"
+
+    def _copy_tag(tag: str) -> bool:
+        vdir = run_dir.rollouts / split
+        if not vdir.is_dir():
+            return False
+        files = sorted(vdir.glob(f"*__{tag}__t*.json"))
+        if not files:
+            return False
+        try:
+            if dst.exists():
+                shutil.rmtree(dst)
+            dst.mkdir(parents=True, exist_ok=True)
+            for f in files:
+                shutil.copyfile(f, dst / f.name)
+            return True
+        except Exception as e:  # noqa: BLE001
+            run_dir.log_event("optimizer_context_warning",
+                              what=f"trajectories/{tag}", error=str(e)[:300])
+            return False
+
+    # Resolve the best/parent candidate id from run state (the parent this step forks
+    # from), falling back to the seed tag when no candidate has been accepted yet.
+    best_id = None
+    try:
+        best_id = run_dir.best_id
+    except Exception:  # noqa: BLE001
+        best_id = None
+
+    if best_id and _copy_tag(str(best_id)):
+        return
+    if _copy_tag("seed"):
+        return
+
+    # Fallbacks: adapter native dir, then the whole rollouts/<split>/ — so there is
+    # ALWAYS something for the optimizer to read.
     traj_src = None
     try:
         traj_src = adapter.trajectories(split)
@@ -798,12 +833,39 @@ def _inject_optimizer_context(adapter, run_dir: RunDir, workdir: Path, *, split:
     try:
         traj_src = Path(traj_src)
         if traj_src.is_dir() and any(traj_src.iterdir()):
-            dst = workdir / "trajectories"
             if dst.exists():
                 shutil.rmtree(dst)
             shutil.copytree(traj_src, dst)
     except Exception as e:  # noqa: BLE001
         run_dir.log_event("optimizer_context_warning", what="trajectories", error=str(e)[:300])
+
+
+def _inject_optimizer_context(adapter, run_dir: RunDir, workdir: Path, *, split: str,
+                              capabilities=None, optimizer_name: str | None = None,
+                              capability_sources=None, project_dir: Path | None = None) -> None:
+    """Give the optimizer everything it needs to read, inside its own working dir.
+
+    Copies, VERBATIM and without parsing:
+      - the CURRENT BEST/PARENT candidate's per-tag trajectories for the most recent
+        ``split`` eval into ``workdir/trajectories/`` — ONLY the step the optimizer
+        builds on, not the seed + every rejected candidate (see ``_copy_step_trajectories``);
+      - the selected capability skill(s) into ``workdir/guidance/<cap>/`` so the
+        optimizer can read the full edit-space guidance + examples without leaving
+        its dir;
+      - any ``capability_sources`` files (data models / types the tools import) into
+        ``workdir/guidance/sources/<basename>`` so the optimizer can write correct code;
+      - the diagnose phase skill into ``workdir/guidance/diagnose/`` (the
+        failure-clustering method);
+      - the resolved optimizer's features reference into
+        ``workdir/guidance/optimizer/<optimizer_name>.md`` (parallel-subagent
+        capabilities etc.), when ``optimizer_name`` is known and the file exists.
+    No benchmark assumptions: the trajectory directory may be any structure / format.
+    """
+    # 1) trajectories (verbatim) — ONLY the current best/parent candidate's tag for
+    # this split, so the optimizer analyzes the step it builds on (not seed + every
+    # rejected candidate mixed together). Always preserves the "something to read"
+    # guarantee via per-tag fallback then the native dir.
+    _copy_step_trajectories(adapter, run_dir, workdir, split)
 
     # 2) capability skills as local guidance
     caps = [c for c in (capabilities or []) if c]
@@ -820,6 +882,26 @@ def _inject_optimizer_context(adapter, run_dir: RunDir, workdir: Path, *, split:
                 )
             except Exception as e:  # noqa: BLE001
                 run_dir.log_event("optimizer_context_warning", what=f"guidance/{c}", error=str(e)[:300])
+
+    # 2b) capability_sources — supporting source files (data models / types the tools
+    # import) copied VERBATIM into ./guidance/sources/<basename> so the optimizer can
+    # write correct code against them. Paths resolve relative to the project dir;
+    # missing files are tolerated.
+    sources = [s for s in (capability_sources or []) if s]
+    if sources:
+        sdst = workdir / "guidance" / "sources"
+        for s in sources:
+            try:
+                sp = Path(s)
+                if not sp.is_absolute() and project_dir is not None:
+                    sp = Path(project_dir) / s
+                if not sp.is_file():
+                    continue
+                sdst.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(sp, sdst / sp.name)
+            except Exception as e:  # noqa: BLE001
+                run_dir.log_event("optimizer_context_warning",
+                                  what=f"guidance/sources/{s}", error=str(e)[:300])
 
     repo_root = Path(__file__).resolve().parents[2]
 
@@ -978,6 +1060,8 @@ def run_step(
     capabilities=None,
     eval_split: str = "val",
     optimizer_name: str | None = None,
+    capability_sources=None,
+    project_dir: Path | None = None,
 ) -> dict:
     """Materialize parent → optimize → evaluate on val → gate → accept/reject.
 
@@ -1001,7 +1085,8 @@ def run_step(
 
     # Give the optimizer the full trajectories + capability guidance, in its own dir.
     _inject_optimizer_context(adapter, run_dir, workdir, split=eval_split,
-                              capabilities=capabilities, optimizer_name=optimizer_name)
+                              capabilities=capabilities, optimizer_name=optimizer_name,
+                              capability_sources=capability_sources, project_dir=project_dir)
 
     instructions = _augment_instructions(instructions, workdir, run_dir, rejected, history)
 
@@ -1412,13 +1497,16 @@ def _focus_instructions(current_val: SplitResult, focus_ids, label: str,
     # Fallback (template unreadable): assemble a minimal but complete prompt so a run
     # never breaks just because the template file is missing.
     parts = [
-        "# Optimize the capability — analyze the full trajectories in ./trajectories/, "
-        "then make ONE targeted, generalizing edit and STOP.",
+        "# Optimize the capability — analyze this step's trajectories in ./trajectories/, "
+        "then make ONE bold, multi-part, generalizing edit and STOP.",
         focus_summary, "",
-        "Read ./trajectories/ (full traces), ./guidance/<cap>/SKILL.md, ./STATE.md, "
-        "./MEMORY.md. Prefer deterministic code-bearing tools over prompt text.",
+        "Read ./trajectories/ (full traces), ./guidance/<cap>/SKILL.md (what you can "
+        "change), ./guidance/sources/ (data models/types — read before writing tool "
+        "code), ./STATE.md, ./MEMORY.md. The prompt and the tools are equally fair game; "
+        "ground every change in the trajectories; enforcing a deterministic rule in tool "
+        "code is stronger than prose — do both where useful.",
         bench, "", failures, passing, cap, "", algo, "",
-        "Be economical: one good edit, minimal narration, then finish.",
+        "Be economical: one strong multi-part edit, minimal narration, then finish.",
     ]
     return "\n".join(p for p in parts if p is not None)
 
@@ -1440,6 +1528,8 @@ def hill_climb_loop(
     instructions_file=None,
     bench_repo: str | None = None,
     optimizer_name: str | None = None,
+    capability_sources=None,
+    project_dir: Path | None = None,
 ) -> dict:
     """The loop behind the ``hill-climb`` skill's three ``--focus`` schedules
     (all / cyclic / hardest-first).
@@ -1483,7 +1573,8 @@ def hill_climb_loop(
             optimizer=optimizer, instructions=instructions, current_val=current_val,
             n_trials=n_trials, gate_kwargs=gate_kwargs, no_regression=no_regression,
             rejected=rejected, history=history, store=store, capabilities=capabilities,
-            optimizer_name=optimizer_name,
+            optimizer_name=optimizer_name, capability_sources=capability_sources,
+            project_dir=project_dir,
         )
         steps.append(step)
         if step["accepted"]:

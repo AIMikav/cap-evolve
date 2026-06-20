@@ -59,11 +59,50 @@ inconsistent behavior. This is why "more instructions" is not "better."
 - **Ordering / structure.** Long context first, query / output contract last;
   separate instructions / context / examples with `<xml>` tags. End-placed
   instructions are acted on more reliably on long inputs.
-- **Clarify, don't invent.** Edits may only clarify or reorganize rules already
-  present (or grounded in a cited source). Never introduce a normative rule that
-  conflicts with, or isn't supported by, the existing instructions — invented rules
-  are the most common regressor. Behavioral failures (the model knows the rule but
-  skips the action) belong in **code/tools**, not more prose.
+- **Ground new rules in a source.** Adding a rule the source/policy requires but
+  the prompt omits is a high-value edit (menu item 4). What regresses is *inventing*
+  a normative rule that no source supports and that conflicts with the existing
+  instructions — trace every added rule to a real source. Behavioral failures (the
+  model knows the rule but skips the action) belong in **code/tools**, not more prose.
+
+## The six good practices
+1. **Be clear, direct, specific — write for a capable new hire with no context.**
+   If a colleague with minimal context would be confused, so will the model. Spell
+   out the desired output and constraints; number steps when order matters.
+2. **Give the reason, not just the command.** Context lets the model generalize;
+   the TTS-ellipses rewrite is the canonical before/after.
+3. **Tell it what TO do, not what NOT to do (positive framing).** "Compose your
+   reply in flowing prose" beats "do not use markdown."
+4. **Structure with sections / XML tags and order deliberately.** Wrap
+   instructions, context, examples, inputs in their own tags; long data at the top,
+   the query / contract last (end-placement can lift quality on long inputs).
+5. **Use a few diverse examples (3–5) and define an explicit output contract.**
+   Examples are the most reliable way to steer format; prefer a schema / enum tool
+   over prefill for structured output.
+6. **Keep prompts lean and self-consistent; tune trigger strength to the model.**
+   Over-long, redundant preambles and conflicting instructions dilute attention; on
+   current models, soften `CRITICAL/MUST` rather than piling on more.
+
+## The five failure modes
+1. **Missing or loose output contract** — right content, wrong shape → zero reward
+   (the most common silent prompt failure; diagnose shape before content).
+2. **Conflicting / over-broad instructions** — a later clause contradicts an
+   earlier one; the model resolves it unpredictably and behavior gets *worse*.
+3. **Over-long, redundant preamble** — repeated or stale guidance dilutes
+   attention; length is not safety.
+4. **Negative-only phrasing** — "don't do X" without the positive alternative
+   underperforms "do Y."
+5. **Stale over-strong language → over-eagerness** — anti-laziness `MUST/ALWAYS`
+   prompting that helped older models now causes over-engineering, excessive tool
+   use, and over-triggering on current models.
+
+## The never-drop rule (non-negotiable)
+**Never delete a rule, policy, or constraint the agent still needs — change,
+consolidate, or add instead.** When an edit removes text, every distinct constraint
+that text carried must survive somewhere (rewritten more clearly, merged into a
+combined rule, or relocated). Deletion is legitimate only when the information is
+genuinely redundant or contradicted by the source — and even then, prefer rewriting
+the conflicting rule over dropping it. Consolidation reduces *words*, never *rules*.
 
 ## Edit model
 Artifact = one or more text files (`prompt.txt`, `policy.md`, `SYSTEM.md`). Edit

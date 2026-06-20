@@ -16,6 +16,48 @@ few words can flip success on a whole class of tasks. This capability treats one
 or more prompt/policy text files (`prompt.txt`, `policy.md`, `SYSTEM.md`) as the
 optimizable artifact.
 
+## What you can change here
+
+The prompt is **HIGH-VALUE to edit, not a last resort.** When the traces show the
+agent doesn't know a rule, a format, or a decision criterion, a sharper prompt is
+the fastest fix. Each lever below is a safe, bounded edit class — pick the one
+that fixes the biggest failure cluster. (1-line generic examples; depth in
+[`references/concepts.md`](references/concepts.md).)
+
+1. **Rewrite a rule for clarity / positive framing** — say what TO do, specifically.
+   *Ex:* "Don't be vague" → "State the record ID in every reply."
+2. **Add the WHY to a bare rule** — append the reason so the model generalizes.
+   *Ex:* "Never use ellipses" → "Never use ellipses — output is read by a TTS
+   engine that can't pronounce them."
+3. **Consolidate redundant rules** — merge duplicates into one, keeping every
+   distinct constraint. *Ex:* three "confirm before deleting" lines → one "Confirm
+   before any destructive action (delete, overwrite, send)."
+4. **Add a missing rule grounded in the source/policy** — add a rule the source
+   requires but the prompt omits (must trace to a real source, never invented).
+   *Ex:* source says refunds need a manager code → "Require a manager code before
+   any refund."
+5. **Add an example** — 1, up to 3–5, `<example>`-tagged exemplars to pin format.
+   *Ex:* add one `<example>` showing the exact JSON envelope expected.
+6. **Reorder** — long context/data to the top, query + instructions last; group
+   mixed content under headers / XML tags. *Ex:* move a long reference block above
+   the task instruction.
+7. **Add a role / goal line** — one sentence on who the agent is and its objective.
+   *Ex:* "You are a careful support agent; resolve the request in one turn."
+8. **Tighten the output contract** — make the required shape explicit and exact.
+   *Ex:* "Reply with only a JSON object `{status, reason}` — no prose."
+9. **Soften over-strong language** — downgrade `CRITICAL/MUST/ALWAYS` to "Use …
+   when …" when a cluster shows over-eagerness/over-triggering on current models.
+   *Ex:* "CRITICAL: you MUST call the tool" → "Use the tool when you need live data."
+
+> **NEVER drop a needed rule — change, consolidate, or add; don't delete.** When an
+> edit removes text, every distinct constraint that text carried must survive
+> somewhere (rewritten, merged, or relocated). Deletion is legitimate only when the
+> information is genuinely redundant or contradicted by the source — and even then,
+> prefer rewriting the conflicting rule. Consolidation cuts *words*, never *rules*.
+
+The good practices, failure modes, and the full never-drop rule are in
+[`references/concepts.md`](references/concepts.md) — read it before a non-trivial edit.
+
 ## What can be optimized
 - **Role line** — a single sentence stating who the agent is. A known cheap win:
   one role sentence focuses behavior and tone.
@@ -49,11 +91,13 @@ These are *how* to phrase a prompt edit so it actually changes behavior:
   last (end-placement can lift quality on long inputs); separate
   instructions / context / examples with lightweight `<xml>` tags so the model
   doesn't conflate them.
-- **CLARIFY, DON'T INVENT.** A prompt edit may only *clarify or reorganize* rules
-  already present (or grounded in a source the prompt cites) — never add a new
-  normative rule, exception, or workaround that conflicts with, or isn't supported
-  by, the existing instructions. Unsupported invented rules are the #1 regressor.
-  If two existing rules conflict, resolve toward the more restrictive one.
+- **Ground new rules in a source; don't fabricate.** You MAY add a rule the source
+  or policy requires but the prompt omits (menu item 4) — that is a high-value edit.
+  What you must not do is invent a normative rule, exception, or workaround that no
+  source supports and that conflicts with the existing instructions. Trace every
+  added rule to a real source (the policy doc, the runner, the benchmark spec). If
+  two existing rules conflict, rewrite toward the more restrictive one rather than
+  dropping either.
 
 ## Prose fixes KNOWLEDGE gaps, not BEHAVIORAL ones
 The system prompt is the right lever when a failure is a *knowledge* gap — the
