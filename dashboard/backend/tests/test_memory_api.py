@@ -21,7 +21,10 @@ def _seed_memory(rd):
     )
     cdir = rd.root / "candidates" / "cand_0001"
     cdir.mkdir(parents=True, exist_ok=True)
-    (cdir / "MEMORY.md").write_text("# notes\nlearned X", encoding="utf-8")
+    # Real runs snapshot the optimizer's per-iteration explainability (PROCESS.md)
+    # alongside the capability files; LEDGER/JOURNAL/RUNMAP are injected read-context
+    # kept out of the snapshot.
+    (cdir / "PROCESS.md").write_text("# PROCESS\nwhat I did", encoding="utf-8")
     (cdir / "prompt.txt").write_text("you are helpful", encoding="utf-8")
 
 
@@ -49,7 +52,7 @@ def test_candidate_files_endpoint(tmp_base, make_run):
     r = _client(tmp_base).get("/api/runs/run_a/candidate/cand_0001/files")
     assert r.status_code == 200
     names = {f["name"] for f in r.json()}
-    assert names == {"MEMORY.md", "prompt.txt"}
+    assert names == {"PROCESS.md", "prompt.txt"}
 
 
 def test_memory_missing_run_404(tmp_base):

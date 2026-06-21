@@ -8,7 +8,8 @@ import { Card } from './ui/Card'
 import { Skeleton } from './ui/Skeleton'
 
 /** Optimizer memory: accepted history, rejected ("do-not-re-propose"), and the
- * per-candidate scratch files (MEMORY.md / STATE.md / INSTRUCTIONS.md / prompt). */
+ * per-candidate snapshot files (PROCESS.md explainability / INSTRUCTIONS.md / the
+ * capability files). */
 export function MemoryPanel({ runId, graph }: { runId: string; graph: RunGraph }) {
   const { data, isLoading } = useQuery({
     queryKey: ['memory', runId],

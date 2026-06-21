@@ -83,30 +83,39 @@ value into the prompt or tool code.
 6. Fill `PROCESS.md` (this iteration) and APPEND your entry to `JOURNAL.md` (handover),
    apply the edits, and STOP.
 
-## Fix MANY root causes — choose the code edit by FAILURE TYPE, and ship MULTIPLE classes
-For each cluster, classify it, then pick the matching edit (most iterations need
-several of these, together, in ONE candidate):
-- **RULE VIOLATION** (the agent breaks a rule a tool already implies) → move the rule
-  INTO THE CODE BODY of the EXISTING tool it governs — an in-body validation /
-  normalization / computation that raises an ACTIONABLE error or returns the corrected
-  value. A rule the agent can read but breaks stays broken until code enforces it.
+## Fix MANY root causes — choose the fix by FAILURE TYPE, and ship MULTIPLE classes
+For each cluster, classify it, then apply the strongest lever YOUR selected
+capability's edit space offers (see `./guidance/<cap>/SKILL.md` — the levers below are
+written for a TOOLS capability; if your capability is prompt-only, e.g. system-prompt
+or skill-package, translate each to its structural equivalent and the tool-specific
+parts simply don't apply). Most iterations need several classes together, in ONE
+candidate:
+- **RULE VIOLATION** (the agent breaks a rule it could already follow) → make the rule
+  STRUCTURALLY enforced, not just stated: for a tools capability, move it INTO THE CODE
+  BODY of the EXISTING tool it governs (in-body validation / normalization /
+  computation raising an ACTIONABLE error); for a prompt capability, make the rule
+  unmissable and unambiguous (a checklisted step, a worked counterexample). A rule the
+  agent reads but breaks stays broken until the structure enforces it.
 - **CAPABILITY GAP / ACTION STALL** (the agent lacks a way to do the thing, or it
-  narrates/confirms a multi-step action then never executes it) → **ADD A NEW
-  code-bearing tool**: a composite atomic-WRITE tool whose body performs the whole
+  narrates/confirms a multi-step action then never executes it) → add the strongest
+  STRUCTURAL mechanism your capability offers: for a tools capability, **ADD A NEW
+  code-bearing tool** — a composite atomic-WRITE tool whose body performs the whole
   action via the existing primitives (then REMOVE_TOOLS the raw primitives so it's
-  un-skippable), or a loop/validation tool. For a STALL this is the correct fix EVEN
-  WHEN a write primitive exists — the primitive is exactly what the agent skips. Do
-  not downgrade this to a prose "be sure to act" rule; that is the edit that has
-  repeatedly failed.
+  un-skippable), or a loop/validation tool; for a STALL this is the correct fix EVEN
+  WHEN a primitive exists, because the primitive is exactly what the agent skips. For a
+  prompt-only capability, the equivalent is an explicit, ordered, unavoidable procedure
+  / worked example. Either way, do NOT downgrade this to a vague "be sure to act" line.
 - **KNOWLEDGE GAP** (a format/criterion/fact the agent genuinely cannot derive) →
   prose: a prompt or docstring rule.
 
 **The failure mode this instruction prevents is shipping ONE change and stopping, or
-leaving a STALL/capability-gap cluster as prose because "an existing tool already
-exists."** Adding a NEW tool is ENCOURAGED — across a whole run that ships zero new
-tools when stall clusters persist, the optimizer under-used every iteration. A strong
-iteration edits SEVERAL existing tool bodies AND adds at least one new tool when a
-capability-gap/stall cluster is present.
+leaving a STALL/capability-gap cluster under-fixed with a weak nudge.** When your
+capability supports tools, adding a NEW tool is ENCOURAGED — across a whole run that
+ships zero new tools when stall clusters persist, the optimizer under-used every
+iteration; a strong iteration edits SEVERAL existing tool bodies AND adds a new tool
+for a capability-gap/stall cluster. For a prompt-only capability, the equivalent strong
+iteration makes several structural prompt changes (procedures, worked examples, removed
+ambiguities) rather than one cosmetic reword.
 
 A strong iteration ships, together: (a) for each rule-violation cluster, an in-body
 guard added to the EXISTING tool that governs it (validate/normalize/compute → raise
@@ -222,14 +231,16 @@ Before finishing, count your changes by EDIT CLASS (a strong iteration ships sev
     (e.g. an existing-tool-body guard AND a new tool; or guards AND enriched returns
     AND a prompt fix). Shipping a single class (only docstrings, only one guard) is an
     under-used iteration — go back and address more clusters.
-  - **New-tool bar:** if ANY cluster is a CAPABILITY-GAP or an ACTION STALL (the agent
-    narrates/confirms then fails to execute), you added at least ONE new code-bearing
-    tool (a composite atomic-WRITE / loop / validation tool) for it — not a prose rule.
-    A run that never adds a new tool while stall clusters persist is under-using every
-    iteration. New tools COUNT and are encouraged.
-  - **Rule-violation bar:** you converted at least half the rule-violations you found
-    into in-body guards across the EXISTING tools that own them (don't leave them as
-    prose).
+  - **Structural-lever bar:** if ANY cluster is a CAPABILITY-GAP or an ACTION STALL (the
+    agent narrates/confirms then fails to execute), you applied the strongest STRUCTURAL
+    lever your capability offers for it — for a tools capability, at least ONE new
+    code-bearing tool (composite atomic-WRITE / loop / validation), not a prose nudge;
+    for a prompt capability, an explicit unavoidable procedure / worked example. (A
+    tools run that never adds a new tool while stall clusters persist is under-using
+    every iteration. New tools COUNT and are encouraged.)
+  - **Rule-enforcement bar:** you converted at least half the rule-violations you found
+    into STRUCTURALLY-enforced fixes — for tools, in-body guards on the EXISTING tools
+    that own them; for a prompt, unmissable checklisted steps — not left as loose prose.
   - EVERY fix has a VERIFY-THE-FIX line in PROCESS.md proving the guard fires / the
     computation returns the corrected value / the new tool completes the action on the
     reconstructed inputs. A fix without a verification line is unverified — verify or drop.

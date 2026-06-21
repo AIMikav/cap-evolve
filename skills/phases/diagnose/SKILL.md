@@ -48,10 +48,13 @@ rollouts.
   - **BEHAVIORAL** — the agent KNOWS the rule but violates it on a tool that exists
     → fix in that EXISTING tool's body (an in-code guard).
   - **CAPABILITY-GAP** — the agent has NO reliable way to do the thing, or it
-    narrates/confirms a multi-step action then STALLS and never executes it → **add a
-    NEW code-bearing tool** (a composite atomic-WRITE / loop / validation tool). This
-    is its own tag precisely so a stall/gap cluster is NOT mis-filed as BEHAVIORAL and
-    "fixed" with a prose nudge that never works.
+    narrates/confirms a multi-step action then STALLS and never executes it → fix with
+    the strongest STRUCTURAL lever the SELECTED capability offers (per its
+    `./guidance/<cap>/SKILL.md`): for a tools capability, a NEW code-bearing tool (a
+    composite atomic-WRITE / loop / validation tool); for a prompt/skill capability, an
+    explicit step-by-step procedure or worked example that makes the step unavoidable.
+    This is its own tag precisely so a stall/gap cluster is NOT mis-filed as BEHAVIORAL
+    and "fixed" with a weak nudge that never works.
 - **kept_good:** tasks already passing — the set the gate's no-regression check
   must protect, so a fix for one cluster does not silently break a passing task.
 
@@ -72,9 +75,11 @@ edits**, never patch blindly:
    (lacks a format/rule/criterion → prompt), **BEHAVIORAL** (knows the rule but
    violates it on an existing tool → in-code guard in that tool's body), or
    **CAPABILITY-GAP** (no reliable way to do it, or stalls at the action boundary
-   and never executes → ADD a NEW composite/loop/validation tool): more prose will
-   not fix a behavioral OR capability-gap cluster — the first needs code in the
-   existing tool, the second needs a new tool that makes the action un-skippable.
+   and never executes → the strongest STRUCTURAL lever the SELECTED capability offers
+   per its guidance: a NEW composite/loop/validation tool for a tools capability, or an
+   explicit procedure/worked example for a prompt/skill capability): more prose alone
+   will not fix a behavioral OR capability-gap cluster — the first needs the rule in
+   code/structure, the second a new mechanism that makes the action un-skippable.
    Also surface a **NEAR-MISS** cluster: tasks scoring high-partial (≈0.7–0.9) that
    need only one small correct change to flip to a pass — these are the cheapest
    marginal gain per edit and are easy to miss when you focus on zero-score tasks.

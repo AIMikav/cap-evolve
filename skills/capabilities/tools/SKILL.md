@@ -43,7 +43,8 @@ iteration that ships a single class (only docstrings, only one guard) is under-u
 
 **Two equally-first-class moves — pick by the failure type, not by a default:**
 - **Edit the BODY of an EXISTING tool** when the agent VIOLATES a rule a tool
-  already owns (wrong cabin, bad payment id, cancel-when-not-cancellable). Convert
+  already owns (a wrong field value, an id not on file, an action on a record whose
+  state forbids it). Convert
   the prose rule into an in-body guard. Expect to touch SEVERAL existing bodies.
 - **ADD a NEW code-bearing tool** when the agent has a CAPABILITY GAP or STALLS at
   an action — most importantly, a **composite atomic-WRITE tool** for a multi-step
@@ -85,8 +86,9 @@ the composite tool a stall cluster needs, leave most of the gain on the table.
    *Ex:* `get_records(ids: [...])` replaces N× `get_record(id)`.
 7. **Add a composite atomic-WRITE / workflow tool (first-class — the fix for STALLS
    and multi-step writes)** — for a recurring, failure-prone multi-step action
-   (especially one the agent narrates/confirms then fails to execute, e.g. cancel +
-   rebook), a deterministic tool whose body performs ALL the steps in order via the
+   (especially one the agent narrates/confirms then fails to execute, e.g. a
+   multi-step update that must cancel/undo then re-create a record), a deterministic
+   tool whose body performs ALL the steps in order via the
    existing primitives, then `remove` the raw primitives so the action is
    un-skippable. *Ex:* `apply_change_plan(record_id, steps)` validates → applies each
    → returns final state as one reliable call. Reach for this whenever a cluster

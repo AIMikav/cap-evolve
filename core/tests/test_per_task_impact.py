@@ -51,12 +51,18 @@ def test_per_task_impact_lists_broken_task():
     rejected = RejectedMemory(rd.rejected_path)
     rejected.add("cand_0001", "candidate cand_0001 (val 0.667)", "no significant gain", 0.667)
 
-    block = harness._per_task_impact_block(rd, rejected, None)
-    assert block, "expected a non-empty per-task impact block"
-    assert "cand_0001" in block
-    # The broken task id must be surfaced in the BROKE set.
-    assert "BROKE" in block and "2" in block
-    assert "FIXED" in block and "3" in block
+    # The per-task broke/fixed signal reaches the optimizer via the framework-owned
+    # factual LEDGER.md (built each iteration). Build it into a workdir and assert the
+    # broken/fixed task ids are surfaced in cand_0001's row.
+    import tempfile as _tf
+    workdir = Path(_tf.mkdtemp())
+    harness._build_ledger(workdir, rd, rejected, None)
+    ledger = (workdir / "LEDGER.md").read_text(encoding="utf-8")
+    assert "cand_0001" in ledger
+    # Row format: | iter | candidate | parent | outcome | val | Δ | broke {..} | fixed {..} |
+    row = [ln for ln in ledger.splitlines() if "cand_0001" in ln][0]
+    assert "{2}" in row   # BROKE task 2 (was passing)
+    assert "{3}" in row   # FIXED task 3
 
     # And the memory record carries the localized broke/fixed lists (C4).
     impact = harness._candidate_task_impact(rd, "cand_0001", "val",
