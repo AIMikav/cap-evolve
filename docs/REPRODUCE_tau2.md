@@ -25,9 +25,11 @@ This example is no-holdout (train = val = test = all 50), so **val IS the fit me
 
 Every accepted iteration makes deep **in-code** tool edits (prose rules → executable
 guards), not just prompt tweaks — `tools.py` grows 593 → 982 lines over the run. You can
-**see the result before reproducing**: open the committed, self-contained
-[`examples/tau2_airline/run_full/dashboard.html`](../examples/tau2_airline/run_full/dashboard.html)
-in any browser (offline), read the curated story in
+**see the result before reproducing**: open the committed full interactive dashboard
+(all 15 iterations, no backend needed) — the static UI export at
+[`examples/tau2_airline/run_full/ui/`](../examples/tau2_airline/run_full/ui/) — by running
+`cd examples/tau2_airline/run_full/ui && python3 -m http.server 8000` (then
+http://localhost:8000), or host it on GitHub Pages / any static host; read the curated story in
 [`examples/tau2_airline/DEMO.md`](../examples/tau2_airline/DEMO.md), or the raw numbers in
 [`run_full/final.json`](../examples/tau2_airline/run_full/final.json).
 
@@ -143,7 +145,9 @@ cat "$RD/rejected.jsonl"        # what the honest gate rejected (optimizer memor
 ```
 
 Saved artifacts also land in [`../examples/tau2_airline/run_full/`](../examples/tau2_airline/run_full/)
-(`demo.cast`, `dashboard.html`, `report.md`, `events.jsonl`, `TAU2_COMMIT.txt`). See
+(`demo.cast`, the full interactive dashboard under `ui/` — all 15 iterations, no backend
+needed; serve with `python3 -m http.server 8000` in that dir or host on GitHub Pages /
+any static host — `report.md`, `events.jsonl`, `TAU2_COMMIT.txt`). See
 [`examples/tau2_airline/DEMO.md`](../examples/tau2_airline/DEMO.md) for the narrated walkthrough.
 
 ## 7. Notes on honest results

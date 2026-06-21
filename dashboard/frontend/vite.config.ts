@@ -4,7 +4,14 @@ import react from '@vitejs/plugin-react'
 
 // Dev: proxy /api to the FastAPI backend. Build: emit to dist/ so the backend's
 // resolve_static_dir() (dashboard/frontend/dist) serves it in production.
+//
+// Static export build (VITE_STATIC=1): emit with a RELATIVE base ('./') so the SPA
+// can be served from any subpath / static host (python -m http.server, GitHub Pages).
+// The live build keeps the default absolute base ('/').
+const STATIC = process.env.VITE_STATIC === '1'
+
 export default defineConfig({
+  base: STATIC ? './' : '/',
   plugins: [react()],
   build: { outDir: 'dist' },
   server: {

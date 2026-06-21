@@ -112,8 +112,11 @@ benchmark** from one prompt to an honest, optimized result. It optimizes the
 airline **policy + tools together** with a `claude-opus-4-6` optimizer, using
 `gpt-oss-120b` over IBM RITS as **both** the agent and the user simulator. The
 committed run lifted val reward **0.496 → 0.702 (+0.206, ≈ +41% relative)**; see
-the headline numbers and walkthrough below, or just open the committed
-[`run_full/dashboard.html`](examples/tau2_airline/run_full/dashboard.html) offline.
+the headline numbers and walkthrough below, or just open the full interactive
+dashboard (all 15 iterations, no backend needed) committed under
+[`run_full/ui/`](examples/tau2_airline/run_full/ui/) — serve it with
+`cd examples/tau2_airline/run_full/ui && python3 -m http.server 8000` (then
+http://localhost:8000), or host it on GitHub Pages / any static host.
 
 ```bash
 # RITS creds in repo-root .env (RITS_API_KEY, RITS_API_URL); be logged into Claude Code.
@@ -546,10 +549,12 @@ violations into in-code guards (cancel/update/baggage eligibility checks) plus a
 policy grows 166 → 212 lines across the run. See the curated story in
 [`examples/tau2_airline/DEMO.md`](examples/tau2_airline/DEMO.md).
 
-**See it before you run it.** Open the committed self-contained dashboard —
-[`examples/tau2_airline/run_full/dashboard.html`](examples/tau2_airline/run_full/dashboard.html) —
-in any browser (offline; KPIs, evaluations, per-iteration git diffs, cost/intake
-panel, lineage, memory). Raw numbers:
+**See it before you run it.** Open the committed full interactive dashboard (all 15
+iterations, no backend needed) — the static UI export at
+[`examples/tau2_airline/run_full/ui/`](examples/tau2_airline/run_full/ui/) — by running
+`cd examples/tau2_airline/run_full/ui && python3 -m http.server 8000` (then visit
+http://localhost:8000), or host it on GitHub Pages / any static host (KPIs, evaluations,
+per-iteration git diffs, cost/intake panel, lineage, memory). Raw numbers:
 [`run_full/final.json`](examples/tau2_airline/run_full/final.json). Reproduce from
 zero: [`docs/REPRODUCE_tau2.md`](docs/REPRODUCE_tau2.md). Every iteration is a git
 commit.
