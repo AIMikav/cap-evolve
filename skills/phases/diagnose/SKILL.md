@@ -74,6 +74,13 @@ edits**, never patch blindly:
    supports parallel sub-agents, fan them out — one per failure cluster or per
    candidate-edit hypothesis — to analyze concurrently, then synthesize; it makes
    each costly iteration deeper and faster.
+   **Use ground-truth / eval signals when the traces provide them.** Some benchmarks
+   copy ground-truth / expected actions / a reward breakdown into the trajectories;
+   when PRESENT, use them to pinpoint exactly what went wrong — which action,
+   argument, or value was expected vs what the agent did. You will NOT always have
+   this: if you do, use it; if not, infer from the traces + feedback. CRITICAL:
+   ground truth is for UNDERSTANDING the failure class only — the resulting EDIT must
+   still be a GENERAL rule, never a copied gold value (see the no-leak rule).
 2. **Then ideate a DRASTIC, generalizing edit.** Each iteration is costly
    (optimize + full eval is long), so aim for a big root-cause improvement, not a
    tiny tweak: propose the single best targeted edit (or tight set) that addresses

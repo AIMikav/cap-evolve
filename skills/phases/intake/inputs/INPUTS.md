@@ -27,10 +27,28 @@ path, how to obtain it, and the alternatives. Never invent a NEEDED input.
     or git URL) and how to install it (e.g. `pip install -e ../<bench>`). Record the
     resolved commit so the run is reproducible.
 
-- **scorer**: how a rollout becomes a reward in [0,1] + feedback.
+- **scorer**: how a rollout becomes a reward in [0,1] + ARGUMENT-LEVEL feedback.
   - where: `adapter.py::score`
-  - how to get it: exact-match / state-check / rubric; feedback must be general
-    (never leak the gold answer)
+  - how to get it: exact-match / state-check / rubric for the reward.
+  - **feedback is the learning signal — make it ARGUMENT-LEVEL and gold-SAFE.**
+    A tool-name-only signal ("action X was wrong") is too coarse for the optimizer to
+    localize a fix — it can only pattern-match to prose rules and plateaus. For EACH
+    failing check, the feedback MUST localize the defect:
+    - name the wrong ARGUMENT key and the **AGENT'S OWN wrong value** (NOT the gold
+      value) — e.g. `"<tool>: arg <key>=<agent's value> is invalid"`;
+    - name the wrong TARGET id when a write acted on the wrong entity — e.g.
+      `"<tool>: called on <agent's target> but the task targets a different one"`;
+    - for communication / omission misses, name the value or field the agent FAILED
+      to state **when it is derivable from the agent's own state** (e.g. a computed
+      total it could have summed from its own observed amounts).
+  - **gold-SAFE (the hard constraint):** never read or print the gold/expected
+    value. Derive everything from the AGENT'S OWN messages/tool-calls/observed state
+    (and the user's own profile/db state the agent saw). Use the gold record ONLY to
+    learn WHICH check/argument failed (key names are safe; values are not). If a piece
+    is not safely derivable, fall back to the coarser tool-name message.
+  - **deterministic:** `score()` must be deterministic on a fixed rollout (the
+    `cap-evolve check` gate enforces this) — derive feedback from the rollout, do not
+    call out to an LLM or use randomness.
 
 - **metric extraction / scoring source**: WHERE the objective metric lives, so
   `score()` can be implemented AND verified against the benchmark's own number.

@@ -45,6 +45,14 @@ that fixes the biggest failure cluster. (1-line generic examples; depth in
    *Ex:* "You are a careful support agent; resolve the request in one turn."
 8. **Tighten the output contract** — make the required shape explicit and exact.
    *Ex:* "Reply with only a JSON object `{status, reason}` — no prose."
+   **If the eval scores COMMUNICATION of computed values** (totals, refunds, savings,
+   counts, balances), the contract must require the agent to STATE each computed figure
+   explicitly in its final message. The agent often performs the DB action correctly
+   but never reports the number, and the eval marks the omission as a miss. This is a
+   KNOWLEDGE / output-contract gap — prose-fixable here — and is DISTINCT from a DB
+   action (a missing write belongs in the [`tools`](../tools/SKILL.md) capability, not
+   in prose). *Ex:* "After computing a total/refund/savings, state the exact figure in
+   your final message (e.g. 'Your refund is $42.00')."
 9. **Soften over-strong language** — downgrade `CRITICAL/MUST/ALWAYS` to "Use …
    when …" when a cluster shows over-eagerness/over-triggering on current models.
    *Ex:* "CRITICAL: you MUST call the tool" → "Use the tool when you need live data."
@@ -91,6 +99,12 @@ These are *how* to phrase a prompt edit so it actually changes behavior:
   last (end-placement can lift quality on long inputs); separate
   instructions / context / examples with lightweight `<xml>` tags so the model
   doesn't conflate them.
+- **Generalize, never hardcode.** A prompt rule must state the GENERAL policy that
+  holds across the whole class of inputs, never a specific task's case or answer.
+  *Good:* "Refund to the original payment method on file." *Bad:* "If the
+  reservation is ABC123, refund $42." Baking one task's id/value/date/answer into
+  the prompt overfits, fails the held-out gate, and can mislead other tasks. Use a
+  failing task's specifics only to understand the class, then write the general rule.
 - **Ground new rules in a source; don't fabricate.** You MAY add a rule the source
   or policy requires but the prompt omits (menu item 4) — that is a high-value edit.
   What you must not do is invent a normative rule, exception, or workaround that no
@@ -110,6 +124,20 @@ and declined; that class of failure belongs in the agent's tools/code (see the
 [`tools`](../tools/SKILL.md) capability — encapsulate the action so it can't be
 skipped). Diagnose every cluster as KNOWLEDGE (fix here) vs BEHAVIORAL (fix in
 code) before reaching for a prompt edit.
+
+**If a rule is a VIOLATION the agent commits despite knowing it (not a knowledge
+gap), do NOT add prose — flag it for an in-code check in the tool body** (the
+[`tools`](../tools/SKILL.md) capability: convert the violated rule into an in-body
+guard on the EXISTING tool that owns it). Adding another sentence to a rule the
+agent already read and broke just grows the prompt without changing behavior.
+
+**Each prompt iteration should also CONSOLIDATE.** When a rule now lives in tool
+code (an in-body guard enforces it deterministically), REMOVE its now-redundant
+prose so the prompt stays sharp — the deterministic check is authoritative and the
+duplicate sentence only dilutes attention. This prevents prose pile-up: as
+behavioral rules migrate into code, the prompt should get shorter, not longer.
+(This is consolidation under the never-drop rule — the constraint still lives,
+now in code, so removing its prose drops no rule.)
 
 ## How agents use it
 The prompt is prepended to context every turn. Agents read it literally and are
