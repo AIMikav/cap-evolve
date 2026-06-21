@@ -12,6 +12,14 @@ for the description/schema edits (§1, §2) *after* asking "can this rule be cod
 the existing body instead?" A passthrough / reasoning-only tool (§7) is the
 SECONDARY, last-resort form — prose in a tool's costume.
 
+**First-class failure→fix patterns** (diagnose for these first): a wrong ARGUMENT the
+tool could validate → resolve/validate against state, return `available=[...]`
+(§3c-ter); a required eligible action abandoned via bail-out / transfer-to-human →
+encapsulate the batch as a COMPOSITE WRITE (§3c-quater, §3e); a recoverable error that
+strands the agent → an enriched RETURN that names what's wrong + the valid options +
+the next action (§3f). Always VERIFY the fix fires on the exact failing-trace
+arguments before shipping it.
+
 ## 0. Turning N prose rules into N in-body checks (the DEFAULT edit)
 
 The most common high-leverage edit is NOT adding a tool — it is editing the BODIES
@@ -171,6 +179,58 @@ delegates.
 
 Why it works: validate → normalize → enforce → delegate, all in code; the model
 hands over an id and an amount and cannot mis-route the call.
+
+## 3c-ter. Wrong ARGUMENT the tool could validate — resolve/validate against state, return `available=[...]`
+
+Trace symptom (FIRST-CLASS): the agent calls a write with an id / reference / count
+that is NOT consistent with the agent-visible state — an item id not in the record, a
+quantity exceeding what's available, a reference to a resource that doesn't exist for
+this entity. The right tool, the wrong argument. Never let the write proceed on an
+unvalidated reference: wrap it in a body that RESOLVES/VALIDATES the argument against
+the current state and, on mismatch, returns the valid options (`available=[...]`) or
+raises an actionable error.
+
+```json
+{ "kind": "compose",
+  "value": {
+    "name": "remove_item_safely",
+    "description": "Remove `item_id` from `record_id` after confirming the item is actually on the record. Validates the id against the record's current items and refuses (returning the valid options) if it is not present, so the write never corrupts state on a stale or wrong id.",
+    "parameters": { "type": "object", "properties": { "record_id": { "type": "string" }, "item_id": { "type": "string" } }, "required": ["record_id", "item_id"] },
+    "code": "def remove_item_safely(record_id, item_id):\n    items = {it['id'] for it in get_record(record_id)['items']}\n    if item_id not in items:\n        return {'error': f'item {item_id!r} not on record {record_id!r}', 'available': sorted(items), 'next': 'pass one of available'}\n    return remove_item(record_id, item_id)" } }
+```
+
+Why it works: the argument is resolved against the live state in code; a wrong/stale
+reference becomes a clean refusal that NAMES the valid options, so the model corrects
+on the next turn instead of corrupting the record. (Verify the fix: run this body on
+the exact id from the failing trace and confirm it returns `available` rather than
+calling through.)
+
+## 3c-quater. A required, eligible action abandoned via bail-out / transfer-to-human — encapsulate the batch as a COMPOSITE WRITE
+
+Trace symptom (FIRST-CLASS, behavioral): the agent calls `transfer_to_human` /
+escalates / bails out instead of performing a REQUIRED action it was eligible to do
+itself — often a batch of similar writes (cancel each eligible line, refund each
+qualifying charge). This is a behavioral STALL, not a missing capability; a "don't
+bail out" prose rule does not fix it. Encapsulate the eligible-action batch in ONE
+composite WRITE tool whose body executes the steps in code, skipping ineligible items
+with a recorded reason — then `remove` the raw primitives so the batch is the path.
+
+```json
+[
+  { "kind": "compose",
+    "value": {
+      "name": "process_eligible_items",
+      "description": "Process EVERY eligible item on `record_id` in one call: applies the action to each item that meets the precondition and SKIPS the rest with a reason, returning a per-item result. Use this instead of escalating or handing off when the items are processable — there is no separate per-item write tool.",
+      "parameters": { "type": "object", "properties": { "record_id": { "type": "string" } }, "required": ["record_id"] },
+      "code": "def process_eligible_items(record_id):\n    rec = get_record(record_id)\n    results = []\n    for it in rec['items']:\n        if not it.get('eligible'):\n            results.append({'id': it['id'], 'skipped': it.get('reason', 'ineligible')})\n            continue\n        results.append({'id': it['id'], 'result': process_item(record_id, it['id'])})\n    return {'record_id': record_id, 'processed': results}" } },
+  { "tool": "process_item", "kind": "remove" }
+]
+```
+
+Why it works: the whole eligible-action batch runs the moment the tool is called, so
+the agent can no longer hand off a task it was equipped to finish; ineligible items
+are skipped with a reason rather than blocking the batch. (Verify: run the body on the
+record from the bail-out trace and confirm it processes the eligible items.)
 
 ## 3e. Make a STALLED action un-skippable — a composite WRITE tool (then remove the primitives)
 

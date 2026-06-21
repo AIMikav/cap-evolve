@@ -44,6 +44,19 @@ Downstream, `implement-and-check` consumes `project`; `baseline` consumes
      JSON) — note that choice in `PROJECT.md`.
    - implement `score()` to extract the OBJECTIVE metric from a rollout, matching the
      benchmark's own scoring source; verify it reproduces the benchmark's number.
+   - **Make `score()`'s feedback ARGUMENT-LEVEL — it IS the learning signal.** A
+     tool-name-only signal ("action X was wrong") is too coarse for the optimizer to
+     localize a fix; it pattern-matches to prose rules and the run plateaus. For EACH
+     failing check, the feedback must point at the specific argument/value/step that
+     was wrong: name the wrong ARGUMENT key and the **agent's OWN wrong value** (not
+     the gold value), name the wrong target id, and for communication/omission misses
+     name the value or field the agent failed to state **when it is derivable from the
+     agent's own state** (e.g. an un-stated computed total). This is **gold-SAFE**:
+     derive everything from the agent's own messages/tool-calls/observed state (and the
+     user's own profile/db state the agent saw) — use the gold record ONLY to learn
+     WHICH check/argument failed (key names are safe; gold VALUES must never be read or
+     printed). When a piece is not safely derivable, fall back to the coarser
+     tool-name message. Keep `score()` deterministic (the check gate requires it).
 5. **Author the optimizer instructions for THIS benchmark — SCOPED TO THE SELECTED
    CAPABILITIES.** Customize the scaffolded `.capevolve/project/optimizer/INSTRUCTIONS.md`.
    Keep the `{{...}}` placeholders intact (`{{FOCUS_SUMMARY}}`, `{{FAILURES}}`,
@@ -80,6 +93,21 @@ Downstream, `implement-and-check` consumes `project`; `baseline` consumes
         code body to enforce its rule); then the main agent MERGES all edits into ONE
         candidate. Point at `./guidance/optimizer/<name>.md` for the agent's concrete
         trigger phrasing.
+     4. **The NON-OVERFITTING guardrail.** Demand that every prompt/tool edit encode
+        a GENERAL rule/policy/validation that generalizes across the whole class of
+        inputs — NEVER hardcode a specific task's id/value/date/name/answer. A guard
+        must fire on the general condition (e.g. "id not in the user's profile"), not
+        match a literal value (NOT `if id == "ABC123"`). A literal special-case that
+        only helps one task is forbidden — it overfits, fails the held-out gate, and
+        hurts other tasks. Per-task specifics are for understanding the failure CLASS
+        only; the fix must be general.
+     5. **EXPLOIT ground-truth/eval present in the trajectories (diagnosis only).**
+        Tell the optimizer that when `./trajectories/` include ground-truth /
+        expected actions / a reward breakdown, it should USE them during diagnosis to
+        localize the exact defect (expected vs actual action/argument/value) — and if
+        not present, infer from the traces + feedback. State plainly that ground truth
+        informs the failure class only; the resulting edit must still be GENERAL
+        (guardrail 4) and never copy a gold value.
    - **Capability-scoping (the key rule):** reference `./guidance/<cap>/SKILL.md`
      and present the editable artifacts **for the selected caps only**. If only
      `tools` is selected, do NOT include any prompt-editing guidance, do NOT

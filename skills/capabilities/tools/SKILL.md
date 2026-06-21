@@ -120,6 +120,13 @@ small and namespaced (aim **< ~20** active tools); ship correct, bug-free code
 without a capability-preserving replacement** (add → verify → swap, see the SAFE
 TOOL-REPLACEMENT PROTOCOL).
 
+**Generalize, never hardcode.** Every in-code guard must fire on the GENERAL
+condition that defines the failure class, never on a literal value from one task.
+*Good:* `if payment_id not in user_payment_methods: raise ...`. *Bad:*
+`if reservation_id == "ABC123": raise ...` — that overfits to one task, gets
+rejected by the held-out gate, and helps nothing else. Use a failing task's
+specifics only to identify the class, then write the general check.
+
 ## The highest-leverage edit: deterministic CODE (usually in an EXISTING tool body)
 
 **Start here. A deterministic guard in code beats a sentence in the prompt.** A
@@ -239,12 +246,19 @@ for a check you could have written in a few lines of code.
 Map the trace symptom to the code-bearing edit. Each row is a failure the model
 *could* "know" how to avoid yet keeps producing — so the fix is code, not prose:
 
+These four rows carry most of the recoverable gain — diagnose for them FIRST, and
+verify the fix you ship actually FIRES on the failing trace (run the new body on the
+exact arguments from that trajectory; a guard that never triggers on the failing task
+is dead code, not a fix).
+
 | Trace symptom | Fix |
 |---------------|-----|
+| **Wrong ARGUMENT the tool could validate** — a write whose id / reference / count / unit is not consistent with the agent-visible state (an id not in the record, a count exceeding what's available, the wrong unit). Right tool, bad argument; partial credit or a corrupted write. | **Normalize-then-call wrapper**: wrap the write in a body that RESOLVES / VALIDATES the argument against the current state, and on mismatch returns `available=[...]` (the valid options) or raises an actionable error naming what's wrong and what to pass instead — never let a write proceed on an unvalidated reference. Coerce units, resolve ids, check the field is on file, then delegate to the primitive. |
+| **`transfer_to_human` / bail-out abandoning a REQUIRED, eligible action** — the agent escalates or hands off when it could and should have completed the action itself; this is a behavioral STALL, not a missing capability. | **Composite WRITE tool**: encapsulate the eligible-action batch in ONE tool whose body executes the steps in code (skipping any ineligible item with a recorded reason), then `remove` the raw primitives so completing the batch is the only path. Do NOT add a "don't bail out" prose rule — the agent already chose to bail; only code removes the choice. |
+| **Recoverable error that strands the agent** — a tool raises an opaque traceback / bare code, the agent retries the same bad call or gives up. | **Enriched RETURN that aids recovery**: on a recoverable error, return what's wrong + the valid options + the recommended next action (e.g. `{"error": "id not found", "available": [...], "next": "call search_x to resolve the id"}`), so the model self-corrects on the next turn instead of repeating the failure. |
 | **Execution stalls at the action boundary** — the agent analyzes, explains, even confirms, then never calls the write tool and stops (the task is left half-done). | **Composite WRITE tool** (pattern 3): one tool whose body performs the whole analyze→confirm→act sequence, then `remove` the raw primitives so the action is un-skippable. |
 | **The same primitive called N times in a row** — looping over a list in the agent's own context, dropping or mis-threading results. | **Loop tool** (pattern 2): one tool that takes the list and loops inside a single call. |
 | **A rule stated in the prompt but repeatedly violated** — a required order ("read before write"), a precondition the API doesn't enforce. | **Validation wrapper** (pattern 1): enforce the rule in the tool body; `remove` the unguarded primitive. |
-| **Wrong arguments to a write** (partial credit) — right tool, wrong unit / missing field / unresolved id. | **Normalize-then-call tool**: a wrapper that validates and normalizes the args (coerce units, resolve ids, check the field is on file) before calling the primitive, so a malformed call becomes a clean refusal instead of a corrupted write. |
 
 The throughline: a failure the agent *knows better than* but still commits is
 behavioral, and behavioral failures are fixed by removing the choice — putting the

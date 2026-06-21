@@ -58,8 +58,23 @@ exists). Here is everything intake needs:
                 nl_assertions / env_assertions). Implement adapter.score() to read the reward +
                 reward_info that run_batch stashes from each simulation, and verify score() is
                 deterministic on a fixed rollout (the `cap-evolve check` gate enforces this).
-- feedback:     gold-AWARE but gold-SAFE — which required actions/info were missed (the learning
-                signal), derived from reward_info checks; never leak the gold answer.
+- feedback:     gold-AWARE but gold-SAFE, and ARGUMENT-LEVEL — this IS the learning signal, so a
+                tool-name-only message ("action X was wrong") is too coarse: the optimizer can only
+                pattern-match to prose rules and plateaus. Implement score()'s feedback so that for
+                EACH failing check it localizes the defect at the argument level:
+                  * for each mismatched write/action, name the differing ARGUMENT key + the AGENT'S
+                    OWN wrong value (e.g. "book_reservation: payment_id='credit_card_9' is not on the
+                    user's profile; available=[credit_card_4421, gift_card_8]"; "update_reservation_flights:
+                    called on reservation res_A but the task targets a different one");
+                  * for communicate misses, name the un-stated value when derivable from the agent's
+                    own state (e.g. "did not state the computed total cost ($150 from your own observed
+                    amounts)").
+                Gold-SAFE: NEVER read or print the gold/expected value — derive everything from the
+                agent's OWN messages/tool-calls and the user's OWN profile/db state (parsed from the
+                agent's get_user_details/get_reservation_details tool results in the trace). Use
+                reward_info only to know WHICH action/argument failed (the gold action's arg KEYS are
+                safe; its VALUES are not). Fall back to the tool-name message when a piece isn't safely
+                derivable. score() must stay deterministic on a fixed rollout.
 - objective:    maximize mean reward on the VAL split
 
 # 4b. TRAJECTORIES  (the FULL traces the optimizer reads) — PATH IS AN INPUT
@@ -98,7 +113,17 @@ exists). Here is everything intake needs:
                 fan-out (one read-only subagent per trajectory-group → tight issue list; main dedups into
                 clusters), Phase 2 implement fan-out (one edit-subagent per ISSUE, each in its own
                 worktree, each PREFERRING to edit the EXISTING tool's code body to enforce its rule), then
-                merge all edits into ONE candidate. Tailor only the "READ THESE" pointers
+                merge all edits into ONE candidate. The authored INSTRUCTIONS MUST also encode: (iv) the
+                NON-OVERFITTING guardrail — every prompt/tool edit must be a GENERAL rule/policy/validation
+                that generalizes across the class of inputs; NEVER hardcode a task-specific
+                id/value/date/name/answer (a guard fires on the general condition, e.g. "payment_id not on
+                the user's profile", NOT `if reservation_id == "ABC123"`); a literal special-case overfits,
+                fails the held-out gate, and hurts other tasks; per-task specifics are for understanding the
+                failure CLASS only; and (v) EXPLOIT GROUND TRUTH for diagnosis — when ./trajectories/ include
+                ground-truth/expected actions/a reward breakdown (tau2's native trajectories include
+                reward_info with the per-check breakdown), USE it to localize the exact defect (expected vs
+                actual action/argument/value), but keep the resulting edit GENERAL (guardrail iv) and never
+                copy a gold value into the prompt or tool code. Tailor only the "READ THESE" pointers
                 (./trajectories/, ./guidance/<cap>/SKILL.md for EACH selected capability,
                 ./guidance/diagnose/SKILL.md, ./guidance/optimizer/claude-code.md, ./guidance/sources/
                 [the data model], ./STATE.md, ./MEMORY.md, ../tau2-bench).
