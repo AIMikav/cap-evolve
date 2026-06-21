@@ -27,7 +27,7 @@ number. It optimizes what your agent *reads*, not its weights.
 [Toy example](#toy-example-zero-api) · [tau2-bench example](#tau2-bench-example-real) ·
 [Optimize your own](#optimize-your-own) · [How it works](#how-it-works) ·
 [Comparison](#how-it-compares) · [Skill library](#skill-library) ·
-[Results](#results) · [License](#license)
+[Results](#results) · [How-to guides](#how-to-guides) · [License](#license)
 
 ## Why cap-evolve
 
@@ -531,6 +531,16 @@ markdown.
 > Note: this example pins train = val = test = all 50 tasks (no-holdout), so the
 > headline test number is reported as a **fit metric** (the engine logs a
 > `splits_warning`); for a held-out result, pin a 30/10/10 split via `split_ids.json`.
+
+## How-to guides
+
+Step-by-step recipes for specific harness + benchmark combinations:
+
+| Guide | What it covers |
+|---|---|
+| [cap-evolve with Exgentic / tau2-bench](docs/how-to/cap-evolve-with-exgentic-tau2.md) | Optimize airline `policy.md` + `tools.py` via the exgentic harness and a LiteLLM proxy |
+
+More guides will be added here over time.
 
 ## Contributing
 
