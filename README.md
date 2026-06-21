@@ -220,15 +220,18 @@ exists). Here is everything intake needs:
                 template (keep its {{...}} placeholders intact — the harness fills them per
                 iteration), tailoring the guidance + the "READ THESE" pointers (./trajectories/,
                 ./guidance/<cap>/, ./guidance/diagnose/SKILL.md, ./guidance/optimizer/claude-code.md,
-                ./STATE.md, ./MEMORY.md, ../tau2-bench) to this benchmark. The authored INSTRUCTIONS
-                must follow the new flow: READ ./MEMORY.md FIRST and never re-propose a rejected
-                approach; address ALL failure clusters each iteration (fan out one subagent per
-                cluster, each in its own worktree, then merge all edits into ONE candidate); and end
-                STATE.md with the rich "## Handover for next iteration" section (approaches tried,
-                lessons, recommendation, what NOT to retry). For the tools capability, the primary
-                edit is CODE-BEARING tools — a validation tool that enforces a rule in code then
-                calls the existing tool and removes the raw one; a workflow tool that collapses a
-                recurring sequence; and a composite WRITE tool that performs a stalled multi-step
+                ./LEDGER.md, ./JOURNAL.md, ./RUNMAP.md + ./prior_iterations/, ./PROCESS.md,
+                ../tau2-bench) to this benchmark. The authored INSTRUCTIONS must follow the flow: READ
+                the cross-iteration files FIRST (LEDGER facts, the whole JOURNAL handover, RUNMAP +
+                prior_iterations diffs) and never re-propose a rejected approach; address ALL failure
+                clusters each iteration (fan out one subagent per cluster, each in its own worktree,
+                then merge all edits into ONE candidate), shipping MULTIPLE edit classes and a NEW
+                code-bearing tool for any capability-gap/stall cluster; fill ./PROCESS.md (required
+                explainability) and APPEND to ./JOURNAL.md each iteration. For the tools capability,
+                code-bearing tools are the primary edit — a validation tool that enforces a rule in
+                code then calls the existing tool and removes the raw one; a workflow tool that
+                collapses a recurring sequence; and a composite WRITE tool that performs a stalled
+                multi-step
                 action in code (then removes the raw write primitives) so the agent cannot analyze,
                 confirm, and then fail to execute — not docstring prose.
 
@@ -439,9 +442,12 @@ your chosen coding-agent CLI in it:
 - **Per-task IMPACT of prior candidates** — which task ids each prior edit BROKE
   (were passing) and FIXED, plus the **currently-passing set to protect** — causal
   feedback so a known regression is never re-introduced.
-- **A cross-iteration handover** — `STATE.md` (scratchpad, carried across accepted
-  iterations) + `MEMORY.md` (accepted history + rejected-as-implemented approaches,
-  never to be re-proposed). The optimizer reads MEMORY first.
+- **Cross-iteration files with clean ownership** — `LEDGER.md` (framework-owned
+  FACTS: every iteration's outcome + the exact tasks it broke/fixed), `JOURNAL.md`
+  (optimizer-owned, append-only HANDOVER across the whole run: tried/worked/regressed/
+  refuted/focus-next), `PROCESS.md` (optimizer-owned EXPLAINABILITY, snapshotted per
+  candidate), and `RUNMAP.md` + `prior_iterations/` (a manifest plus every prior
+  iteration's PROCESS.md and capability diff, copied in for real prior-work access).
 
 Because it sees all failure clusters, the protect-set, and the prior causal impact
 at once, the optimizer produces **one bold, multi-part candidate per iteration that

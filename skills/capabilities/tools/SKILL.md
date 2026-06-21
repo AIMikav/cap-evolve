@@ -35,16 +35,26 @@ the same candidate. (1-line generic examples; worked bodies in
 [`references/examples.md`](references/examples.md), depth below and in
 [`references/concepts.md`](references/concepts.md).)
 
-**Comprehensive multi-fix pass.** Diagnose ALL clusters, map each to its edit
-class, and apply them together. The DEFAULT edit is **editing the BODIES of
-EXISTING tools** — most violated rules govern a tool that already exists, and the
-fix is an in-body guard there, so expect to touch SEVERAL existing tool bodies per
-iteration (one per violated rule). Adding a brand-new tool is the exception, not
-the reflex — reach for it only when no existing tool owns the rule. Optimizers that
-ship one wrapper and stop, or that reflexively add one new tool and reword
-docstrings while leaving the rules as prose, leave most of the gain on the table —
-a strong iteration converts MANY violated textual rules into in-body checks across
-existing tools, plus docs + returns AND the prompt at once.
+**Read this skill in full before editing, and apply MULTIPLE edit classes every
+iteration.** The menu below has eight classes. A strong iteration ships several of
+them together — e.g. in-body guards on several existing tools, a NEW composite tool
+for a stall cluster, enriched returns, AND a prompt fix — in ONE candidate. An
+iteration that ships a single class (only docstrings, only one guard) is under-used.
+
+**Two equally-first-class moves — pick by the failure type, not by a default:**
+- **Edit the BODY of an EXISTING tool** when the agent VIOLATES a rule a tool
+  already owns (wrong cabin, bad payment id, cancel-when-not-cancellable). Convert
+  the prose rule into an in-body guard. Expect to touch SEVERAL existing bodies.
+- **ADD a NEW code-bearing tool** when the agent has a CAPABILITY GAP or STALLS at
+  an action — most importantly, a **composite atomic-WRITE tool** for a multi-step
+  action the agent narrates/confirms then fails to execute. *Adding a new tool is
+  ENCOURAGED, not an exception* — for a BEHAVIORAL stall a new composite is usually
+  the correct fix EVEN when a write primitive already exists (the primitive is what
+  the agent skips; the composite makes the action un-skippable). The failure mode is
+  "ship one change and stop / leave a stall as prose," NOT "add a new tool."
+
+Optimizers that reword docstrings while leaving rules as prose, OR that never build
+the composite tool a stall cluster needs, leave most of the gain on the table.
 
 1. **Edit the CODE of EXISTING tools to enforce rules deterministically (the most
    common high-leverage edit)** — most violated textual rules govern a tool that
@@ -54,11 +64,12 @@ existing tools, plus docs + returns AND the prompt at once.
    ValueError("not cancellable; reason=...; do X instead")` to the existing
    `cancel_record` body. Expect to touch the BODIES of SEVERAL existing tools per
    iteration — one per violated rule.
-2. **Add a new tool** — give the agent a capability it genuinely LACKS (no existing
-   tool covers it), built as a thoughtful workflow tool, not a thin wrapper around
-   one endpoint. *Ex:* add `search_logs` that returns only the relevant lines
-   instead of a raw dump. (Reach for this only after asking "does an existing tool's
-   body already own this rule?" — usually yes, and item 1 is the fix.)
+2. **Add a new tool (first-class — reach for it freely)** — give the agent a
+   capability it lacks or a safe path it keeps skipping, built as a thoughtful
+   workflow/validation tool, not a thin wrapper. *Ex:* `search_logs` returns only
+   the relevant lines instead of a raw dump; or a `find_duplicate_records` the agent
+   has no way to compute today. For a STALL or capability-gap cluster this is the
+   right move even when a primitive exists — see item 7 (composite atomic-WRITE).
 3. **Replace / wrap a tool** — superset an existing tool and route the old behavior
    through it. *Ex:* wrap `find_record`+`charge_payment` behind one
    `charge_record(record_id)` that resolves then charges.
@@ -72,10 +83,14 @@ existing tools, plus docs + returns AND the prompt at once.
    ['card_1'] — pass one of these" instead of a raw traceback.
 6. **Add a loop tool** — replace N repeated single-item calls with one list call.
    *Ex:* `get_records(ids: [...])` replaces N× `get_record(id)`.
-7. **Add a workflow tool** — for a *recurring*, failure-prone multi-step sequence,
-   a deterministic tool that calls several tools in order. *Ex:*
-   `apply_change_plan(record_id, steps)` runs validate → apply-each → return final
-   state as one reliable step.
+7. **Add a composite atomic-WRITE / workflow tool (first-class — the fix for STALLS
+   and multi-step writes)** — for a recurring, failure-prone multi-step action
+   (especially one the agent narrates/confirms then fails to execute, e.g. cancel +
+   rebook), a deterministic tool whose body performs ALL the steps in order via the
+   existing primitives, then `remove` the raw primitives so the action is
+   un-skippable. *Ex:* `apply_change_plan(record_id, steps)` validates → applies each
+   → returns final state as one reliable call. Reach for this whenever a cluster
+   STALLS at the action boundary — do not settle for a prose "be sure to act" rule.
 8. **Remove-with-replacement** — remove a redundant/overlapping tool *only* after a
    replacement preserving its capability exists. *Ex:* drop `query` once
    `get_record` + `search_records` cover it.
@@ -138,17 +153,18 @@ breaking, a multi-step action it keeps fumbling, or — most importantly — an 
 it *stalls on and never executes*, **do not just reword a description — put the
 behavior in code.**
 
-**The most common high-leverage edit: enforce the rule in the body of an EXISTING
-tool.** Most violated textual rules govern a tool that already exists — e.g. "only
-cancel a cancellable record" governs the existing `cancel_record`, "amounts in
-whole cents" governs the existing `book`/`charge`. The fix is an in-body guard in
-that tool, and you usually do **NOT** need a new tool. Expect to touch the BODIES
-of SEVERAL existing tools per iteration — one per violated rule. (See the
-before/after diffs above and the "Turning N prose rules into N in-body checks"
-section in [`references/examples.md`](references/examples.md).) Write a NEW
-code-bearing tool only when no existing tool owns the rule, or when you need to
-collapse a multi-call chain / encapsulate a stalled multi-step WRITE (the three
-patterns below). Either way, this is the first edit to reach for, not the last.
+**Two code-bearing edits, chosen by failure type — both first-class.** For a rule
+VIOLATION, enforce the rule in the body of the EXISTING tool that owns it — "only
+cancel a cancellable record" governs `cancel_record`, "amounts in whole cents"
+governs `book`/`charge`; add an in-body guard there and expect to touch SEVERAL
+existing bodies per iteration. For a CAPABILITY GAP or an action STALL, write a NEW
+code-bearing tool — a loop tool to collapse a multi-call chain, or (the big one) a
+**composite atomic-WRITE tool** to encapsulate a multi-step write the agent keeps
+skipping. Do not treat the new tool as a last resort: when a cluster stalls at the
+action boundary, the composite is the *correct* fix even though a write primitive
+already exists, because the primitive is exactly what the agent declines to call.
+(See the before/after diffs above, the three patterns below, and the worked bodies
+in [`references/examples.md`](references/examples.md).)
 
 **Prose cannot fix a BEHAVIORAL failure.** There is a sharp distinction the
 optimizer must make. If the agent *does not know* something (a format, a rule, a

@@ -35,8 +35,9 @@
 #   instructions_file : OPTIONAL. The agent's always-on project instructions filename
 #                      (auto-read every run). The harness writes a short pointer block into
 #                      <workdir>/<instructions_file> directing the agent to ./INSTRUCTIONS.md,
-#                      the native skills under <skills_dir>/ and ./guidance/, and
-#                      ./MEMORY.md/./STATE.md. Per-agent: claude-code CLAUDE.md; codex
+#                      the native skills under <skills_dir>/ and ./guidance/, and the
+#                      cross-iteration files ./LEDGER.md/./JOURNAL.md/./PROCESS.md/./RUNMAP.md.
+#                      Per-agent: claude-code CLAUDE.md; codex
 #                      AGENTS.md; gemini-cli GEMINI.md; opencode AGENTS.md; ibm-bob AGENTS.md.
 #                      Omit for openclaw/generic/mock.
 #

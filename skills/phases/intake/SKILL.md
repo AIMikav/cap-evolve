@@ -115,18 +115,22 @@ Downstream, `implement-and-check` consumes `project`; `baseline` consumes
      as editable. If only `system-prompt` is selected, do not surface the tools file
      as editable. Each capability's "What you can change here" lives in its
      `./guidance/<cap>/SKILL.md` — point the optimizer there rather than restating it.
-   - **Always include (capability-agnostic):** READ `./MEMORY.md` FIRST and never
-     re-propose an approach recorded as rejected *as implemented* (a better-designed
-     version may still work — it is not a permanent ban); READ and USE the diagnose
-     skill `./guidance/diagnose/SKILL.md`, the optimizer features reference
-     `./guidance/optimizer/<name>.md`, this step's `./trajectories/`, `./STATE.md`,
-     and any `./guidance/sources/` data-model files; understand the prior run-dir
-     layout (`<run_root>/candidates/<id>/`, `/work/<id>/`,
-     `/rollouts/<split>/<task>__<cand>__t<k>.json`, `/events.jsonl`,
-     `/rejected.jsonl`, per-iteration git diffs); write the rich
-     `## Handover for next iteration` STATE.md section (Approaches tried — 1 line
-     each, Lessons learned, Recommendation, and What-regressed-as-implemented — NOT
-     a permanent ban-list).
+   - **Always include (capability-agnostic):** READ the four cross-iteration files in
+     the working dir FIRST — `./LEDGER.md` (framework facts: each iteration's outcome +
+     tasks broken/fixed), the whole `./JOURNAL.md` (the optimizer's append-only
+     handover across the run), and `./RUNMAP.md` + `./prior_iterations/<id>/` (every
+     prior iteration's PROCESS.md + capability diff) — and never re-propose an approach
+     the journal/ledger shows was rejected *as implemented* (a better-designed version
+     may still work — not a permanent ban); READ and USE the diagnose skill
+     `./guidance/diagnose/SKILL.md` (incl. its KNOWLEDGE / BEHAVIORAL / CAPABILITY-GAP
+     tags), the optimizer features reference `./guidance/optimizer/<name>.md`, this
+     step's `./trajectories/`, and any `./guidance/sources/` data-model files. Each
+     iteration the optimizer MUST: fill `./PROCESS.md` (the required explainability
+     template — ranked issues + tags, every edit + class, verify-the-fix,
+     subagents/features used, what to preserve, what was skipped) and APPEND its entry
+     to `./JOURNAL.md` below the marker (what was tried / worked / regressed / refuted /
+     plateau-signal / focus-next). Ship MULTIPLE edit classes and ADD a new
+     code-bearing tool whenever a CAPABILITY-GAP/stall cluster is present.
 6. **Set the spec keys** in `capevolve.yaml`:
    - `runner_repo_path` — the benchmark/runner source, surfaced read-only to the
      optimizer.
