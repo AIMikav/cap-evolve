@@ -53,14 +53,27 @@ def _valid_ref(ref: str) -> bool:
             and all(c in _RANGE_OK for c in ref))
 
 
-def diff(run_path: Path, frm: str, to: str) -> dict:
-    """Unified diff ``frm..to`` parsed into per-file add/remove rows."""
+def diff(run_path: Path, frm: str, to: str, exclude: list[str] | None = None) -> dict:
+    """Unified diff ``frm..to`` parsed into per-file add/remove rows.
+
+    ``exclude`` is an optional list of top-level path globs to drop from the diff
+    (passed as ``:(exclude)<glob>`` pathspecs). The live backend never sets it; the
+    static exporter uses it to skip huge regenerated artifacts (trajectory results,
+    the embedded dashboard.html, append-only logs) so a diff stays small and readable.
+    """
     root = Path(run_path)
     if not _has_git(root):
         return {"from": frm, "to": to, "files": [], "available": False}
     if not (_valid_ref(frm) and _valid_ref(to)):
         return {"from": frm, "to": to, "files": [], "error": "bad ref"}
-    raw = _git(root, "diff", "--unified=3", f"{frm}", f"{to}")
+    pathspec: list[str] = []
+    if exclude:
+        # Only allow benign glob chars so a pathspec can't be read as a git option.
+        safe = [g for g in exclude if g and not g.startswith("-")
+                and all(c in (_RANGE_OK | {"*", "?", "[", "]"}) for c in g)]
+        if safe:
+            pathspec = ["--", ".", *[f":(exclude){g}" for g in safe]]
+    raw = _git(root, "diff", "--unified=3", f"{frm}", f"{to}", *pathspec)
     files: list[dict] = []
     cur: dict | None = None
     for line in raw.splitlines():

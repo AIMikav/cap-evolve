@@ -1,4 +1,12 @@
-/** Typed wrappers over the cap-evolve dashboard backend (/api/*). */
+/** Typed wrappers over the cap-evolve dashboard backend (/api/*).
+ *
+ * Two modes:
+ *  - LIVE (default): fetch from the FastAPI backend at /api/*.
+ *  - STATIC: when built with VITE_STATIC=1 or when `window.__CAPEVOLVE_STATIC__`
+ *    is truthy at runtime, every request is served from pre-generated JSON files
+ *    under `./data/` (a deterministic slug of the path+query). No backend, no SSE.
+ *    Used by the self-contained static export (examples/.../ui/).
+ */
 import type {
   CandidateDiff,
   CandidateFile,
@@ -14,10 +22,36 @@ import type {
   TreeResult,
 } from './types'
 
+/** True when the SPA must serve everything from static ./data/*.json (no backend). */
+export const STATIC_MODE: boolean =
+  (typeof import.meta !== 'undefined' &&
+    (import.meta as { env?: Record<string, unknown> }).env?.VITE_STATIC === '1') ||
+  (typeof window !== 'undefined' &&
+    Boolean((window as unknown as { __CAPEVOLVE_STATIC__?: unknown }).__CAPEVOLVE_STATIC__))
+
+/** Slugify an /api/* path+query into a flat, deterministic filename (no extension).
+ *
+ * Must match the Python exporter's slug() exactly: lowercase, every run of
+ * non-alphanumeric chars collapsed to a single '_', leading/trailing '_' trimmed.
+ * The leading `/api/` prefix is dropped first so `/api/runs` -> `runs`.
+ */
+export function staticSlug(url: string): string {
+  const path = url.replace(/^\/api\/?/, '')
+  const slug = path
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  return slug || 'index'
+}
+
+/** Base for the static data dir. Relative so it works from any subpath/host. */
+const DATA_BASE = 'data'
+
 async function getJSON<T>(url: string, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(url, { signal })
+  const target = STATIC_MODE ? `${DATA_BASE}/${staticSlug(url)}.json` : url
+  const res = await fetch(target, { signal })
   if (!res.ok) {
-    throw new Error(`${res.status} ${res.statusText} for ${url}`)
+    throw new Error(`${res.status} ${res.statusText} for ${target}`)
   }
   return (await res.json()) as T
 }

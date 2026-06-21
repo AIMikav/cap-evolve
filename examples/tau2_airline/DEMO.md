@@ -22,21 +22,25 @@ Everything the demo shows is checked in under
 
 | Artifact | What it is |
 |---|---|
-| [`run_full/dashboard.html`](run_full/dashboard.html) | **Self-contained** dashboard — open in any browser, **offline**, no CDN. KPIs, evaluations, per-iteration git diffs, cost/intake panel, lineage, memory. |
+| [`run_full/ui/`](run_full/ui/) | The **full interactive dashboard** (all 15 iterations, no backend needed) — a static React UI export. Serve with `python3 -m http.server 8000` in that dir, or host on GitHub Pages / any static host. KPIs, evaluations, per-iteration git diffs, cost/intake panel, lineage, memory. |
 | [`run_full/final.json`](run_full/final.json) | The sealed-test result + per-task rewards. |
 | [`run_full/demo.cast`](run_full/demo.cast) | asciinema recording of the from-scratch run. |
 | [`run_full/TAU2_COMMIT.txt`](run_full/TAU2_COMMIT.txt) | The resolved tau2-bench commit (`5ebebbe…`) for reproducibility. |
 
 ```bash
-open examples/tau2_airline/run_full/dashboard.html   # the static, offline dashboard
+cd examples/tau2_airline/run_full/ui && python3 -m http.server 8000
+# then open http://localhost:8000 — the full interactive dashboard (all 15 iterations,
+# no backend needed). Also hostable on GitHub Pages / any static host.
 ```
 
 ---
 
 ## Scene 1 — The dashboard (open with the result already in)
 
-Open `run_full/dashboard.html` and walk its pages. This is the "what did we get"
-view; it loads instantly because the run is embedded in the file.
+Serve `run_full/ui/` (`python3 -m http.server 8000` in that dir, then open
+http://localhost:8000 — or host it on GitHub Pages / any static host) and walk its
+pages. This is the full interactive dashboard (all 15 iterations, no backend needed) —
+the "what did we get" view.
 
 1. **Overview / KPIs** — the headline stair: **baseline 0.496 → best 0.702**, the
    accepted-candidate lineage, and the sealed-test KPI. Point out that the curve

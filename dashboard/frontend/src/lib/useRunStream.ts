@@ -6,7 +6,7 @@
  * and exported for unit testing.
  */
 import { useEffect, useReducer, useRef } from 'react'
-import { api } from './api'
+import { api, STATIC_MODE } from './api'
 
 export type StreamStatus = 'connecting' | 'live' | 'done' | 'idle' | 'error'
 
@@ -63,6 +63,11 @@ export function useRunStream(id: string | undefined, onActivity?: () => void): S
   activityRef.current = onActivity
 
   useEffect(() => {
+    // Static export has no backend / SSE: the run is finished, so report 'done'.
+    if (STATIC_MODE) {
+      dispatch({ type: 'done' })
+      return
+    }
     if (!id || typeof EventSource === 'undefined') return
     const es = new EventSource(api.streamURL(id))
 
