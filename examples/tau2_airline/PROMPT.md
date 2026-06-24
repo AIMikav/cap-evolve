@@ -126,7 +126,18 @@ exists). Here is everything intake needs:
                 copy a gold value into the prompt or tool code. Tailor only the "READ THESE" pointers
                 (./trajectories/, ./guidance/<cap>/SKILL.md for EACH selected capability,
                 ./guidance/diagnose/SKILL.md, ./guidance/optimizer/claude-code.md, ./guidance/sources/
-                [the data model], ./STATE.md, ./MEMORY.md, ../tau2-bench).
+                [the data model], ./LEDGER.md, ./JOURNAL.md, ./RUNMAP.md + ./prior_iterations/,
+                ./PROCESS.md, ../tau2-bench).
+- (vi) the CROSS-ITERATION FILE CONTRACT + NEW-TOOLS-FIRST-CLASS mandate — the authored
+                INSTRUCTIONS must tell the optimizer to READ all four cross-iteration files first
+                (LEDGER facts, the whole JOURNAL handover, RUNMAP + prior_iterations diffs/PROCESS),
+                each iteration FILL ./PROCESS.md (required explainability: ranked issues with
+                KNOWLEDGE/BEHAVIORAL/CAPABILITY-GAP tags, every edit + class, verify-the-fix,
+                subagents/features used, what to preserve, what was skipped) and APPEND its entry to
+                ./JOURNAL.md (tried/worked/regressed/refuted/plateau-signal/focus-next); and it must
+                require MULTIPLE edit classes per iteration and ADD at least one NEW code-bearing tool
+                (composite atomic-WRITE / loop / validation) whenever a CAPABILITY-GAP or action-STALL
+                cluster is present — adding new tools is ENCOURAGED, not an exception.
 - scope to the SELECTED capabilities: BOTH system-prompt and tools are selected here, so the
                 instructions reference BOTH skills and the optimizer may edit EITHER. (Generic rule: if
                 only ONE capability were selected, the instructions, the guidance, and the editable
@@ -144,13 +155,15 @@ exists). Here is everything intake needs:
       confirm, then fail to execute. Improve tool docs AND RETURN VALUES (actionable errors + next
       steps) — the docstring and return are what the agent sees. Never bare-remove a tool — add a
       replacement that calls it, verify, then swap registration.
-- process flow: READ ./MEMORY.md + ./STATE.md FIRST (don't re-submit a rejected edit verbatim — a
-                redesigned version may still work; don't abandon a high-value cluster); analyze the
-                current best step's ./trajectories/; use the per-task IMPACT of prior candidates + the
-                currently-passing tasks the harness lists to steer AWAY from regressions (don't
-                re-introduce a change that broke a task) WITHOUT freezing; make a bold, multi-part edit
-                across the selected capabilities; end STATE.md with the rich "## Handover for next
-                iteration" section (approaches tried, lessons, recommendation, what regressed as-tried).
+- process flow: READ ./LEDGER.md + the whole ./JOURNAL.md + ./RUNMAP.md (and the
+                ./prior_iterations/ entries for clusters you'll touch) FIRST (don't re-submit a
+                rejected edit verbatim — a redesigned version may still work; don't abandon a
+                high-value cluster); analyze the current best step's ./trajectories/; use LEDGER's
+                per-task broke/fixed columns + the currently-passing tasks the harness lists to steer
+                AWAY from regressions (don't re-introduce a change that broke a task) WITHOUT freezing;
+                make a bold, multi-part edit across the selected capabilities (multiple edit classes,
+                incl. a NEW tool for any capability-gap/stall cluster); fill ./PROCESS.md and APPEND
+                your entry to ./JOURNAL.md.
 
 # 6. BUDGET / GATE
 - algorithm:        hill-climb  (--focus all)

@@ -73,7 +73,7 @@ def test_claude_code_places_native_skills_and_instructions_pointer(tmp_path):
     text = claude_md.read_text(encoding="utf-8")
     assert "INSTRUCTIONS.md" in text
     assert ".claude/skills" in text
-    assert "MEMORY.md" in text and "STATE.md" in text
+    assert "LEDGER.md" in text and "JOURNAL.md" in text and "PROCESS.md" in text
 
     # the ./guidance/ channel still works in parallel
     assert (workdir / "guidance" / "system-prompt" / "SKILL.md").exists()

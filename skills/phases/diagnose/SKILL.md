@@ -39,11 +39,22 @@ rollouts.
   report or confirm the required information). These are real lost score and are
   routinely missed when only total failures are clustered. Each cluster is
   **ranked by cost** — how many tasks (and how much aggregate score) it accounts
-  for — so the biggest lever is addressed first. And each cluster is tagged
-  KNOWLEDGE (the agent doesn't know a format/rule/criterion → fix in the prompt)
-  or BEHAVIORAL/execution (the agent knows but skips/fumbles the action, e.g.
-  stalls before a write → fix in code/tools), so the optimizer knows *where* the
-  fix belongs, not just what it is.
+  for — so the biggest lever is addressed first. Cost-rank, but DON'T let a small
+  cluster that needs a STRUCTURAL fix (a new composite tool) get buried under
+  task-count: a 2-task stall cluster cracked by one new tool can outweigh a
+  many-task cluster of cosmetic misses. Each cluster is tagged with ONE of three,
+  so the optimizer knows *where* the fix belongs:
+  - **KNOWLEDGE** — the agent doesn't know a format/rule/criterion → fix in the prompt.
+  - **BEHAVIORAL** — the agent KNOWS the rule but violates it on a tool that exists
+    → fix in that EXISTING tool's body (an in-code guard).
+  - **CAPABILITY-GAP** — the agent has NO reliable way to do the thing, or it
+    narrates/confirms a multi-step action then STALLS and never executes it → fix with
+    the strongest STRUCTURAL lever the SELECTED capability offers (per its
+    `./guidance/<cap>/SKILL.md`): for a tools capability, a NEW code-bearing tool (a
+    composite atomic-WRITE / loop / validation tool); for a prompt/skill capability, an
+    explicit step-by-step procedure or worked example that makes the step unavoidable.
+    This is its own tag precisely so a stall/gap cluster is NOT mis-filed as BEHAVIORAL
+    and "fixed" with a weak nudge that never works.
 - **kept_good:** tasks already passing — the set the gate's no-regression check
   must protect, so a fix for one cluster does not silently break a passing task.
 
@@ -60,11 +71,20 @@ edits**, never patch blindly:
    **communication / omission** failures (the action was done but the required
    info was never reported/confirmed) — these lose real score and are easy to
    overlook. **Rank the clusters by how much they cost** (tasks affected ×
-   score lost), biggest first, with evidence. For each cluster, label it
-   **KNOWLEDGE** (the agent lacks a format/rule/criterion → fix in the prompt) or
-   **BEHAVIORAL/execution** (the agent knows but skips or fumbles the action — the
-   classic stall before a write, an un-issued call → fix in code/tools): more
-   prose will not fix a behavioral cluster the model already "knew" and skipped.
+   score lost), biggest first, with evidence. For each cluster, tag it **KNOWLEDGE**
+   (lacks a format/rule/criterion → prompt), **BEHAVIORAL** (knows the rule but
+   violates it on an existing tool → in-code guard in that tool's body), or
+   **CAPABILITY-GAP** (no reliable way to do it, or stalls at the action boundary
+   and never executes → the strongest STRUCTURAL lever the SELECTED capability offers
+   per its guidance: a NEW composite/loop/validation tool for a tools capability, or an
+   explicit procedure/worked example for a prompt/skill capability): more prose alone
+   will not fix a behavioral OR capability-gap cluster — the first needs the rule in
+   code/structure, the second a new mechanism that makes the action un-skippable.
+   Also surface a **NEAR-MISS** cluster: tasks scoring high-partial (≈0.7–0.9) that
+   need only one small correct change to flip to a pass — these are the cheapest
+   marginal gain per edit and are easy to miss when you focus on zero-score tasks.
+   For a multi-cause task, note its **secondary** cause too (a residual second-pass),
+   so one candidate can fix both the primary and the residual cause in the same edit.
    Then name (b) the GOOD behaviors that occur only *sometimes* (tasks whose mean
    reward is between 0 and 1 pass on some trials and fail on others); identify what
    the good runs do so it can be made CONSISTENT. (Always-failing tasks, mean ≈ 0,

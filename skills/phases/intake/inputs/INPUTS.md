@@ -142,12 +142,15 @@ path, how to obtain it, and the alternatives. Never invent a NEEDED input.
   versa). The authored instructions must also direct the optimizer to: READ and USE
   the selected capability skills (`./guidance/<cap>/SKILL.md`), the diagnose skill
   (`./guidance/diagnose/SKILL.md`), its own features reference
-  (`./guidance/optimizer/<name>.md`), and any `./guidance/sources/` files; READ
-  `./MEMORY.md` FIRST and never re-propose an approach recorded as
-  rejected-as-implemented (not a permanent ban); understand the prior-iteration
-  run-dir layout; write the rich `## Handover for next iteration` STATE.md section;
-  and address ALL failure clusters each iteration (parallel subagents → merge into
-  one candidate where supported). See intake SKILL.md step 5.
+  (`./guidance/optimizer/<name>.md`), and any `./guidance/sources/` files; READ the
+  cross-iteration files FIRST — `./LEDGER.md` (facts), the whole `./JOURNAL.md`
+  (append-only handover), and `./RUNMAP.md` + `./prior_iterations/` (every prior
+  iteration's PROCESS.md + diff) — and never re-propose a rejected-as-implemented
+  approach (not a permanent ban); each iteration fill `./PROCESS.md` (required
+  explainability) and APPEND to `./JOURNAL.md`; ship MULTIPLE edit classes and ADD a
+  new code-bearing tool whenever a CAPABILITY-GAP/stall cluster is present; and
+  address ALL failure clusters each iteration (parallel subagents → merge into one
+  candidate where supported). See intake SKILL.md step 5.
 
 - **gate**: `gate_mode` (significant|strict|threshold|simplicity_tiebreak),
   `gate_k_se` (default 1.0). Add `--no-regression` to forbid breaking passing tasks.

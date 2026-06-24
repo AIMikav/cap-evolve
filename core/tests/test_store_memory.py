@@ -61,7 +61,14 @@ def test_git_store_and_memory(tmp_path):
     assert run_dir.history_path.exists()
     hist = run_dir.history_path.read_text()
     assert '"candidate_id"' in hist and run_dir.best_id in hist
-    # the optimizer saw MEMORY.md + STATE.md in a candidate workdir
+    # the optimizer's per-candidate explainability (PROCESS.md) is snapshotted; the
+    # framework-owned LEDGER/RUNMAP and the run-level append-only JOURNAL are injected
+    # read-context (kept out of the candidate snapshot) but live in the work dir.
     cand = run_dir.candidate_dir(run_dir.best_id)
-    assert (cand / "MEMORY.md").exists()
-    assert (cand / "STATE.md").exists()
+    assert (cand / "PROCESS.md").exists()
+    work = run_dir.root / "work" / run_dir.best_id
+    assert (work / "LEDGER.md").exists()
+    assert (work / "JOURNAL.md").exists()
+    assert (work / "RUNMAP.md").exists()
+    # the run-level journal accumulates across iterations
+    assert (run_dir.root / "JOURNAL.md").exists()

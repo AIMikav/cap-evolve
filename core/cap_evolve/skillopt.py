@@ -398,7 +398,8 @@ def _changed_components(parent_dir: Path, workdir: Path) -> int:
                 continue
             rel = f.relative_to(workdir)
             # ignore harness-injected scaffolding files
-            if rel.name in ("INSTRUCTIONS.md", "MEMORY.md", "STATE.md"):
+            if rel.name in ("INSTRUCTIONS.md", "MEMORY.md", "STATE.md",
+                            "LEDGER.md", "JOURNAL.md", "PROCESS.md", "RUNMAP.md"):
                 continue
             seen.add(rel)
             pf = parent_dir / rel
@@ -407,7 +408,8 @@ def _changed_components(parent_dir: Path, workdir: Path) -> int:
         for f in parent_dir.rglob("*"):
             if f.is_file() and ".git" not in f.parts:
                 rel = f.relative_to(parent_dir)
-                if rel.name in ("INSTRUCTIONS.md", "MEMORY.md", "STATE.md"):
+                if rel.name in ("INSTRUCTIONS.md", "MEMORY.md", "STATE.md",
+                            "LEDGER.md", "JOURNAL.md", "PROCESS.md", "RUNMAP.md"):
                     continue
                 if rel not in seen:
                     changed += 1  # a deletion

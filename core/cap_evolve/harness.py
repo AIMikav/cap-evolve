@@ -438,105 +438,108 @@ def _paired_deltas(current_val: SplitResult, cand_val: SplitResult) -> list | No
 
 
 
-_STATE_SEED = (
-    "# Optimizer scratchpad\n\n"
-    "Fill in each section as you work; this file carries across iterations when your "
-    "candidate is accepted, and the harness reads the handover into MEMORY for the "
-    "next iteration. Keep it concrete.\n\n"
-    "## What MEMORY says was already tried\n"
-    "(List, from ./MEMORY.md, the accepted + rejected approaches so far. Do NOT "
-    "re-propose anything already rejected.)\n\n"
-    "## Failure clusters found (ALL, with task ids)\n"
-    "(Every recurring cluster you found in ./trajectories/ — total failures, "
-    "partial-credit failures, AND communication/omission failures — each named, with "
-    "its task ids and shared root cause. Biggest first.)\n\n"
-    "## Edits made this iteration (one row per cluster fixed)\n"
-    "**Rule-violations found: N. Converted to in-code checks: M.** (M should ≈ N; list "
-    "any left as prose and why.)\n"
-    "| cluster | rule-violation? (Y/N) | edit class | EXISTING tool body edited (name) "
-    "| new tool added (name) | prompt edited? | why it generalizes | protects passing |\n"
-    "| --- | --- | --- | --- | --- | --- | --- | --- |\n\n"
-    "## Handover for next iteration\n"
-    "- Approaches tried this iteration (1 concrete line each):\n"
-    "- Lessons learned (general):\n"
-    "- Recommendation / what to focus on next:\n"
-    "- Rules still living as prose that SHOULD become in-code checks next iteration:\n"
-    "- Approaches that regressed AS IMPLEMENTED (a better-designed version may still "
-    "work — don't permanently abandon a high-value cluster):\n"
+# The optimizer's working dir carries FOUR cross-iteration files, with clean ownership
+# so there is never confusion about who writes what (the recurring user complaint about
+# the old MEMORY.md/STATE.md pair):
+#   LEDGER.md   — FRAMEWORK-owned, FACTUAL, regenerated each iter (the objective record:
+#                 per-iteration outcomes + the exact tasks each candidate broke/fixed).
+#   JOURNAL.md  — OPTIMIZER-owned, JUDGMENT, append-only across the WHOLE run (what was
+#                 tried, what worked, what regressed, refuted hypotheses, focus-next).
+#   PROCESS.md  — OPTIMIZER-owned, EXPLAINABILITY, fresh each iter, snapshotted with the
+#                 candidate (how this iteration was done: ranked issues, edits, verify,
+#                 subagents/features used, what to preserve).
+#   RUNMAP.md   — FRAMEWORK-owned manifest of every prior iteration's working dir, with
+#                 each prior PROCESS.md + capability diff copied into ./prior_iterations/.
+# Rule: FACTS are deterministic + framework-owned; JUDGMENT and PROCESS are agent-owned.
+
+_JOURNAL_MARK = "<!-- cap-evolve:journal-append-below — add your Iteration entry under this line; do not edit anything above it -->"
+
+_JOURNAL_SEED = (
+    "# JOURNAL — optimizer handover (append-only, whole run)\n\n"
+    "YOU (the optimizer) own this file. It is the running, accumulating handover across "
+    "ALL iterations — accepted AND rejected — and it is NEVER reset. Each iteration you "
+    "APPEND one new entry at the bottom (under the marker line); you do NOT edit or "
+    "delete earlier entries. Read the whole journal before proposing, so you build on "
+    "EVERY prior attempt (not just the last accepted one) and never re-test a refuted "
+    "idea.\n\n"
+    "Append your entry for THIS iteration below the marker, using this shape:\n\n"
+    "    ## Iteration <your candidate id> — <one-line headline of what you tried>\n"
+    "    - What I tried (1 line per change):\n"
+    "    - What WORKED (claim ONLY when a real gated improvement was observed; cite task ids / Δ):\n"
+    "    - What REGRESSED as-implemented (verdict: dead idea vs worth-redesigning, and how):\n"
+    "    - Refuted hypotheses (proven NOT the cause — never re-test):\n"
+    "    - High-value clusters NOT yet cracked (and the guard/tool designs already tried):\n"
+    "    - Plateau signal (are the last few iters stalling? if so, which LEVER to switch to —\n"
+    "      e.g. a NEW composite tool instead of yet another guard, or the prompt instead of code):\n"
+    "    - Focus next iteration:\n"
+)
+
+_PROCESS_SEED = (
+    "# PROCESS — what I did this iteration (explainability; REQUIRED)\n\n"
+    "Fill this in as you work. It is the human-readable record of HOW this iteration was "
+    "done and is snapshotted with the candidate, so anyone — and the next iteration via "
+    "./prior_iterations/ — can see your reasoning. Be concrete.\n\n"
+    "## Ranked issue list (clusters by # failing tasks × trials, biggest first)\n"
+    "| rank | cluster | tasks | shared root cause | tag (KNOWLEDGE / BEHAVIORAL / CAPABILITY-GAP) | planned change class |\n"
+    "| --- | --- | --- | --- | --- | --- |\n\n"
+    "## Changes made this iteration (one row per edit — aim for MULTIPLE classes, incl. a NEW tool when a cluster needs one)\n"
+    "| cluster | edit class | file / tool | what & why it generalizes | protects passing? |\n"
+    "| --- | --- | --- | --- | --- |\n\n"
+    "## Verify-the-fix (one line per change: the trace it targets → what the guard/computation/new-tool now does on those exact inputs)\n"
+    "- \n\n"
+    "## Process & features used\n"
+    "- Subagents / worktrees / parallel features used (or: \"serial fallback because …\"):\n"
+    "- Prior iterations I read from ./prior_iterations/ + ./RUNMAP.md (which, and what I learned):\n\n"
+    "## Good things to PRESERVE (do not let a future iteration undo these)\n"
+    "- \n\n"
+    "## Deliberately skipped (cluster + why — already-passing / needs gold / infra noise)\n"
+    "- \n"
 )
 
 
-def _recent_rejected_diffs(run_dir: RunDir, rejected, *, max_cands: int = 3,
-                           max_chars: int = 6000) -> str:
-    """Unified diffs of the most recent rejected candidates vs their parent.
+# State/handover files that are NOT part of the capability — excluded from any
+# capability diff (kept in one place; mirrors dashboard._DIFF_SKIP).
+_CAP_DIFF_SKIP = {"INSTRUCTIONS.md", "MEMORY.md", "STATE.md",
+                  "LEDGER.md", "JOURNAL.md", "PROCESS.md", "RUNMAP.md"}
 
-    Computed from the capability snapshots under ``candidates/<id>`` (same source +
-    skip-list the dashboard's ``build_diffs`` uses), so the optimizer sees the exact
-    edits that were already rejected and does not re-propose them. Returns "" when
-    there is nothing to show (no rejects yet, or snapshots unavailable).
-    """
-    if rejected is None:
-        return ""
-    import difflib
-    try:
-        entries = rejected.entries()
-    except Exception:  # noqa: BLE001
-        return ""
-    if not entries:
-        return ""
-    # Map each candidate id to the parent it was forked from (the best at the time),
-    # read from the step events. Fall back to "seed" when unknown.
-    parent_of = _parent_map(run_dir)
 
-    _skip = {"INSTRUCTIONS.md", "MEMORY.md", "STATE.md"}
+def _capability_files(d: Path) -> dict[str, str]:
+    """Read a candidate snapshot's capability files (text), skipping injected scratch.
 
-    def _read_files(d: Path) -> dict[str, str]:
-        out: dict[str, str] = {}
-        if not d.exists():
-            return out
-        for f in sorted(d.rglob("*")):
-            if not f.is_file():
-                continue
-            rel = str(f.relative_to(d))
-            if rel in _skip or rel.split("/", 1)[0] in ("trajectories", "guidance"):
-                continue
-            try:
-                out[rel] = f.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue
+    Same source + skip-list the dashboard's ``build_diffs`` uses, so a diff built here
+    shows only the real capability edit (not trajectories/guidance/state files)."""
+    out: dict[str, str] = {}
+    if not d.exists():
         return out
+    for f in sorted(d.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = str(f.relative_to(d))
+        top = rel.split("/", 1)[0]
+        if rel in _CAP_DIFF_SKIP or top in ("trajectories", "guidance", "prior_iterations"):
+            continue
+        try:
+            out[rel] = f.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+    return out
 
+
+def _diff_capabilities(parent_dir: Path, cand_dir: Path, *, max_chars: int = 8000) -> str:
+    """Unified diff of capability files between a parent and candidate snapshot."""
+    import difflib
+    pf, cf = _capability_files(parent_dir), _capability_files(cand_dir)
     blocks: list[str] = []
-    for e in reversed(entries):
-        if len(blocks) >= max_cands:
-            break
-        cid = str(e.get("candidate_id") or "")
-        if not cid:
+    for path in sorted(set(cf) | set(pf)):
+        a = pf.get(path, "").splitlines()
+        b = cf.get(path, "").splitlines()
+        if a == b:
             continue
-        cdir = run_dir.candidate_dir(cid)
-        pdir = run_dir.candidate_dir(parent_of.get(cid, "seed"))
-        if not cdir.exists() or not pdir.exists():
-            continue
-        cf, pf = _read_files(cdir), _read_files(pdir)
-        file_diffs: list[str] = []
-        for path in sorted(set(cf) | set(pf)):
-            a = pf.get(path, "").splitlines()
-            b = cf.get(path, "").splitlines()
-            if a == b:
-                continue
-            diff = "\n".join(
-                ln for ln in difflib.unified_diff(a, b, fromfile=f"a/{path}",
-                                                   tofile=f"b/{path}", lineterm="", n=2))
-            if diff.strip():
-                file_diffs.append(diff)
-        if not file_diffs:
-            continue
-        reason = str(e.get("reason") or "").strip()
-        blocks.append(f"### {cid} — rejected: {reason}\n```diff\n" +
-                      "\n".join(file_diffs) + "\n```")
-    if not blocks:
-        return ""
-    text = "\n\n".join(blocks)
+        diff = "\n".join(ln for ln in difflib.unified_diff(
+            a, b, fromfile=f"a/{path}", tofile=f"b/{path}", lineterm="", n=2))
+        if diff.strip():
+            blocks.append(diff)
+    text = "\n".join(blocks)
     if len(text) > max_chars:
         text = text[:max_chars] + "\n... (truncated)"
     return text
@@ -603,177 +606,238 @@ def _candidate_task_impact(run_dir: RunDir, cid: str, split: str = "val",
     return {"broke": broke, "fixed": fixed, "delta": delta, "parent": parent_id}
 
 
-def _per_task_impact_block(run_dir: RunDir, rejected, history, *,
-                           max_cands: int = 5, max_chars: int = 4000,
-                           split: str = "val") -> str:
-    """Causal block: per prior candidate, the tasks it BROKE and FIXED vs its parent.
+def _journal_tail(workdir: Path) -> str:
+    """The optimizer-authored text APPENDED below the journal marker this iteration.
 
-    The optimizer otherwise sees only diffs + an aggregate Δ/SE, so it cannot learn
-    that a previous edit fixed a few tasks while breaking many passing ones — and
-    repeats the regression. This block lists, for the most informative recent
-    candidates (rejected + accepted), the concrete broken/fixed task ids so the
-    optimizer can avoid re-introducing a known regression. Caps to ``max_cands`` /
-    ``max_chars``. Returns "" when no candidate has comparable rollouts yet."""
-    parent_of = _parent_map(run_dir)
-    # Most-recent-first union of rejected + accepted candidate ids.
-    ids: list[tuple[str, str]] = []  # (cid, status)
+    The harness seeds ``workdir/JOURNAL.md`` with the accumulated run journal ending in
+    ``_JOURNAL_MARK``; the optimizer appends its new ``## Iteration …`` entry below it.
+    This returns just that appended tail (trimmed), or "" when nothing was appended."""
+    path = workdir / "JOURNAL.md"
     try:
-        for e in reversed((rejected.entries() if rejected is not None else [])):
-            cid = str(e.get("candidate_id") or "")
-            if cid:
-                ids.append((cid, "rejected"))
+        if not path.exists():
+            return ""
+        text = path.read_text(encoding="utf-8")
     except Exception:  # noqa: BLE001
-        pass
-    try:
-        for e in reversed((history.entries() if history is not None else [])):
-            cid = str(e.get("candidate_id") or "")
-            if cid:
-                ids.append((cid, "accepted"))
-    except Exception:  # noqa: BLE001
-        pass
-
-    lines: list[str] = []
-    seen: set[str] = set()
-    for cid, status in ids:
-        if len(lines) >= max_cands:
-            break
-        if cid in seen:
-            continue
-        seen.add(cid)
-        impact = _candidate_task_impact(run_dir, cid, split, parent_of=parent_of)
-        if impact is None:
-            continue
-        broke, fixed = impact["broke"], impact["fixed"]
-        if not broke and not fixed:
-            continue  # no net per-task movement worth reporting
-        broke_s = "{" + ", ".join(broke[:20]) + "}" if broke else "{}"
-        fixed_s = "{" + ", ".join(fixed[:20]) + "}" if fixed else "{}"
-        lines.append(
-            f"- {cid} ({status}, Δ{impact['delta']:+.3f} vs {impact['parent']}): "
-            f"BROKE {broke_s} (were passing) | FIXED {fixed_s}"
-        )
-    if not lines:
         return ""
-    header = (
-        "## Per-task impact of prior candidates (learn from this — do NOT repeat a "
-        "change that broke a task)\n"
-        "Each prior candidate's effect vs its parent, by task id. A task in BROKE was "
-        "passing before that candidate and dropped — never re-introduce the change that "
-        "broke it.\n"
-    )
-    text = header + "\n".join(lines) + "\n"
-    if len(text) > max_chars:
-        text = text[:max_chars].rstrip() + "\n... (truncated)\n"
-    return text
+    if _JOURNAL_MARK in text:
+        # Everything after the FIRST marker is the optimizer's new entry. Split on the
+        # FIRST (not last) marker so a stray duplicate marker the optimizer may paste
+        # inside its own entry doesn't truncate the entry to "".
+        tail = text.split(_JOURNAL_MARK, 1)[1].strip()
+    else:
+        # Optimizer rewrote the file (no marker) — fall back to its last ## Iteration block.
+        idx = text.rfind("\n## ")
+        tail = text[idx:].strip() if idx != -1 else ""
+    # Strip any marker the optimizer copied into its entry text.
+    return tail.replace(_JOURNAL_MARK, "").strip()
 
 
-def _extract_handover(state_path: Path, *, max_chars: int = 800) -> str | None:
-    """Pull the text under ``## Handover for next iteration`` from a candidate STATE.md.
+def _latest_journal_note(workdir: Path, *, max_chars: int = 900) -> str | None:
+    """The newest journal entry, capped — stored in the factual ledger as the candidate's
+    one-line lineage note. Returns ``None`` when the optimizer appended nothing."""
+    tail = _journal_tail(workdir)
+    if not tail:
+        return None
+    if len(tail) > max_chars:
+        tail = tail[:max_chars].rstrip() + " …"
+    return tail
 
-    Returns the section body (from that heading to EOF or the next top-level ``# ``/``## ``
-    heading), trimmed and capped. Returns ``None`` when STATE.md is missing, has no such
-    section, or the section is empty/unfilled (still the seed placeholder), so the caller
-    falls back to the plain summary.
-    """
+
+def _build_ledger(workdir: Path, run_dir: RunDir, rejected, history) -> None:
+    """Write the FACTUAL, framework-owned LEDGER.md: one row per prior iteration with
+    its outcome + the exact tasks it broke/fixed. Deterministic — the objective record;
+    the optimizer's own narrative lives in JOURNAL.md."""
+    parent_of = _parent_map(run_dir)
+    # Outcome per candidate from step events (accept/reject + val + parent).
+    rows: list[dict] = []
     try:
-        if not state_path.exists():
-            return None
-        text = state_path.read_text(encoding="utf-8")
+        if run_dir.events_path.exists():
+            for line in run_dir.events_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if rec.get("kind") == "step" and rec.get("candidate"):
+                    rows.append(rec)
     except Exception:  # noqa: BLE001
-        return None
-    lines = text.splitlines()
-    start = None
-    for i, ln in enumerate(lines):
-        s = ln.strip().lower()
-        if s.startswith("#") and "handover for next iteration" in s:
-            start = i + 1
-            break
-    if start is None:
-        return None
-    body: list[str] = []
-    for ln in lines[start:]:
-        st = ln.strip()
-        # Stop at the next top-level/section heading (## or #), not deeper ones.
-        if st.startswith("# ") or (st.startswith("## ") and len(body) > 0):
-            break
-        body.append(ln)
-    section = "\n".join(body).strip()
-    if not section:
-        return None
-    # Skip the unfilled seed placeholder: if removing the seed's own bullet labels
-    # leaves nothing, the optimizer never filled it in — fall back to the summary.
-    seed_labels = ("approaches tried this iteration (1 concrete line each):",
-                   "lessons learned (general):",
-                   "recommendation / what to focus on next:",
-                   "rules still living as prose that should become in-code checks next iteration:",
-                   "approaches that regressed as implemented (a better-designed version may still "
-                   "work — don't permanently abandon a high-value cluster):")
-    residual = section.lower()
-    for lbl in seed_labels:
-        residual = residual.replace(lbl, "")
-    if not "".join(c for c in residual if c.isalnum()):
-        return None
-    if len(section) > max_chars:
-        section = section[:max_chars].rstrip() + " …"
-    return section
+        rows = []
+
+    table = ["| iter | candidate | parent | outcome | val | Δ vs parent | broke (were passing) | fixed |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for i, rec in enumerate(rows, 1):
+        cid = str(rec.get("candidate"))
+        par = str(rec.get("parent") or "seed")
+        outcome = "ACCEPT" if rec.get("accept") else "reject"
+        val = rec.get("val")
+        pval = rec.get("parent_val")
+        d = (f"{val - pval:+.3f}" if isinstance(val, (int, float))
+             and isinstance(pval, (int, float)) else "")
+        imp = _candidate_task_impact(run_dir, cid, "val", parent_of=parent_of) or {}
+        broke = "{" + ", ".join(str(t) for t in (imp.get("broke") or [])[:20]) + "}"
+        fixed = "{" + ", ".join(str(t) for t in (imp.get("fixed") or [])[:20]) + "}"
+        vstr = f"{val:.3f}" if isinstance(val, (int, float)) else ""
+        table.append(f"| {i} | {cid} | {par} | {outcome} | {vstr} | {d} | {broke} | {fixed} |")
+    if len(table) == 2:
+        table.append("| — | (baseline only) | — | — | — | — | {} | {} |")
+
+    best = run_dir.best_id or "seed"
+    text = (
+        "# LEDGER — factual run record (framework-maintained; READ-ONLY)\n\n"
+        "The objective record of every iteration: which candidate, its parent, whether the "
+        "gate ACCEPTED it, the val reward + Δ, and the EXACT tasks it broke / fixed. Facts "
+        "only — your own narrative, lessons, and refuted hypotheses go in JOURNAL.md. Use "
+        "this to never re-introduce a change that broke a task, and to see which approaches "
+        "the gate accepted vs rejected.\n\n"
+        "## Iterations\n" + "\n".join(table) + "\n\n"
+        f"## Current best: {best}\n"
+    )
+    (workdir / "LEDGER.md").write_text(text, encoding="utf-8")
+
+
+def _seed_journal(workdir: Path, run_dir: RunDir) -> None:
+    """Copy the run-level append-only JOURNAL into the workdir (or seed it on iter 1).
+
+    The run-level JOURNAL at ``run_dir.root/JOURNAL.md`` accumulates across ALL
+    iterations (accepted and rejected). We copy it into the workdir so the optimizer
+    reads the full handover history; it appends its new entry below ``_JOURNAL_MARK``,
+    and ``_reconcile_journal`` folds that back into the run-level file after the step."""
+    run_journal = run_dir.root / "JOURNAL.md"
+    if run_journal.exists():
+        try:
+            text = run_journal.read_text(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            text = _JOURNAL_SEED
+    else:
+        text = _JOURNAL_SEED
+    # The run-level file holds ONLY accumulated entries (no marker). Append the marker
+    # transiently here so the optimizer appends its new entry below it; the marker is
+    # stripped again when we fold the entry back into the run-level file.
+    text = text.replace(_JOURNAL_MARK, "").rstrip()
+    text = text + "\n\n" + _JOURNAL_MARK + "\n"
+    (workdir / "JOURNAL.md").write_text(text, encoding="utf-8")
+
+
+def _reconcile_journal(workdir: Path, run_dir: RunDir, cid: str, *,
+                       accepted: bool, val: float, delta: float) -> None:
+    """Fold the optimizer's newly-appended journal entry into the run-level JOURNAL,
+    stamped with the framework's objective outcome. Append-only at the run level so the
+    handover truly accumulates across accepted AND rejected iterations."""
+    tail = _journal_tail(workdir)
+    run_journal = run_dir.root / "JOURNAL.md"
+    base = run_journal.read_text(encoding="utf-8") if run_journal.exists() else _JOURNAL_SEED
+    # Run-level file is pure accumulated entries — strip any marker before appending.
+    base = base.replace(_JOURNAL_MARK, "").rstrip()
+    stamp = (f"\n\n<!-- {cid}: {'ACCEPTED' if accepted else 'rejected'} "
+             f"val={val:.3f} Δ={delta:+.3f} -->")
+    tail = tail.strip()
+    # Dedup guard: if the optimizer dropped the marker without appending (so the tail
+    # fallback returned an entry already recorded in the run-level journal), do NOT
+    # re-append it — that would duplicate a prior iteration's entry under this cid.
+    if not tail or (tail and tail in base):
+        tail = f"## Iteration {cid} — (no handover written by the optimizer)"
+    new = base + "\n\n" + tail + stamp + "\n"
+    try:
+        run_journal.write_text(new, encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        run_dir.log_event("optimizer_context_warning", what="JOURNAL.md", error=str(e)[:300])
+
+
+def _build_runmap(workdir: Path, run_dir: RunDir) -> None:
+    """Write RUNMAP.md + copy every prior iteration's PROCESS.md + capability diff into
+    ``workdir/prior_iterations/<cid>/`` so the optimizer has REAL in-dir access to all
+    prior iterations' working dirs (not just the parent's trajectories)."""
+    parent_of = _parent_map(run_dir)
+    rows: list[dict] = []
+    try:
+        if run_dir.events_path.exists():
+            for line in run_dir.events_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if rec.get("kind") == "step" and rec.get("candidate"):
+                    rows.append(rec)
+    except Exception:  # noqa: BLE001
+        rows = []
+
+    prior_root = workdir / "prior_iterations"
+    table = ["| iter | candidate | parent | outcome | val | ./prior_iterations/<id>/ |",
+             "| --- | --- | --- | --- | --- | --- |"]
+    for i, rec in enumerate(rows, 1):
+        cid = str(rec.get("candidate"))
+        par = str(rec.get("parent") or "seed")
+        outcome = "ACCEPT" if rec.get("accept") else "reject"
+        val = rec.get("val")
+        vstr = f"{val:.3f}" if isinstance(val, (int, float)) else ""
+        # Copy this prior iteration's PROCESS.md + diff-vs-parent into the workdir.
+        dst = prior_root / cid
+        try:
+            dst.mkdir(parents=True, exist_ok=True)
+            proc = run_dir.candidate_dir(cid) / "PROCESS.md"
+            if proc.is_file():
+                shutil.copyfile(proc, dst / "PROCESS.md")
+            diff = _diff_capabilities(run_dir.candidate_dir(par), run_dir.candidate_dir(cid))
+            if diff.strip():
+                (dst / "diff.patch").write_text(diff, encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            run_dir.log_event("optimizer_context_warning",
+                              what=f"prior_iterations/{cid}", error=str(e)[:300])
+        present = [n for n in ("PROCESS.md", "diff.patch") if (dst / n).exists()]
+        have = " + ".join(present) if present else "(none)"
+        table.append(f"| {i} | {cid} | {par} | {outcome} | {vstr} | {have} |")
+    if len(table) == 2:
+        table.append("| — | (no prior iterations yet) | — | — | — | — |")
+
+    text = (
+        "# RUNMAP — every prior iteration's working dir (read these before proposing)\n\n"
+        "For each prior iteration, its artifacts are copied into "
+        "`./prior_iterations/<candidate>/`:\n"
+        "- `PROCESS.md` — what that iteration did (ranked issues, changes, verify-the-fix, process)\n"
+        "- `diff.patch` — the EXACT capability edit it made vs its parent\n\n"
+        f"The live run dir (read-only) is at `{run_dir.root}` if you need "
+        "`rollouts/<split>/` traces or the git log.\n\n"
+        + "\n".join(table) + "\n\n"
+        "Before proposing, read the PROCESS.md + diff.patch of the prior iterations that "
+        "targeted the SAME cluster you are about to work on — so you BUILD ON them rather "
+        "than repeat a rejected or already-tried edit. Cross-reference LEDGER.md for which "
+        "of them the gate accepted vs rejected, and JOURNAL.md for the lessons.\n"
+    )
+    (workdir / "RUNMAP.md").write_text(text, encoding="utf-8")
 
 
 def _augment_instructions(instructions: str, workdir: Path, run_dir: RunDir,
                           rejected, history) -> str:
-    """Give the optimizer its memory + the whole process to learn from.
+    """Give the optimizer its four cross-iteration files + a prompt pointer to each.
 
-    Writes MEMORY.md into the workdir (rejected approaches + accepted history) and
-    appends, to the prompt, the memory, a pointer to the persistent STATE.md
-    scratchpad, a structured map of the run-dir layout to inspect prior work, and the
-    diffs of the most recently rejected candidates (so they are not re-proposed).
+    Clean ownership (see the file-header comment near ``_JOURNAL_SEED``):
+      - LEDGER.md  — framework-written facts (outcomes + per-task broke/fixed);
+      - JOURNAL.md — optimizer-authored, append-only handover across the whole run;
+      - PROCESS.md — optimizer-authored explainability, fresh each iteration;
+      - RUNMAP.md + prior_iterations/ — framework manifest + copies of every prior
+        iteration's PROCESS.md and capability diff (real prior-work-dir access).
     """
-    mem = ""
-    if rejected is not None:
-        mem += rejected.render() + "\n\n"
-    if history is not None:
-        mem += history.render()
-    (workdir / "MEMORY.md").write_text(mem or "_no memory yet_\n", encoding="utf-8")
-    if not (workdir / "STATE.md").exists():
-        (workdir / "STATE.md").write_text(_STATE_SEED, encoding="utf-8")
+    _build_ledger(workdir, run_dir, rejected, history)
+    _seed_journal(workdir, run_dir)
+    if not (workdir / "PROCESS.md").exists():
+        (workdir / "PROCESS.md").write_text(_PROCESS_SEED, encoding="utf-8")
+    _build_runmap(workdir, run_dir)
 
-    layout = (
-        f"## The process so far — inspect prior iterations before proposing\n"
-        f"The full run output is at: {run_dir.root}\n"
-        f"Layout you can read:\n"
-        f"- `candidates/<id>/` — the capability SNAPSHOT for each prior candidate "
-        f"(accepted and rejected); diff two ids to see exactly what an iteration changed.\n"
-        f"- `work/<id>/` — that candidate's scratch dir, including its `STATE.md` handover.\n"
-        f"- `rollouts/<split>/<task>__<cand>__t<k>.json` — per-trial traces "
-        f"(input + rollout + score) for every task/candidate/trial.\n"
-        f"- `events.jsonl` — the append-only audit log (one `step` event per iteration "
-        f"with accept/reject + Δ).\n"
-        f"- `rejected.jsonl` — every rejected candidate with its reject reason.\n"
-        f"- git log in the run dir — one commit per iteration (the per-iteration diff).\n"
-        f"Inspect the prior candidates, their reject reasons, and their diffs BEFORE "
-        f"proposing, so you build on what worked and never re-propose a rejected edit."
+    pointer = (
+        "## Cross-iteration files in THIS working dir (clean ownership — read all four)\n"
+        "- `LEDGER.md` — FACTS (framework, read-only): every iteration's outcome + the exact "
+        "tasks it broke/fixed. Never re-introduce a change that broke a task.\n"
+        "- `JOURNAL.md` — HANDOVER (yours, append-only across the whole run): read the whole "
+        "thing, then APPEND your entry for this iteration below the marker line. Do NOT edit "
+        "earlier entries. This is how you avoid repeating refuted ideas and hitting the same "
+        "plateau.\n"
+        "- `PROCESS.md` — EXPLAINABILITY (yours, REQUIRED this iteration): fill it in as you "
+        "work (ranked issues, every edit + class, verify-the-fix, subagents/features used, "
+        "what to preserve, what you skipped). It is snapshotted with your candidate.\n"
+        "- `RUNMAP.md` + `./prior_iterations/<id>/` — every prior iteration's PROCESS.md + "
+        "capability diff, copied in for you. Read the ones targeting your cluster BEFORE "
+        "proposing, so you build on prior work instead of repeating it.\n"
     )
-
-    impact = _per_task_impact_block(run_dir, rejected, history)
-    impact_block = ("\n\n" + impact) if impact else ""
-
-    rej_diffs = _recent_rejected_diffs(run_dir, rejected)
-    rej_block = ""
-    if rej_diffs:
-        rej_block = (
-            "\n\n## Recently rejected edits — don't re-submit these verbatim\n"
-            "These exact diffs were already tried and rejected by the gate. Don't "
-            "re-submit them as-is; a better-designed version of the same idea may still "
-            "work, so redesign rather than abandon a high-value cluster.\n\n" + rej_diffs
-        )
-
-    return (
-        f"{instructions}\n\n"
-        f"## Memory (read MEMORY.md in this dir)\n{mem or '_none yet_'}\n\n"
-        f"## Your scratchpad\nUpdate `STATE.md` in this dir with your diagnosis and plan; "
-        f"it persists across accepted iterations. It MUST end with a "
-        f"`## Handover for next iteration` section (the harness stores it in MEMORY).\n\n"
-        f"{layout}{impact_block}{rej_block}\n"
-    )
+    return f"{instructions}\n\n{pointer}\n"
 
 
 def _copy_step_trajectories(adapter, run_dir: RunDir, workdir: Path, split: str) -> None:
@@ -1037,9 +1101,12 @@ def _write_instructions_pointer(path: Path, skills_dir: str) -> None:
         "capability to improve, the failures to fix, and how your edit is judged.\n"
         f"For method/edit-space guidance, {skills_note}under `./guidance/` "
         "(capability skill(s) + the diagnose failure-clustering method).\n"
-        "Cross-iteration memory lives in `./MEMORY.md` (what was already tried/rejected — "
-        "read it before proposing) and `./STATE.md` (your scratchpad + handover for the "
-        "next iteration).\n"
+        "Cross-iteration files (clean ownership): `./LEDGER.md` (framework facts — every "
+        "iteration's outcome + tasks broken/fixed), `./JOURNAL.md` (YOUR append-only "
+        "handover across the whole run — append your entry below the marker), `./PROCESS.md` "
+        "(YOUR required explainability for this iteration), and `./RUNMAP.md` + "
+        "`./prior_iterations/<id>/` (every prior iteration's PROCESS.md + diff — read before "
+        "proposing). Read all of these before you start.\n"
     )
     sep = "" if (not existing or existing.endswith("\n\n")) else ("\n" if existing.endswith("\n") else "\n\n")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1162,11 +1229,17 @@ def run_step(
     run_dir.record_spend_warnings()
 
     # update optimizer memory + commit the iteration to the version store so the
-    # whole process stays inspectable (git log / MEMORY.md / REJECTED.md). The `note`
-    # is the optimizer's own handover (its approach + lesson), extracted from the
-    # candidate's STATE.md so the NEXT iteration sees what was tried, not just Δ/SE.
-    summary = f"candidate {cid} (val {cand_val.reward:.3f}, Δ {cand_val.reward - current_val.reward:+.3f})"
-    note = _extract_handover(workdir / "STATE.md")
+    # whole process stays inspectable (git log / LEDGER / JOURNAL). The `note` is the
+    # optimizer's own handover (its approach + lesson), taken from the entry it appended
+    # to JOURNAL.md this iteration so the lineage record carries what was tried, not just Δ/SE.
+    delta = cand_val.reward - current_val.reward
+    summary = f"candidate {cid} (val {cand_val.reward:.3f}, Δ {delta:+.3f})"
+    # Fold the optimizer's appended JOURNAL entry into the run-level append-only journal
+    # (so handover accumulates across accepted AND rejected iterations), and reuse it as
+    # the candidate's lineage note in the factual ledger.
+    _reconcile_journal(workdir, run_dir, cid, accepted=accepted,
+                       val=cand_val.reward, delta=delta)
+    note = _latest_journal_note(workdir)
     # Per-task broke/fixed lists vs the parent (from the rollouts just persisted), so
     # MEMORY records the SPECIFIC tasks a candidate broke — not just a category — and
     # the next iteration won't retry the regression. Best-effort; None when not
@@ -1401,14 +1474,19 @@ _DEFAULT_INSTRUCTIONS_TEMPLATE = (
 )
 # Big read-context the harness injects into the workdir that must NOT be stored as part
 # of the candidate snapshot (it would bloat candidates/ and pollute diffs). NOTE we keep
-# INSTRUCTIONS.md / MEMORY.md / STATE.md in the snapshot — STATE.md is the optimizer's
-# scratchpad that must carry across accepted iterations (the next step copies the
-# snapshot as its parent). Those three are instead filtered out at DIFF time
+# INSTRUCTIONS.md and PROCESS.md in the snapshot — PROCESS.md is the optimizer's
+# per-iteration explainability, surfaced via RUNMAP/prior_iterations. INSTRUCTIONS/PROCESS
+# (and the legacy MEMORY/STATE names) are instead filtered out at DIFF time
 # (see dashboard._DIFF_SKIP) so iteration diffs show only real capability edits.
 # Also exclude the NATIVE per-agent skill dirs and always-on instructions files the
 # harness drops into the workdir (e.g. .claude/skills/, CLAUDE.md) — they are injected
 # read-context, not part of the capability, so they must not bloat candidates/ or pollute diffs.
-_SNAPSHOT_IGNORE = ("trajectories", "guidance",
+# PROCESS.md is deliberately NOT ignored — it is the per-candidate explainability we
+# snapshot and surface via RUNMAP/prior_iterations. LEDGER/JOURNAL/RUNMAP + prior_iterations/
+# are framework-injected read-context (LEDGER/RUNMAP regenerated, JOURNAL is run-level),
+# so they must not bloat candidates/ or pollute diffs.
+_SNAPSHOT_IGNORE = ("trajectories", "guidance", "prior_iterations",
+                    "LEDGER.md", "JOURNAL.md", "RUNMAP.md",
                     ".claude", ".agents", ".gemini", ".opencode", ".bob",
                     "CLAUDE.md", "AGENTS.md", "GEMINI.md")
 
@@ -1508,7 +1586,9 @@ def _focus_instructions(current_val: SplitResult, focus_ids, label: str,
         "FIRST read ./guidance/<cap>/SKILL.md for EVERY capability and "
         "./guidance/optimizer/<name>.md (your subagent/parallelism features) IN FULL "
         "before diagnosing. Then read ./trajectories/ (full traces), ./guidance/sources/ "
-        "(data models/types — read before writing tool code), ./STATE.md, ./MEMORY.md. "
+        "(data models/types — read before writing tool code), ./LEDGER.md (facts), the "
+        "whole ./JOURNAL.md (handover) and ./RUNMAP.md + ./prior_iterations/; fill "
+        "./PROCESS.md and APPEND your entry to ./JOURNAL.md. "
         "The prompt and the tools are equally fair game.",
         bench, "", failures, passing, cap, "", algo, "",
         "Address EVERY failure cluster you found, not just the biggest. The DEFAULT fix "

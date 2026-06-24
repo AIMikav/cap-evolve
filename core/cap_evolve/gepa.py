@@ -71,8 +71,10 @@ OptimizerFn = Callable[[Path, str], None]
 _NON_COMPONENT = {
     "MEMORY.md", "STATE.md", "INSTRUCTIONS.md", "REJECTED.md",
     "FOCUS.md", "REFLECTION.md",
+    # cross-iteration state files (clean-ownership redesign) — scratch, not capability
+    "LEDGER.md", "JOURNAL.md", "PROCESS.md", "RUNMAP.md",
 }
-_NON_COMPONENT_DIRS = {".git", "__pycache__"}
+_NON_COMPONENT_DIRS = {".git", "__pycache__", "prior_iterations"}
 
 
 # ---- components (editable capability files) -------------------------------
