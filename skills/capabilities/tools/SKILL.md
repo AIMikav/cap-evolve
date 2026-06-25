@@ -17,10 +17,10 @@ the wire schema, and controls every caller — then names, descriptions, paramet
 docs, in-description examples, the JSON Schema, *and the implementation code* are
 all fair game.
 
-Use this when the agent owns its tools. Use [`mcp-tool`](../mcp-tool/SKILL.md)
-when the tools come from an external Model Context Protocol server you can only
-re-describe, not re-implement. The two share the same `tools.json` artifact and
-handlers; the only difference is which edits the action policy permits.
+Use this capability when the agent OWNS its tools — it implements the handlers and
+controls the wire schema, so the code itself is editable. (When the tools come from an
+external server you can only re-describe, not re-implement, the action policy here is
+tightened to documentation-only edits.)
 
 ## What you can change here
 
@@ -165,13 +165,13 @@ TOOL-REPLACEMENT PROTOCOL).
 **Generalize, never hardcode.** Every in-code guard must fire on the GENERAL
 condition that defines the failure class, never on a literal value from one task.
 *Good:* `if payment_id not in user_payment_methods: raise ...`. *Bad:*
-`if reservation_id == "ABC123": raise ...` — that overfits to one task, gets
+`if record_id == "ABC123": raise ...` — that overfits to one task, gets
 rejected by the held-out gate, and helps nothing else. Use a failing task's
 specifics only to identify the class, then write the general check.
 
 A discriminating-predicate guard for a decision/permission cluster must encode the
 GENERAL policy condition that separates the qualifying cases from the rest (e.g.
-`if cabin == "basic_economy" and action == "change_flight": raise ...`), NOT a global
+`if record.tier == "restricted" and action == "modify": raise ...`), NOT a global
 behavior flip and NOT a task literal. The guard NARROWS — it fires only on the cases
 the policy actually governs — so passing tasks outside that condition keep their
 behavior unchanged.
@@ -304,7 +304,7 @@ is dead code, not a fix).
 | Trace symptom | Fix |
 |---------------|-----|
 | **Wrong ARGUMENT the tool could validate** — a write whose id / reference / count / unit is not consistent with the agent-visible state (an id not in the record, a count exceeding what's available, the wrong unit). Right tool, bad argument; partial credit or a corrupted write. | **Normalize-then-call wrapper**: wrap the write in a body that RESOLVES / VALIDATES the argument against the current state, and on mismatch returns `available=[...]` (the valid options) or raises an actionable error naming what's wrong and what to pass instead — never let a write proceed on an unvalidated reference. Coerce units, resolve ids, check the field is on file, then delegate to the primitive. |
-| **`transfer_to_human` / bail-out abandoning a REQUIRED, eligible action** — the agent escalates or hands off when it could and should have completed the action itself; this is a behavioral STALL, not a missing capability. | **Composite WRITE tool**: encapsulate the eligible-action batch in ONE tool whose body executes the steps in code (skipping any ineligible item with a recorded reason), then `remove` the raw primitives so completing the batch is the only path. Do NOT add a "don't bail out" prose rule — the agent already chose to bail; only code removes the choice. |
+| **Escalate / bail-out abandoning a REQUIRED, eligible action** — the agent hands off or gives up when it could and should have completed the action itself; this is a behavioral STALL, not a missing capability. | **Composite WRITE tool**: encapsulate the eligible-action batch in ONE tool whose body executes the steps in code (skipping any ineligible item with a recorded reason), then `remove` the raw primitives so completing the batch is the only path. Do NOT add a "don't bail out" prose rule — the agent already chose to bail; only code removes the choice. |
 | **Recoverable error that strands the agent** — a tool raises an opaque traceback / bare code, the agent retries the same bad call or gives up. | **Enriched RETURN that aids recovery**: on a recoverable error, return what's wrong + the valid options + the recommended next action (e.g. `{"error": "id not found", "available": [...], "next": "call search_x to resolve the id"}`), so the model self-corrects on the next turn instead of repeating the failure. |
 | **Execution stalls at the action boundary** — the agent analyzes, explains, even confirms, then never calls the write tool and stops (the task is left half-done). | **Composite WRITE tool** (pattern 3): one tool whose body performs the whole analyze→confirm→act sequence, then `remove` the raw primitives so the action is un-skippable. |
 | **The same primitive called N times in a row** — looping over a list in the agent's own context, dropping or mis-threading results. | **Loop tool** (pattern 2): one tool that takes the list and loops inside a single call. |
@@ -356,8 +356,9 @@ Reach for `tools` when a trace shows one of these failure signatures:
 - **A real behavioral bug in a handler** — the tool returns the wrong thing.
   Because you own the code, you can fix it directly.
 
-If the problem is *what the agent is told to do* rather than *what it can do*,
-optimize the [`system-prompt`](../system-prompt/SKILL.md) instead.
+If the problem is *what the agent is told to do* rather than *what it can do*, it is
+out of scope for this capability (it belongs to whatever capability edits the agent's
+instructions).
 
 ## What can be optimized (default policy = all of these)
 
@@ -599,8 +600,8 @@ Drawn from real runs where the optimizer left most of the gain on the table.
 **Good — what actually moves accuracy and cuts calls:**
 
 - **A loop/composite tool** that collapses the repeated-primitive pattern from the
-  traces (e.g. the agent fetching a user's records one id at a time, or sweeping
-  flight searches across many date/route combinations) into a single list call.
+  traces (e.g. the agent fetching records one id at a time, or sweeping a search across
+  many parameter combinations) into a single list call.
 - **A rule-enforcing tool** that reads-before-writes or validates a precondition
   the underlying API does not, turning a silent bad write into a clear refusal.
 - **Precise descriptions** that add genuinely new, always-true content: explicit

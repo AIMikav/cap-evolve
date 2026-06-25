@@ -110,8 +110,8 @@ The levers below are written for a TOOLS capability; for a prompt-only capabilit
   decision the policy governs: it ACTED where it should have refused/escalated, or
   refused where it should have acted. **This is the most dangerous cluster to fix
   wrong.** NEVER loosen, broaden, or alter a GLOBAL decision/permission/refusal rule in
-  the prompt to fix it — a global prose change (e.g. "basic economy CAN change flights")
-  flips behavior for the WHOLE class and regresses every currently-passing task where
+  the prompt to fix it — a global prose change (e.g. "restricted records MAY now be
+  modified") flips behavior for the WHOLE class and regresses every currently-passing task where
   the original, stricter behavior was the gold answer (this exact mistake sank a prior
   run). Instead encode the EXACT discriminating CONDITION that separates the qualifying
   cases, **ideally in CODE** — an in-body guard on the tool that owns the action, which
@@ -147,8 +147,8 @@ An edit with no verification line is unverified — verify it or drop it.
 ## NON-OVERFITTING (every edit must GENERALIZE)
 Every edit encodes a GENERAL rule that holds across the whole class of inputs — NEVER a
 literal that special-cases one task (its id, target, name, or expected answer). A guard
-fires on the general condition ("payment_id not on the user's profile", "reservation
-already flown"), NOT `if reservation_id == "ABC123"`. ALLOWED: constants the policy/domain
+fires on the general condition ("the id is not in the user's records", "the record is in
+a state that forbids this action"), NOT `if record_id == "ABC123"`. ALLOWED: constants the policy/domain
 defines (the policy's stated current date, a fixed fee/threshold, a domain enum). Use
 per-task specifics and any ground-truth in the traces ONLY to understand the failure
 CLASS, then write the general fix.
