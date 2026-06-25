@@ -35,27 +35,37 @@ the same candidate. (1-line generic examples; worked bodies in
 [`references/examples.md`](references/examples.md), depth below and in
 [`references/concepts.md`](references/concepts.md).)
 
-**Read this skill in full before editing, and apply MULTIPLE edit classes every
-iteration.** The menu below has eight classes. A strong iteration ships several of
-them together — e.g. in-body guards on several existing tools, a NEW composite tool
-for a stall cluster, enriched returns, AND a prompt fix — in ONE candidate. An
-iteration that ships a single class (only docstrings, only one guard) is under-used.
+**Read this skill in full before editing. Ship MULTIPLE fixes per iteration — but
+every one must be REAL (targets a currently-failing task), SAFE (cannot change a
+passing task's behavior), and VERIFIED (proven to fix its target).** Several such fixes
+beat a long list that includes a speculative edit: one edit that regresses a passing
+task can sink the whole candidate at the gate. Quality over churn — never add an edit
+to hit a count, and never re-add a rule/tool the run already tried and rejected.
 
-**Two equally-first-class moves — pick by the failure type, not by a default:**
-- **Edit the BODY of an EXISTING tool** when the agent VIOLATES a rule a tool
-  already owns (a wrong field value, an id not on file, an action on a record whose
-  state forbids it). Convert
-  the prose rule into an in-body guard. Expect to touch SEVERAL existing bodies.
-- **ADD a NEW code-bearing tool** when the agent has a CAPABILITY GAP or STALLS at
-  an action — most importantly, a **composite atomic-WRITE tool** for a multi-step
-  action the agent narrates/confirms then fails to execute. *Adding a new tool is
-  ENCOURAGED, not an exception* — for a BEHAVIORAL stall a new composite is usually
-  the correct fix EVEN when a write primitive already exists (the primitive is what
-  the agent skips; the composite makes the action un-skippable). The failure mode is
-  "ship one change and stop / leave a stall as prose," NOT "add a new tool."
+**Per-change SAFETY (the rule that makes multi-change work).** Scope every guard to fire
+ONLY on the exact violating condition, and check its blast radius: run it on the args of
+1–2 currently-PASSING tasks that use the same tool and confirm it does NOT fire. A guard
+that fires on a passing task is a regression — rescope or drop it. This is how you ship
+many changes without net-zero churn.
 
-Optimizers that reword docstrings while leaving rules as prose, OR that never build
-the composite tool a stall cluster needs, leave most of the gain on the table.
+**Pick the lever by failure type — the in-body guard is the DEFAULT strong move:**
+- **Edit the BODY of an EXISTING tool (reach for this FIRST for a rule violation).** When
+  the agent VIOLATES a rule a tool already owns (a wrong field value, an id not on file,
+  an action on a record whose state forbids it), convert the prose rule into a scoped
+  in-body guard. This is the highest-yield, lowest-regression edit; expect to touch
+  SEVERAL existing bodies in one iteration.
+- **ADD a NEW code-bearing tool — for a genuine CAPABILITY GAP or action STALL.** A
+  composite atomic-WRITE tool for a multi-step action the agent narrates/confirms then
+  fails to execute is the canonical case (the primitive is what it skips; the composite
+  makes the action un-skippable; then REMOVE the raw primitives). New tools are
+  available and encouraged WHEN they close a real gap — but add one ONLY if the agent
+  will actually call it AND it changes the graded outcome. Do NOT add read/compute/summary
+  helper tools that a guard or a prompt line would subsume, and never add a tool just to
+  "ship a new tool" — that is churn the gate punishes.
+
+The two failure modes to avoid: (1) leaving a rule the agent keeps breaking as loose
+prose instead of a guard; (2) padding the candidate with low-value helper tools or
+cosmetic rewrites that move no graded task.
 
 1. **Edit the CODE of EXISTING tools to enforce rules deterministically (the most
    common high-leverage edit)** — most violated textual rules govern a tool that

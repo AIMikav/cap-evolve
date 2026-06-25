@@ -85,6 +85,12 @@ edits**, never patch blindly:
    marginal gain per edit and are easy to miss when you focus on zero-score tasks.
    For a multi-cause task, note its **secondary** cause too (a residual second-pass),
    so one candidate can fix both the primary and the residual cause in the same edit.
+   For EACH cluster, also note its **blast radius** — the currently-PASSING tasks that
+   exercise the same tool/rule/path — so the fix can be scoped to fire only on the
+   failing condition and not regress them; and cross-check the run history (LEDGER /
+   prior iterations) to SKIP any cluster whose fix was already tried and rejected (don't
+   re-diagnose a refuted approach). A cluster's value is the score it can recover MINUS
+   the regression risk to its blast radius.
    Then name (b) the GOOD behaviors that occur only *sometimes* (tasks whose mean
    reward is between 0 and 1 pass on some trials and fail on others); identify what
    the good runs do so it can be made CONSISTENT. (Always-failing tasks, mean ≈ 0,
