@@ -1,6 +1,6 @@
 ---
 name: skill-package
-description: Optimize an Agent Skill package itself — its SKILL.md (frontmatter + body), references, and bundled scripts. Use when the capability under optimization IS a skill (the SkillGrad / Trace2Skill / SkillOpt case): you want the agent to use the skill more effectively, trigger it correctly, and follow it without wasted steps. Enforces the skill-creator authoring rules (progressive disclosure, valid frontmatter, body length, one-level references) so edits stay valid skills.
+description: Optimize an Agent Skill package itself — its SKILL.md (frontmatter + body), references, and bundled scripts. Use when the capability under optimization IS a skill, and you want the agent to use the skill more effectively, trigger it correctly, and follow it without wasted steps. Enforces the skill-creator authoring rules (progressive disclosure, valid frontmatter, body length, one-level references) so edits stay valid skills.
 component: capability
 argument-hint: "--path DIR"
 allowed-tools: Read, Write, Edit, Bash
