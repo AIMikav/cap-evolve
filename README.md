@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/status-beta%20(0.x)-orange" alt="status">
   <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="python">
   <img src="https://img.shields.io/badge/runtime%20deps-0%20(stdlib)-success" alt="deps">
-  <img src="https://img.shields.io/badge/license-MIT-informational" alt="license">
+  <img src="https://img.shields.io/badge/license-Apache--2.0-informational" alt="license">
   <img src="https://img.shields.io/badge/agent%20skills-18-7c5cff" alt="skills">
 </p>
 
@@ -27,7 +27,7 @@ number. It optimizes what your agent *reads*, not its weights.
 [Toy example](#toy-example-zero-api) · [tau2-bench example](#tau2-bench-example-real) ·
 [Optimize your own](#optimize-your-own) · [How it works](#how-it-works) ·
 [Comparison](#how-it-compares) · [Skill library](#skill-library) ·
-[Results](#results) · [License](#license)
+[Results](#results) · [How-to guides](#how-to-guides) · [License](#license)
 
 ## Why cap-evolve
 
@@ -335,7 +335,7 @@ you want intake to ask):
 - objective:  maximize mean reward on the VAL split
 
 # 5. OPTIMIZER  (proposes the edits) + MODEL + CREDENTIALS
-- optimizer:   <claude-code | codex | gemini-cli | opencode | openclaw | ibm-bob | generic | mock>
+- optimizer:   <claude-code | codex | gemini-cli | opencode | cursor | droid | copilot | kimi | pi | antigravity | openclaw | ibm-bob | generic | mock>
 - model:       <backend-specific model id>
 - credentials: <e.g. ANTHROPIC_API_KEY or a logged-in Claude Code session; BOBSHELL_API_KEY for ibm-bob>
 
@@ -380,7 +380,7 @@ Start from the closest example and edit its `adapter.py`:
 
 ```yaml
 capabilities:    [system-prompt, tools]   # any of: system-prompt | tools | mcp-tool | skill-package
-optimizer_skill: claude-code              # ← swap: codex | gemini-cli | opencode | openclaw | ibm-bob | generic | mock
+optimizer_skill: claude-code              # ← swap: codex | gemini-cli | opencode | cursor | droid | copilot | kimi | pi | antigravity | openclaw | ibm-bob | generic | mock
 algorithm_skill: hill-climb               # hill-climb (--focus all|cyclic|hardest-first) | gepa | skillopt
 num_trials: 4
 store: git                                # versions every iteration
@@ -513,7 +513,7 @@ variants collapsed into one `hill-climb` skill with `--focus`.
 | phases       | `intake` · `implement-and-check` · `baseline` · `evaluate` · `diagnose` · `gate` · `finalize` · `report` |
 | capabilities | `system-prompt` · `skill-package` · `tools` · `mcp-tool` |
 | algorithms   | `hill-climb` (`--focus all\|cyclic\|hardest-first`) · `gepa` · `skillopt` |
-| optimizers   | `run-optimizer` + `optimizers/registry.yaml` (`claude-code`, `codex`, `gemini-cli`, `opencode`, `openclaw`, `ibm-bob`, `generic`, `mock`) |
+| optimizers   | `run-optimizer` + `optimizers/registry.yaml` (`claude-code`, `codex`, `gemini-cli`, `opencode`, `cursor`, `droid`, `copilot`, `kimi`, `pi`, `antigravity`, `openclaw`, `ibm-bob`, `generic`, `mock`) |
 
 `gepa` (real GEPA — reflective Pareto search, two-stage minibatch-then-full-val
 economy; arXiv:2507.19457) and `skillopt` (epochs × mini-batches with a decaying
@@ -569,6 +569,16 @@ commit.
 > (the engine logs a `splits_warning`); for a held-out result, pin a 30/10/10
 > split via `split_ids.json`.
 
+## How-to guides
+
+Step-by-step recipes for specific harness + benchmark combinations:
+
+| Guide | What it covers |
+|---|---|
+| [cap-evolve with Exgentic / tau2-bench](docs/how-to/cap-evolve-with-exgentic-tau2.md) | Optimize airline `policy.md` + `tools.py` via the exgentic harness and a LiteLLM proxy |
+
+More guides will be added here over time.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md).
@@ -594,4 +604,4 @@ citations: [docs/sources.bib](docs/sources.bib).
 
 ## License
 
-MIT.
+Apache-2.0.
