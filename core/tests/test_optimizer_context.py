@@ -87,78 +87,9 @@ def test_injects_trajectories_and_guidance_then_excludes_from_snapshot(tmp_path)
     assert not (snap / "guidance").exists()
 
 
-def test_evaluate_candidate_task_ids_subset_and_no_record(tmp_path):
-    """task_ids restricts scoring to a subset; record=False leaves the run's
-    authoritative rollouts/spend untouched (the ABLATION self-eval contract)."""
-    from cap_evolve import Budget, RunDir, harness
-
-    adapter = _toy_adapter()
-    seed = tmp_path / "seed"
-    shutil.copytree(EXAMPLE / "capability", seed)
-    run_dir = RunDir.create(tmp_path / ".capevolve", ts="sub", budget=Budget(max_iterations=1, stall=3))
-    harness.ensure_splits(adapter, run_dir, seed=0)
-    base = harness.baseline(adapter, seed, run_dir=run_dir)
-    assert len(base.per_task) >= 2                       # toy split has >1 val task
-
-    one = base.per_task[0]["task_id"]
-    rollouts_before = sorted((run_dir.rollouts / "val").glob("*.json"))
-    spent_before = run_dir.spent.metric_calls
-
-    res = harness.evaluate_candidate(adapter, seed, run_dir=run_dir, split="val",
-                                     n_trials=1, tag="ablate", task_ids=[one], record=False)
-    # scored exactly the requested subset
-    assert [pt["task_id"] for pt in res.per_task] == [one]
-    # record=False: no new authoritative rollouts, no metric-call budget burn
-    assert sorted((run_dir.rollouts / "val").glob("*.json")) == rollouts_before
-    assert run_dir.spent.metric_calls == spent_before
-    # scratch rollouts went under the candidate dir instead
-    assert (seed / ".ablate_rollouts").is_dir()
-
-
-def test_ablation_kit_injected_and_excluded_from_snapshot(tmp_path):
-    """Each iteration's workdir gets baseline_pertask.json + an executable, valid
-    ./ablate wrapper; both are excluded from the candidate snapshot."""
-    import ast
-    import json
-    import os
-
-    if shutil.which("git") is None:
-        pytest.skip("git not available")
-    from cap_evolve import Budget, RunDir, harness
-
-    adapter = _toy_adapter()
-    seed = tmp_path / "seed"
-    shutil.copytree(EXAMPLE / "capability", seed)
-    run_dir = RunDir.create(tmp_path / ".capevolve", ts="kit", budget=Budget(max_iterations=1, stall=3))
-    harness.ensure_splits(adapter, run_dir, seed=0)
-    base = harness.baseline(adapter, seed, run_dir=run_dir)
-
-    optimizer = harness.optimizer_from_command(
-        ["python3", str(MOCK_RUN), "--name", "mock", "--workdir", "{workdir}", "--prompt", "{prompt}"])
-    harness.hill_climb_loop(
-        adapter, run_dir=run_dir, optimizer=optimizer, current_val=base,
-        focus="all", max_iterations=1, gate_kwargs={"mode": "significant", "k_se": 1.0},
-        algorithm="hill-climb", capabilities=["system-prompt"], optimizer_name="mock",
-        project_dir=EXAMPLE,
-    )
-
-    workdir = run_dir.root / "work" / "cand_0001"
-    bp = workdir / "baseline_pertask.json"
-    ablate = workdir / "ablate"
-    assert bp.exists() and ablate.exists()
-    assert os.access(ablate, os.X_OK)                    # executable
-    ast.parse(ablate.read_text(encoding="utf-8"))        # valid python
-    baseline = json.loads(bp.read_text(encoding="utf-8"))
-    assert set(baseline) == {pt["task_id"] for pt in base.per_task}
-
-    snap = run_dir.candidate_dir("cand_0001")
-    assert not (snap / "ablate").exists()
-    assert not (snap / "baseline_pertask.json").exists()
-
-
 def test_parallel_note_gated_by_optimizer_capability():
     """{{PARALLEL_NOTE}} fans out subagents only for a parallel-capable optimizer
-    (claude-code); a non-parallel one (mock) is told to work sequentially."""
+    (claude-code); a non-parallel one (mock) is told to cover clusters in turn."""
     from cap_evolve import harness
 
     assert harness._optimizer_parallel("claude-code") is True
@@ -168,5 +99,6 @@ def test_parallel_note_gated_by_optimizer_capability():
     on = harness._parallel_note(True, "claude-code")
     off = harness._parallel_note(False, "mock")
     assert "fan out" in on.lower()
-    assert "sequential" in off.lower() or "one at a time" in off.lower()
     assert "fan out" not in off.lower()
+    # both still push breadth — many clusters in one candidate
+    assert "many" in on.lower() and "many" in off.lower()

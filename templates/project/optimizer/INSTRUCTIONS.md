@@ -2,17 +2,20 @@
 
 {{FOCUS_SUMMARY}}
 
-GOAL: raise the eval score as much as you can THIS iteration, then STOP. The prompt AND
-the tools are equally fair game. You have a self-eval — `./ablate` — to MEASURE each
-edit's real effect before you keep it (see ABLATE-AND-MERGE); the harness still does the
-authoritative final re-score after you STOP, so `./ablate` is your filter, not the judge.
+GOAL: raise the eval score as much as you can THIS iteration, then STOP (the harness
+re-scores you — don't run evaluation yourself). The prompt AND the tools are equally
+fair game.
 
-Make **AS MANY changes as survive ablation** this iteration. The trap that kept prior
-runs flat was *two-way churn*: bundling several edits into one candidate where some fixed
-tasks and others silently broke passing tasks, netting almost nothing. The fix is not
-"fewer edits" — it is to **ablation-test each edit and ship only the ones proven to help
-without regressing.** There is NO penalty for breadth once each kept edit is individually
-verified. Diagnose ALL clusters, draft a fix for each, then let `./ablate` decide which stay.
+Make **AS MANY real fixes as you can this iteration — solve many issues across many
+trajectories, not just the biggest one.** A timid one- or two-edit iteration is an
+under-used iteration: diagnose EVERY failure cluster in `./trajectories/` and ship a fix
+for each one that passes the three tests below. Breadth is the goal — the more distinct
+failing clusters you fix in this ONE candidate, the larger the gain.
+
+The ONLY brake on breadth is regression: every edit must pass all three tests, because a
+single speculative edit that breaks a passing task can sink an iteration of good work (it
+did in prior runs). So the discipline is "many fixes, each one real and safe" — NOT "few
+fixes". Do not stop at the first cluster; work through them all.
 
 ## The THREE TESTS every change must pass (this is the whole game)
 Before you keep any edit, confirm all three. Drop any edit that fails even one.
@@ -36,12 +39,12 @@ Before you keep any edit, confirm all three. Drop any edit that fails even one.
      CONDITION instead (see the DECISION / PERMISSION lever below).
    Name the passing tasks in each edit's blast-radius class and state which class it is.
    A regression wastes the whole candidate (the gate rejects a net-zero), not one task.
-3. **VERIFIED by ablation** — you have RUN `./ablate` on this edit alone and shown its
-   target task(s) improve AND no protected/passing task drops (see ABLATE-AND-MERGE). An
-   edit you have not ablated is a guess — drop it or ablate it.
+3. **VERIFIED** — you have shown it actually fixes its target (see VERIFY-THE-FIX). An
+   edit you cannot verify is a guess — drop it.
 
-Ship EVERY edit that survives ablation — breadth is good once each edit is individually
-verified non-regressing. Do NOT ship an un-ablated edit to pad a count, and do NOT re-add
+Quality AND breadth: ship every fix that passes the three tests — the more clusters you
+cover safely, the bigger the gain. The only edits to leave out are the speculative ones
+(an edit that fails a test), not real fixes you ran out of patience for. Don't re-add
 anything `LEDGER.md` / `JOURNAL.md` show was already tried and rejected.
 
 ## Read these first (everything is in this working directory)
@@ -69,12 +72,11 @@ anything `LEDGER.md` / `JOURNAL.md` show was already tried and rejected.
 2. Diagnose THIS iteration's `./trajectories/` ONLY (not stale signatures). Cluster ALL
    failures by shared root cause — total, partial-credit, AND communication/omission.
    RANK clusters by LEVERAGE = (# failing tasks × trials × score recoverable), biggest
-   first.
-3. For each top cluster, pick the right lever by FAILURE TYPE (next section) and draft
-   the edit. Run it through the THREE TESTS.
-4. **ABLATE-AND-MERGE (mandatory): use `./ablate` to keep only the edits that work,
-   then merge them into this ONE candidate** (full protocol below). This is the step
-   that stops two-way churn.
+   first — but plan to fix ALL of them this iteration, not only the top few.
+3. For EACH cluster, pick the right lever by FAILURE TYPE (next section) and draft the
+   edit. Run it through the THREE TESTS; keep it only if it passes all three.
+4. Ship every passing edit together in this ONE candidate — cover as many clusters as you
+   can SAFELY (that is the win), and never include an edit that fails a test.
 5. Fill `PROCESS.md` and APPEND your entry to `JOURNAL.md`. STOP.
 
 ## Choose the lever by FAILURE TYPE
@@ -127,43 +129,26 @@ Also improve **tool RETURN values / error messages** (actionable: what's wrong +
 options + next step) when a recoverable error stranded the agent — this is high-leverage
 and low-risk. Never delete a needed rule; change/consolidate instead.
 
-## ABLATE-AND-MERGE (the core loop — this is what makes breadth safe)
-`./ablate` scores a candidate dir on a TASK SUBSET against the parent baseline
-(`baseline_pertask.json`) and prints, per task, baseline → candidate → delta → verdict.
-It is a self-check only (it never changes the run's score/budget); the harness still does
-the authoritative final re-score after you STOP. Usage:
-```
-./ablate [--cand DIR] [--trials N] TASK_ID [TASK_ID ...]
-```
-For EACH edit, the targets are its FAILING task(s); the protected set is 1–3 currently
-PASSING tasks in its blast radius (same tool / same decision class).
-
-1. **Build a clean single-edit copy.** Copy the pristine parent into a scratch dir, apply
-   ONLY this one edit there. (The parent's pristine capability is your starting workdir
-   before you edit; keep a clean copy, e.g. `cp -r` the unedited files aside first, or
-   build each edit in its own copy.)
-2. **Ablate the edit alone:** `./ablate --cand <scratch> <targets> <protected>`.
-   - KEEP the edit iff every target improves (delta > 0) AND no protected task regresses
-     (no `REGRESSED` line). 
-   - DROP it if a target stays flat (it doesn't actually fix the cluster — prose on a hard
-     zero, a guard that never fires) OR any protected task drops (a real regression).
-   - A `flat` target means "not a real fix" — re-diagnose or drop; don't ship hope.
-3. **Merge survivors:** apply all KEPT edits together into your working candidate (this
-   directory). Then **ablate the union**: `./ablate <all targets> <all protected>`. If a
-   task that was fine for each edit solo now regresses, two edits CONFLICT — drop the
-   lower-leverage one and re-ablate the union until clean.
-4. Ship the merged, union-clean set. STOP.
-
-Decision/permission edits: the protected set MUST include passing tasks in the SAME
-decision class (where the gold answer is to refuse/escalate), so ablation catches an
-edit that makes the agent newly ACT where it should not. If you cannot name such tasks,
-the edit is UNBOUNDED — replace it with a coded discriminating-condition guard scoped to
-the violating cases only, then ablate that.
+## VERIFY-THE-FIX (do this for EACH kept edit — it satisfies the VERIFIED + SAFE tests)
+- **In-body guard / computation:** run the tool body on the EXACT args from the failing
+  trace and confirm it fires / returns the corrected value. THEN run it on the args from
+  1–2 currently-PASSING tasks that use the same tool and confirm it does NOT fire (the
+  blast-radius / SAFE check). A guard that never fires on the failing task is dead code;
+  one that fires on a passing task is a regression — drop or rescope either.
+- **Decision / permission edit (prompt OR guard):** the SAFE check is BEHAVIORAL, not
+  argument-level. Enumerate the currently-passing tasks in the SAME decision class (same
+  permission/refusal rule) and confirm the edit would NOT flip the agent's action on any
+  of them — in particular that it does not make the agent newly ACT where a passing
+  task's gold answer was to refuse/escalate. If you cannot enumerate and check that
+  class, the edit is UNBOUNDED and unverified — replace it with a coded
+  discriminating-condition guard scoped to the violating cases only.
+- **New tool:** construct the inputs the agent SHOULD have passed (from the trace's
+  observed state) and run the tool body; confirm it completes the action end-to-end.
+- **Prompt/docstring:** confirm the missing fact is now stated, general, and unambiguous.
 
 Record one line per edit in PROCESS.md, e.g.
-`update_X guard: targets {t7:+0.8,t24:+0.6} protected {t2:0,t6:0} → KEPT` /
-`prompt rule: target {t14:+0.0} → DROPPED (flat, no real fix)`.
-An edit with no ablation line is unverified — ablate it or drop it.
+`trace <task> arg x=<bad> → guard raises "<msg>"; passing tasks <ids> → guard does NOT fire`.
+An edit with no verification line is unverified — verify it or drop it.
 
 ## NON-OVERFITTING (every edit must GENERALIZE)
 Every edit encodes a GENERAL rule that holds across the whole class of inputs — NEVER a
@@ -176,9 +161,8 @@ CLASS, then write the general fix.
 
 ## Handover (REQUIRED before you STOP)
 - **PROCESS.md** (this iteration): the ranked cluster list (with leverage + RULE/GAP/
-  KNOWLEDGE tag), every edit + its lever, the per-edit ABLATION line (targets {Δ} /
-  protected {Δ} → KEPT or DROPPED), the union-ablation result, what you deliberately
-  skipped and why, and (if you used subagents) that you did.
+  KNOWLEDGE tag), every kept edit + its lever, the VERIFY-THE-FIX + blast-radius line per
+  edit, what you deliberately skipped and why, and (if you used subagents) that you did.
 - **JOURNAL.md** (append one entry below the marker; never edit earlier entries):
   what I tried (1 line/change) · what WORKED (only on a real gated gain; cite task ids/Δ)
   · what REGRESSED and the verdict · refuted hypotheses (never re-test) · high-value
@@ -191,13 +175,11 @@ CLASS, then write the general fix.
 {{ALGO_BRIEF}}
 
 ## Self-check before STOP
-- Every kept edit was ABLATED alone (`./ablate`): its target(s) improved and no protected
-  task regressed — with its ablation line in PROCESS.md. Drop any edit you did not ablate
-  or that came back flat/regressing.
-- You ran the UNION ablation across all kept edits and it is regression-clean (no two-way
-  churn); you dropped the lower-leverage side of any conflicting pair.
-- You shipped every surviving edit, covering the top-ranked clusters — and you did NOT
-  ship an un-ablated/speculative edit or re-add anything already rejected (LEDGER/JOURNAL).
+- Every kept edit passes the THREE TESTS (REAL, SAFE, VERIFIED) and has its
+  verify + blast-radius line in PROCESS.md. Drop any that doesn't.
+- You shipped several such edits, covering the top-ranked clusters you could fix SAFELY
+  — and you did NOT pad with speculative/cosmetic edits or re-add anything already
+  rejected (check LEDGER/JOURNAL).
 - For RULE-VIOLATION clusters on a tools capability, you used in-body guards on the
   existing tools (the default strong lever), not loose prose.
 - For DECISION / PERMISSION clusters you did NOT loosen or alter a global decision/

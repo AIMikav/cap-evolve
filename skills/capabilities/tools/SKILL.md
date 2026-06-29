@@ -299,11 +299,9 @@ Map the trace symptom to the code-bearing edit. Each row is a failure the model
 These four rows carry most of the recoverable gain — diagnose for them FIRST, and
 verify the fix you ship actually FIRES on the failing trace (run the new body on the
 exact arguments from that trajectory; a guard that never triggers on the failing task
-is dead code, not a fix). Then, if the optimization harness gives you an `./ablate`
-self-eval, **ablate the edit end-to-end** before keeping it: score it on its target
-task(s) + a few currently-passing tasks in its blast radius, and keep it only if the
-targets improve and no passing task regresses. A body that fires on the trace but
-regresses a passing task end-to-end must still be dropped or rescoped.
+is dead code, not a fix). These rows are independent: fix as MANY of them as appear in
+the trajectories in one candidate, not just the first — each guarded tool is its own
+bounded fix.
 
 | Trace symptom | Fix |
 |---------------|-----|

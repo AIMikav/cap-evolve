@@ -103,15 +103,12 @@ exists). Here is everything intake needs:
                 many tool docs, AND fix the prompt, together in ONE candidate, with each fix scoped to
                 protect passing tasks (non-regression). "Freedom" does NOT mean do little — a single
                 small edit is an under-used iteration; diagnose ALL clusters and fix as many as
-                possible. CRITICAL — the authored INSTRUCTIONS MUST encode the MANDATORY ABLATE-AND-MERGE
-                loop: the workdir ships a `./ablate` self-eval (scores a candidate dir on a TASK SUBSET
-                vs the parent `baseline_pertask.json`, with `--no-record` so it never touches the run's
-                score/budget); for EACH drafted edit the optimizer applies ONLY that edit to a clean copy
-                and runs `./ablate <target tasks> <protected passing tasks>`, KEEPS the edit only if its
-                targets improve and no protected task regresses, DROPS it otherwise (a flat target = not a
-                real fix), then merges all survivors and re-ablates the UNION to catch conflicts. This is
-                what stops two-way churn — breadth is filtered by ablation, not by a count cap; ship every
-                edit that survives. The authored INSTRUCTIONS MUST also encode all three: (i) a STEP-0 reading
+                possible. CRITICAL — the authored INSTRUCTIONS MUST demand BREADTH: each iteration
+                diagnoses EVERY failure cluster in the trajectories and ships a fix for as many of them
+                as pass the three tests (REAL/SAFE/VERIFIED) in this ONE candidate — solving many issues
+                across many trajectories, not just the biggest. A one- or two-edit iteration is
+                under-used; the only edits left out are the speculative ones that fail a test. The
+                authored INSTRUCTIONS MUST also encode all three: (i) a STEP-0 reading
                 mandate — "read ./guidance/<cap>/SKILL.md (for EACH selected cap) + ./guidance/optimizer/
                 before diagnosing"; (ii) the EXISTING-tool-code mandate — "convert violated rules into
                 in-code checks across MANY EXISTING tool bodies; most violated rules govern a tool that
@@ -170,9 +167,9 @@ exists). Here is everything intake needs:
                 per-task broke/fixed columns + the currently-passing tasks the harness lists to steer
                 AWAY from regressions (don't re-introduce a change that broke a task) WITHOUT freezing;
                 make a bold, multi-part edit across the selected capabilities (multiple edit classes,
-                incl. a NEW tool for any capability-gap/stall cluster); ABLATE each edit with ./ablate
-                (target + protected tasks), keep only survivors, merge and re-ablate the union; fill
-                ./PROCESS.md (per-edit ablation lines) and APPEND your entry to ./JOURNAL.md.
+                incl. a NEW tool for any capability-gap/stall cluster), scoping each edit to fire only
+                on its failing condition and confirming it doesn't change a passing task's behavior; fill
+                ./PROCESS.md (per-edit verify + blast-radius lines) and APPEND your entry to ./JOURNAL.md.
 
 # 6. BUDGET / GATE
 - algorithm:        hill-climb  (--focus all)

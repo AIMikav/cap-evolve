@@ -24,30 +24,16 @@ def main(argv=None) -> int:
     p.add_argument("--candidate", required=True, help="candidate id or dir to evaluate")
     p.add_argument("--split", default="val", choices=["train", "val"])
     p.add_argument("--n-trials", type=int, default=1)
-    p.add_argument("--task-ids", default=None,
-                   help="comma/space-separated subset of split ids to score (default: all). "
-                        "Used by the optimizer's ABLATION self-eval.")
-    p.add_argument("--no-record", action="store_true",
-                   help="ablation mode: do NOT touch the run's spend/events/rollouts (scratch only).")
-    p.add_argument("--out", default=None,
-                   help="write the result JSON to this file (robust against runner stdout noise).")
     args = p.parse_args(argv)
 
     run_dir = RunDir.open(Path(args.run_dir))
     adapter = load_adapter(Path(args.project))
     cand = Path(args.candidate)
     cand_dir = cand if cand.exists() else run_dir.candidate_dir(args.candidate)
-    task_ids = None
-    if args.task_ids:
-        task_ids = [t for t in args.task_ids.replace(",", " ").split() if t]
     result = harness.evaluate_candidate(adapter, cand_dir, run_dir=run_dir,
                                         split=args.split, n_trials=args.n_trials,
-                                        tag=cand_dir.name, task_ids=task_ids,
-                                        record=not args.no_record)
-    payload = json.dumps(result.to_dict(), indent=2)
-    if args.out:
-        Path(args.out).write_text(payload, encoding="utf-8")
-    print(payload)
+                                        tag=cand_dir.name)
+    print(json.dumps(result.to_dict(), indent=2))
     return 0
 
 

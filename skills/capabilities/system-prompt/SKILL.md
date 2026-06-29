@@ -156,12 +156,6 @@ that separates the qualifying cases — a prompt edit may only ADD knowledge or 
 never broaden a permission or flip a decision the agent currently gets right. If the
 condition cannot be expressed as a narrowing rule, it is out of scope for the prompt.
 
-**Ablate a prompt edit before you keep it.** If the harness provides an `./ablate`
-self-eval, score the edit on its target task(s) AND several currently-passing tasks in
-the same decision class (where refuse/escalate was the gold answer). Keep the edit only
-if the targets improve and NO passing task regresses — a prompt change is the easiest way
-to silently flip behavior on a whole class, and end-to-end ablation is what catches it.
-
 **Each prompt iteration should also CONSOLIDATE.** When a rule is now enforced
 deterministically elsewhere (no longer dependent on the prompt), REMOVE its
 now-redundant prose so the prompt stays sharp — the deterministic enforcement is
