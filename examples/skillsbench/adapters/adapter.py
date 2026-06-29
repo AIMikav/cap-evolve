@@ -85,27 +85,38 @@ class Adapter(CapabilityAdapter):
     # ---- running ---------------------------------------------------------
 
     def run_target(self, task: Task, ctx, *, seed: int = 0) -> Rollout:
-        """Run ONE SkillsBench task: a sonnet agent in Docker with the candidate
-        skills injected at /skills. ``ctx`` is the live candidate ``seed_capability``
-        dir (what ``live()`` yielded) — it IS ``--skills-dir``.
+        """Run ONE SkillsBench task — a thin wrapper over ``run_batch``."""
+        return self.run_batch([task], ctx, seed=seed).get(
+            task.id, Rollout(task_id=task.id, error="no rollout produced")
+        )
 
-        Embeds the BenchFlow artifacts (verifier reward + CTRF per-test results +
-        the agent transcript) INTO the Rollout so the optimizer reads the full,
-        per-candidate trace from cap-evolve's own rollout JSON. Sets ``Rollout.error``
-        on an infrastructure failure (the eval never produced a graded result).
+    def run_batch(self, tasks: list[Task], ctx, *, seed: int = 0) -> dict:
+        """Run ALL ``tasks`` in ONE ``bench eval run`` call, in parallel.
+
+        A sonnet agent runs each task in its own Docker container with the candidate
+        skills injected at /skills; ``--concurrency`` lets bench run many at once, so a
+        whole split evaluates in ~one task's wall-clock instead of the serial sum.
+
+        Embeds each task's BenchFlow artifacts (verifier reward + CTRF + transcript)
+        INTO its Rollout so the optimizer reads the full per-candidate trace from
+        cap-evolve's own rollout JSON. A task with no result under the batch dir ->
+        ``Rollout.error`` (infra). ``ctx`` is the live candidate dir == ``--skills-dir``.
         """
-        # bench runs from a DIFFERENT cwd (_BENCH_CWD), so every path handed to it
-        # must be ABSOLUTE — the harness passes ctx as a relative candidate dir.
+        if not tasks:
+            return {}
+        # bench runs from a DIFFERENT cwd (_BENCH_CWD), so every path handed to it must
+        # be ABSOLUTE — the harness passes ctx as a relative candidate dir. The jobs dir
+        # is UNIQUE per candidate AND per seed/trial so concurrent/repeated evals don't
+        # collide and bench doesn't resume a populated dir.
         candidate_dir = Path(ctx).resolve()
-        jobs_dir = self._jobs_dir(candidate_dir, task.id, seed)  # absolute (derived from candidate_dir)
+        jobs_dir = self._jobs_dir(candidate_dir, seed)
         jobs_dir.mkdir(parents=True, exist_ok=True)
         _BENCH_CWD.mkdir(parents=True, exist_ok=True)
 
-        # The candidate dir IS the optimizer's workdir: from iter 1 on it also holds
-        # scratch files (INSTRUCTIONS.md, PROCESS.md, guidance/, trajectories/, ...).
-        # Deploy ONLY the real skill sub-packages (immediate child dirs with a
-        # SKILL.md) so bench doesn't inject scratch as "skills" and corrupt the
-        # Dockerfile. COPY (not symlink) into a fresh temp dir — bench copytree's the
+        # Deploy ONLY the real skill sub-packages ONCE (immediate child dirs with a
+        # SKILL.md): the candidate dir is also the optimizer's workdir (scratch
+        # INSTRUCTIONS.md/PROCESS.md/guidance/...), and bench would inject those as
+        # "skills" and corrupt the Dockerfile. COPY (not symlink) — bench copytree's the
         # skills dir and SKIPS symlinked entries, so symlinks would deploy 0 files.
         skills_root = Path(tempfile.mkdtemp(prefix="skillsbench_skills_", dir=str(_BENCH_CWD)))
         for sub in sorted(candidate_dir.iterdir()):
@@ -114,64 +125,76 @@ class Adapter(CapabilityAdapter):
 
         try:
             env = anthropic_env.gateway_env()
-        except Exception as e:  # creds missing — infra error, not an agent failure
+        except Exception as e:  # creds missing — infra error for every task
             shutil.rmtree(skills_root, ignore_errors=True)
-            return Rollout(task_id=task.id, error=f"gateway credentials unavailable: {e}")
+            return {t.id: Rollout(task_id=t.id, error=f"gateway credentials unavailable: {e}")
+                    for t in tasks}
 
+        concurrency = min(len(tasks), int(os.environ.get("SKILLSBENCH_CONCURRENCY", "7")))
         cmd = [
             BENCH_BIN, "eval", "run",
             "--source-repo", SOURCE_REPO, "--source-path", SOURCE_PATH, "--source-ref", SOURCE_REF,
-            "--include", task.id,
             "--agent", AGENT, "--model", MODEL,
             "--sandbox", SANDBOX,
+            "--concurrency", str(concurrency),
             "--skill-mode", "with-skill", "--skills-dir", str(skills_root),
             "--jobs-dir", str(jobs_dir),
             "--agent-env", f"ANTHROPIC_BASE_URL={env['ANTHROPIC_BASE_URL']}",
             "--agent-env", f"ANTHROPIC_AUTH_TOKEN={env['ANTHROPIC_AUTH_TOKEN']}",
         ]
+        for t in tasks:
+            cmd += ["--include", t.id]
 
         # bench is verbose on stdout; the cap-evolve skills' stdout is a JSON contract,
-        # so capture bench output (don't let it leak to our stdout).
-        timeout_s = int(os.environ.get("SKILLSBENCH_TASK_TIMEOUT", "1800"))
+        # so capture bench output. Scale the timeout with the batch size (a parallel
+        # batch is ~one task long, but allow headroom when concurrency < len(tasks)).
+        per_task_s = int(os.environ.get("SKILLSBENCH_TASK_TIMEOUT", "1800"))
+        waves = (len(tasks) + concurrency - 1) // max(concurrency, 1)
+        timeout_s = per_task_s * max(waves, 1) + 600
         try:
             proc = subprocess.run(
                 cmd, cwd=str(_BENCH_CWD), capture_output=True, text=True, timeout=timeout_s
             )
+            launch_err = None
+            rc = proc.returncode
+            tail = (proc.stderr or proc.stdout or "")[-1500:]
         except subprocess.TimeoutExpired:
-            return Rollout(task_id=task.id, error=f"bench eval run timed out after {timeout_s}s",
-                           metadata={"jobs_dir": str(jobs_dir)})
+            launch_err = f"bench eval run timed out after {timeout_s}s"
+            rc, tail = None, ""
         except Exception as e:  # noqa: BLE001
-            return Rollout(task_id=task.id, error=f"bench eval run failed to launch: {e}")
+            launch_err = f"bench eval run failed to launch: {e}"
+            rc, tail = None, ""
         finally:
             shutil.rmtree(skills_root, ignore_errors=True)
 
-        reward, ctrf, found = _read_verifier(jobs_dir)
-        transcript = _read_transcript(jobs_dir)
-
-        if not found:
-            # No verifier reward materialized -> the rollout did not complete (infra).
-            tail = (proc.stderr or proc.stdout or "")[-1500:]
-            return Rollout(
-                task_id=task.id,
-                error=f"no verifier reward under {jobs_dir} (rc={proc.returncode}). tail: {tail}",
-                output=transcript,
-                metadata={"jobs_dir": str(jobs_dir), "ctrf": ctrf},
-            )
-
-        return Rollout(
-            task_id=task.id,
-            output=transcript,
-            trace=transcript,
-            cost_usd=0.0,  # gateway spend is not metered here (honest: not double-counted)
-            tokens=0,
-            error=None,
-            metadata={"reward": float(reward), "ctrf": ctrf, "jobs_dir": str(jobs_dir)},
-        )
-
-    def run_batch(self, tasks: list[Task], ctx, *, seed: int = 0) -> dict:
-        """Run each task serially through ``run_target`` (Docker rollouts are heavy;
-        the harness owns concurrency policy). Returns ``{task_id: Rollout}``."""
-        return {t.id: self.run_target(t, ctx, seed=seed) for t in tasks}
+        # Map EACH task's result out of the single batch jobs dir, keyed by task name.
+        results: dict[str, Rollout] = {}
+        for t in tasks:
+            if launch_err is not None:
+                results[t.id] = Rollout(task_id=t.id, error=launch_err,
+                                        metadata={"jobs_dir": str(jobs_dir)})
+                continue
+            task_dir = _task_jobs_dir(jobs_dir, t.id)
+            reward, ctrf, found = _read_verifier(task_dir)
+            transcript = _read_transcript(task_dir)
+            if not found:
+                results[t.id] = Rollout(
+                    task_id=t.id,
+                    error=f"no verifier reward for {t.id} under {jobs_dir} (rc={rc}). tail: {tail}",
+                    output=transcript,
+                    metadata={"jobs_dir": str(jobs_dir), "ctrf": ctrf},
+                )
+            else:
+                results[t.id] = Rollout(
+                    task_id=t.id,
+                    output=transcript,
+                    trace=transcript,
+                    cost_usd=0.0,  # gateway spend not metered here (honest: not double-counted)
+                    tokens=0,
+                    error=None,
+                    metadata={"reward": float(reward), "ctrf": ctrf, "jobs_dir": str(jobs_dir)},
+                )
+        return results
 
     # ---- scoring ---------------------------------------------------------
 
@@ -221,7 +244,7 @@ class Adapter(CapabilityAdapter):
         if ctx is None:
             return None
         ctx = Path(ctx)
-        d = self._jobs_root(ctx) / ctx.name / split
+        d = self._jobs_root(ctx) / ctx.name
         return d if d.is_dir() else None
 
     # ---- helpers ---------------------------------------------------------
@@ -243,19 +266,34 @@ class Adapter(CapabilityAdapter):
         return Path(__file__).resolve().parents[2] / ".bench_runs" / "default"
 
     @classmethod
-    def _jobs_dir(cls, candidate_dir: Path, task_id: str, seed: int) -> Path:
-        """Per-candidate, per-task jobs dir — UNIQUE per candidate.
+    def _jobs_dir(cls, candidate_dir: Path, seed: int) -> Path:
+        """The batch jobs dir — UNIQUE per candidate AND per seed/trial.
 
         ``candidate_dir.name`` is the candidate id (``seed``, ``cand_0001``, …). bench
         treats a ``--jobs-dir`` that already holds a completed result as DONE and skips
-        re-running; keying only by task+seed would make every candidate resume the
-        baseline's result. Namespacing by candidate id forces a fresh run per candidate."""
-        return cls._jobs_root(candidate_dir) / candidate_dir.name / "val" / f"{task_id}__seed{seed}"
+        re-running; keying by candidate id (and seed) forces a fresh run per candidate
+        and prevents concurrent/repeated evals from colliding. bench writes its own
+        per-task subdirs under this batch dir."""
+        return cls._jobs_root(candidate_dir) / candidate_dir.name / f"seed{seed}"
 
 
 # ---------------------------------------------------------------------------
 # Verifier / transcript readers + gold-safe feedback (module-level, pure)
 # ---------------------------------------------------------------------------
+
+
+def _task_jobs_dir(batch_dir: Path, task_id: str) -> Path:
+    """The per-task subtree for ``task_id`` within a batch jobs dir.
+
+    bench writes ``<batch>/<timestamp>/<task_id>__<hash>/...`` per task; scoping the
+    verifier/transcript read to that leaf isolates one task's result from its
+    batch-mates. Falls back to the whole batch dir if no leaf is found yet (the read
+    helpers then report "no reward" -> infra error, as for a task bench never ran)."""
+    if not batch_dir.is_dir():
+        return batch_dir
+    matches = sorted(d for d in batch_dir.rglob(f"{task_id}__*") if d.is_dir())
+    # Most recent match wins (a retried task can have multiple); deterministic by name.
+    return matches[-1] if matches else batch_dir
 
 
 def _read_verifier(jobs_dir: Path) -> tuple[float, dict, bool]:

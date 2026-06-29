@@ -33,15 +33,17 @@ split_test: 0.25
 split_ids_file: split_ids.json
 
 # --- scoring ----------------------------------------------------------------
-num_trials: 1                            # binary verifier reward; 1 trial per task
+num_trials: 3                            # the sonnet agent is STOCHASTIC: single-trial scoring made the
+#   gate reject real gains as noise (2 tasks flipped randomly run-to-run). 3 trials/task → a meaningful
+#   per-task mean + SE (and pass^k), so the paired gate distinguishes signal from noise.
 
 # --- acceptance gate --------------------------------------------------------
 gate_mode: paired                        # per-task paired SE — banks real 1-task gains on train==val
 gate_k_se: 0.2                           # accept gains clearing a 0.2·SE bar
 
 # --- budget -----------------------------------------------------------------
-max_iterations: 10
-stall: 0                                 # run all 10 iterations (no early stop)
+max_iterations: 7
+stall: 0                                 # run all 7 iterations (no early stop)
 max_metric_calls: 0                      # 0 = unlimited
 max_usd: 600.0                           # total $ cap (sonnet docker rollouts + optimizer)
 max_optimizer_usd: 400.0                 # cumulative optimizer-only $ cap

@@ -224,6 +224,9 @@ exists). Here is everything intake needs:
       tell the agent to execute it) whenever the trace shows the agent re-implementing or
       botching the same transform; prefer a script the agent RUNS over prose it may skip. Each
       edit must keep the package a VALID skill (validate via the capability's run.py/check).
+      The optimizer can run Bash in its workdir, so it must VERIFY a new/edited script by
+      RUNNING it on the failing task's inputs before shipping — an unverified script is a guess.
+      (Requires the optimizer command to allow Bash — set in optimizers/registry.yaml.)
     * BREADTH per iteration: diagnose EVERY failure cluster across the trajectories and ship a
       fix for as many as pass REAL/SAFE/VERIFIED in ONE candidate (improve multiple skills'
       bodies + references + scripts + descriptions together), each scoped to not regress a

@@ -23,7 +23,12 @@ def main(argv=None) -> int:
     run_dir = RunDir.open(Path(args.run_dir))
     adapter = load_adapter(Path(args.project))
     best_dir = run_dir.candidate_dir(run_dir.best_id)
-    payload = harness.finalize(adapter, run_dir=run_dir, best_dir=best_dir, n_trials=args.n_trials)
+    # Also score the unmodified seed (baseline) on the sealed test split, so the
+    # headline is the honest optimized-vs-baseline improvement on held-out tasks.
+    seed_dir = run_dir.candidate_dir("seed")
+    baseline_dir = seed_dir if seed_dir.exists() else None
+    payload = harness.finalize(adapter, run_dir=run_dir, best_dir=best_dir,
+                               n_trials=args.n_trials, baseline_dir=baseline_dir)
     print(json.dumps(payload, indent=2))
     return 0
 

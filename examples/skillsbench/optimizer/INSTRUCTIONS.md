@@ -117,6 +117,10 @@ helper the agent RUNS that performs the step correctly, and point the body at it
 intent. Reserve prose for genuine KNOWLEDGE gaps (a fact/format/criterion the agent cannot
 derive). For a hard-ZERO cluster a script is usually the only thing that moves it. Do NOT
 defer a needed script to "next iteration" — build it now; it is the highest-leverage edit.
+VERIFY BY RUNNING: you have Bash in this workdir — after adding/editing a script, RUN it
+(python / pytest / soffice) on the FAILING task's actual inputs and confirm it produces the
+corrected output BEFORE shipping. An unverified script is a guess; either verify it or drop it.
+Don't avoid scripts for fear you can't test them — you can, so test them.
 
 ## VERIFY-THE-FIX (do this for EACH kept edit — satisfies VERIFIED + SAFE)
 - **Body / procedure edit:** tie it to the exact failed verifier test in the trace (e.g.
