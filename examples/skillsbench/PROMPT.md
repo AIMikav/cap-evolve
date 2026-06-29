@@ -101,6 +101,15 @@ exists). Here is everything intake needs:
     and the rollout produces no graded result. A standalone `bench eval run` you type by
     hand with an absolute --skills-dir will PASS and HIDE this — so do not trust a
     hand-typed smoke; verify on the real cap-evolve path (next bullet).
+- UNIQUE JOBS DIR PER CANDIDATE (or every candidate scores the baseline): BenchFlow treats a
+    `--jobs-dir` that already holds a completed result as DONE and SKIPS re-running (resume
+    behavior). If run_target derives the jobs dir from only task+seed, the baseline and every
+    candidate share the same dir, so candidate evals are skipped and read the BASELINE's stale
+    result — every candidate ties the baseline (Δ=0, all rejected, ~10s evals). The jobs dir
+    MUST be UNIQUE PER CANDIDATE: include the candidate id (the candidate dir's name, e.g.
+    `seed`, `cand_0001`) in the path, e.g. `<run>/bench_jobs/<candidate>/<task>__seed<k>/`.
+    Symptom of this bug: a candidate eval that finishes in seconds with reward identical to the
+    baseline. (See the per-candidate verification below — a one-candidate smoke can't catch it.)
 - CLEAN SKILLS DIR (or the agent install breaks from iteration 1 on): the candidate dir
     (ctx) is ALSO the optimizer's workdir, so from iteration 1 it accumulates optimizer
     scratch files at the top level — INSTRUCTIONS.md, PROCESS.md, JOURNAL.md, LEDGER.md,
@@ -121,6 +130,14 @@ exists). Here is everything intake needs:
     MINUTES, ~4 min/task, not ~14s) and returns a real 0/1 reward with rollout.error
     null — an instant all-zero baseline means the rollouts errored (the absolute-path
     bug above). Only then is `cap-evolve check` + integration truly green end to end.
+    CRITICAL — also verify a SECOND, EDITED candidate, because a baseline-only smoke cannot
+    catch the candidate-specific bugs (scratch pollution, jobs-dir reuse): take the seed
+    skills, make a real edit to ONE skill, and run that as a separate candidate through the
+    SAME run_target/eval path. Confirm it (a) deploys exactly the four skill packages, (b)
+    actually re-runs in Docker (minutes, its OWN jobs subdir — NOT an instant ~10s eval that
+    reuses the baseline's result), and (c) its reward can DIFFER from the baseline. If the
+    second candidate finishes in seconds with the baseline's exact score, the jobs dir is not
+    unique per candidate (above) — fix it before trusting any iteration.
 - models + credentials:   the agent reaches the IBM-internal Anthropic-compatible
     LiteLLM gateway. Read ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN from the repo-root
     .env (copy them there from ~/.claude/settings.json's env block — base URL

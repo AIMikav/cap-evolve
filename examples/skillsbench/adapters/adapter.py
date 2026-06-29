@@ -220,7 +220,8 @@ class Adapter(CapabilityAdapter):
         and let cap-evolve fall back to its own rollout JSON (which has the trace)."""
         if ctx is None:
             return None
-        d = self._jobs_root(Path(ctx)) / split
+        ctx = Path(ctx)
+        d = self._jobs_root(ctx) / ctx.name / split
         return d if d.is_dir() else None
 
     # ---- helpers ---------------------------------------------------------
@@ -242,8 +243,14 @@ class Adapter(CapabilityAdapter):
         return Path(__file__).resolve().parents[2] / ".bench_runs" / "default"
 
     @classmethod
-    def _jobs_dir(cls, skills_dir: Path, task_id: str, seed: int) -> Path:
-        return cls._jobs_root(skills_dir) / "val" / f"{task_id}__seed{seed}"
+    def _jobs_dir(cls, candidate_dir: Path, task_id: str, seed: int) -> Path:
+        """Per-candidate, per-task jobs dir — UNIQUE per candidate.
+
+        ``candidate_dir.name`` is the candidate id (``seed``, ``cand_0001``, …). bench
+        treats a ``--jobs-dir`` that already holds a completed result as DONE and skips
+        re-running; keying only by task+seed would make every candidate resume the
+        baseline's result. Namespacing by candidate id forces a fresh run per candidate."""
+        return cls._jobs_root(candidate_dir) / candidate_dir.name / "val" / f"{task_id}__seed{seed}"
 
 
 # ---------------------------------------------------------------------------
