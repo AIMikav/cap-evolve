@@ -17,6 +17,25 @@ single speculative edit that breaks a passing task can sink an iteration of good
 did in prior runs). So the discipline is "many fixes, each one real and safe" — NOT "few
 fixes". Do not stop at the first cluster; work through them all.
 
+## EDIT BOTH ARTIFACTS, AND PREFER CODE (this is where prior iterations fell short)
+A strong iteration changes BOTH the prompt AND the tool CODE — many edits to each. The
+recurring failure mode to avoid: an iteration that just adds a few prose rules to the
+policy and (at most) rewords a docstring, leaving `tools.py` logic untouched. That is an
+under-used iteration even if it "covers" several clusters, because:
+- **A BEHAVIORAL miss is NOT fixed by a prose rule.** When the agent already "knows" the
+  rule but skips it (doesn't call get_*_details before acting, acts on a guess, re-asks
+  after consent, miscomputes a total) — adding ANOTHER prose rule it will skip the same
+  way does nothing. Enforce it in CODE: an in-body guard / validation / computation in
+  the EXISTING tool, or a composite tool that performs the whole action. Prose is reserved
+  for genuine KNOWLEDGE gaps (a fact/format/criterion the agent cannot derive).
+- **Do NOT defer a capability-gap cluster** ("would need a compute tool — next iteration").
+  If a cluster needs a compute/validation/composite tool, BUILD it THIS iteration — that
+  is the highest-leverage edit available, not something to postpone.
+So for each cluster, first ask "can this be enforced in `tools.py` code?" — if yes, do
+that; only fall back to a prompt rule for a true knowledge gap. Expect your `tools.py`
+diff to contain real CODE (guards, validations, new/changed tool bodies), not only
+docstring text — across SEVERAL tools, not one.
+
 ## The THREE TESTS every change must pass (this is the whole game)
 Before you keep any edit, confirm all three. Drop any edit that fails even one.
 1. **REAL** — it targets a cluster that is FAILING in THIS iteration's `./trajectories/`
@@ -48,9 +67,17 @@ cover safely, the bigger the gain. The only edits to leave out are the speculati
 anything `LEDGER.md` / `JOURNAL.md` show was already tried and rejected.
 
 ## Read these first (everything is in this working directory)
-- `./guidance/<cap>/SKILL.md` for EACH selected capability — your edit space, levers,
-  and worked examples. Read it before editing. (Tool code? also read `./guidance/sources/`
-  for the data models/types so your code is correct.)
+- **`./guidance/<cap>/SKILL.md` for EACH selected capability — READ IT IN FULL before you
+  edit; it is the MENU of improvement TYPES available to you.** Each capability skill lists
+  the concrete kinds of change you can make (for a tools capability: in-body validation
+  guards, normalization, computation, composite/atomic-write tools, loop/workflow tools,
+  enriched return values + actionable errors, add/remove tools, sharpened descriptions;
+  for a prompt capability: role/contract, decision-rule narrowing, missing-rule, worked
+  example, consolidation). Do not invent change types from memory — take them from the
+  skill, and deliberately apply MULTIPLE DIFFERENT types this iteration (e.g. several
+  in-body guards + a compute tool + enriched errors + a couple of prompt rules), matching
+  each cluster to the strongest type the skill describes for it. (Tool code? also read
+  `./guidance/sources/` for the data models/types so your code is correct.)
 - `./guidance/diagnose/SKILL.md` — the failure-clustering method. Use it.
 - `./trajectories/` — the FULL traces of the current best candidate (the step you build
   on). The `{{FAILURES}}` block below summarizes them with argument-level feedback — read
@@ -73,8 +100,10 @@ anything `LEDGER.md` / `JOURNAL.md` show was already tried and rejected.
    failures by shared root cause — total, partial-credit, AND communication/omission.
    RANK clusters by LEVERAGE = (# failing tasks × trials × score recoverable), biggest
    first — but plan to fix ALL of them this iteration, not only the top few.
-3. For EACH cluster, pick the right lever by FAILURE TYPE (next section) and draft the
-   edit. Run it through the THREE TESTS; keep it only if it passes all three.
+3. For EACH cluster, pick the strongest improvement TYPE from the capability SKILL(s)
+   (cross-check the FAILURE TYPE section next) and draft the edit. Across the iteration
+   use MULTIPLE different types from the skills, not the same one repeatedly. Run each
+   edit through the THREE TESTS; keep it only if it passes all three.
 4. Ship every passing edit together in this ONE candidate — cover as many clusters as you
    can SAFELY (that is the win), and never include an edit that fails a test.
 5. Fill `PROCESS.md` and APPEND your entry to `JOURNAL.md`. STOP.
@@ -177,9 +206,18 @@ CLASS, then write the general fix.
 ## Self-check before STOP
 - Every kept edit passes the THREE TESTS (REAL, SAFE, VERIFIED) and has its
   verify + blast-radius line in PROCESS.md. Drop any that doesn't.
-- You shipped several such edits, covering the top-ranked clusters you could fix SAFELY
-  — and you did NOT pad with speculative/cosmetic edits or re-add anything already
-  rejected (check LEDGER/JOURNAL).
+- You read each selected capability's `./guidance/<cap>/SKILL.md` and applied MULTIPLE
+  DIFFERENT improvement types it describes (not the same lever repeated).
+- You addressed EVERY failing cluster you found this iteration (not just the top few),
+  and did NOT defer a capability-gap cluster to "next iteration" — you built the tool now.
+- Your `tools.py` diff contains real CODE (in-body guards / validations / new or changed
+  tool bodies / a composite tool) across SEVERAL tools — NOT just docstring text. If the
+  only tools.py change is documentation, you under-used the iteration: convert the
+  behavioral / rule-violation / capability-gap clusters into code and try again.
+- Every BEHAVIORAL cluster (agent knows the rule but skips the action) is fixed in CODE,
+  not by adding another prose rule it will skip the same way.
+- You shipped many edits across BOTH policy.md AND tools.py — and you did NOT pad with
+  speculative/cosmetic edits or re-add anything already rejected (check LEDGER/JOURNAL).
 - For RULE-VIOLATION clusters on a tools capability, you used in-body guards on the
   existing tools (the default strong lever), not loose prose.
 - For DECISION / PERMISSION clusters you did NOT loosen or alter a global decision/
