@@ -84,10 +84,17 @@ anything `LEDGER.md` / `JOURNAL.md` show was already tried and rejected.
   the actual traces for the clusters you'll fix, don't rely on the summary alone.
 - `./LEDGER.md` — FACTS (read-only): every prior iteration's outcome + the exact tasks it
   broke/fixed. Your SAFE test starts here — never re-introduce a change that broke a task.
-- `./JOURNAL.md` — your append-only handover across the run. Skim it for what's been
-  tried and refuted; APPEND your entry at the end. Never re-try a refuted idea.
-- `./RUNMAP.md` + `./prior_iterations/<id>/` — prior iterations' PROCESS.md + diffs. Read
-  the one(s) that touched a cluster you're about to work on, so you build on them.
+- `./JOURNAL.md` — the accumulating handover. Each entry is the optimizer's INTENT, and
+  directly below it the framework stamps a **RESULT** line (objective: ACCEPTED/REJECTED ·
+  Δ · the exact tasks fixed/broke). The RESULT lines — not the intent — are the truth of
+  what worked: read them all before proposing. If the most recent RESULT is **REJECTED**,
+  its batch was reverted; read that entry's `./prior_iterations/<id>/diff.patch`, keep the
+  edits that did NOT appear in its `broke={...}`, and DROP or REDESIGN the ones that did —
+  do NOT resubmit the whole rejected batch, and do NOT abandon the cluster. APPEND your new
+  entry (intent only) below the marker; never edit earlier entries or re-try a refuted idea.
+- `./RUNMAP.md` + `./prior_iterations/<id>/` — EVERY prior iteration's (accepted AND
+  rejected) PROCESS.md + diff.patch. Read the one(s) that touched a cluster you're about to
+  work on, so you build on what worked and avoid repeating what regressed.
 - `./PROCESS.md` — your REQUIRED explainability file for THIS iteration (template inside).
 - `./guidance/optimizer/<name>.md` — your agent's subagent/parallelism features (optional).
 {{BENCH_REPO}}
@@ -192,11 +199,13 @@ CLASS, then write the general fix.
 - **PROCESS.md** (this iteration): the ranked cluster list (with leverage + RULE/GAP/
   KNOWLEDGE tag), every kept edit + its lever, the VERIFY-THE-FIX + blast-radius line per
   edit, what you deliberately skipped and why, and (if you used subagents) that you did.
-- **JOURNAL.md** (append one entry below the marker; never edit earlier entries):
-  what I tried (1 line/change) · what WORKED (only on a real gated gain; cite task ids/Δ)
-  · what REGRESSED and the verdict · refuted hypotheses (never re-test) · high-value
-  clusters not yet cracked + designs already tried · plateau signal + which lever to
-  switch to · focus next iteration.
+- **JOURNAL.md** (append ONE entry below the marker; never edit earlier entries). Write
+  INTENT only — you cannot know your gate result; the framework stamps the RESULT below
+  your entry: the changes I made (1 line/edit, naming the file/tool + cluster) · the
+  EXPECTED effect + why each is safe · which prior RESULTS I built on and which regressing
+  edits I did NOT re-try (cite ids) · refuted hypotheses (a prior RESULT disproved — never
+  re-test) · high-value clusters not yet cracked + designs already tried · plateau signal +
+  which lever to switch to · focus next iteration.
 
 {{FAILURES}}
 {{PASSING}}
