@@ -165,7 +165,7 @@ TOOL-REPLACEMENT PROTOCOL).
 **Generalize, never hardcode.** Every in-code guard must fire on the GENERAL
 condition that defines the failure class, never on a literal value from one task.
 *Good:* `if payment_id not in user_payment_methods: raise ...`. *Bad:*
-`if record_id == "ABC123": raise ...` — that overfits to one task, gets
+`if record_id == "<TASK_SPECIFIC_ID>": raise ...` — that overfits to one task, gets
 rejected by the held-out gate, and helps nothing else. Use a failing task's
 specifics only to identify the class, then write the general check.
 
@@ -299,7 +299,11 @@ Map the trace symptom to the code-bearing edit. Each row is a failure the model
 These four rows carry most of the recoverable gain — diagnose for them FIRST, and
 verify the fix you ship actually FIRES on the failing trace (run the new body on the
 exact arguments from that trajectory; a guard that never triggers on the failing task
-is dead code, not a fix).
+is dead code, not a fix). Then, if the optimization harness gives you an `./ablate`
+self-eval, **ablate the edit end-to-end** before keeping it: score it on its target
+task(s) + a few currently-passing tasks in its blast radius, and keep it only if the
+targets improve and no passing task regresses. A body that fires on the trace but
+regresses a passing task end-to-end must still be dropped or rescoped.
 
 | Trace symptom | Fix |
 |---------------|-----|

@@ -116,8 +116,9 @@ These are *how* to phrase a prompt edit so it actually changes behavior:
   doesn't conflate them.
 - **Generalize, never hardcode.** A prompt rule must state the GENERAL policy that
   holds across the whole class of inputs, never a specific task's case or answer.
-  *Good:* "Refund to the original payment method on file." *Bad:* "If the
-  record id is ABC123, refund $42." Baking one task's id/value/date/answer into
+  *Good:* "Reverse the charge to the original payment method on file." *Bad:* "If the
+  record id is <TASK_SPECIFIC_ID>, apply the exact amount that one task expects."
+  Baking one task's id/value/date/answer into
   the prompt overfits, fails the held-out gate, and can mislead other tasks. Use a
   failing task's specifics only to understand the class, then write the general rule.
 - **Ground new rules in a source; don't fabricate.** You MAY add a rule the source
@@ -154,6 +155,12 @@ only safe prompt fix is a NARROWING rule that states the EXACT discriminating pr
 that separates the qualifying cases — a prompt edit may only ADD knowledge or NARROW,
 never broaden a permission or flip a decision the agent currently gets right. If the
 condition cannot be expressed as a narrowing rule, it is out of scope for the prompt.
+
+**Ablate a prompt edit before you keep it.** If the harness provides an `./ablate`
+self-eval, score the edit on its target task(s) AND several currently-passing tasks in
+the same decision class (where refuse/escalate was the gold answer). Keep the edit only
+if the targets improve and NO passing task regresses — a prompt change is the easiest way
+to silently flip behavior on a whole class, and end-to-end ablation is what catches it.
 
 **Each prompt iteration should also CONSOLIDATE.** When a rule is now enforced
 deterministically elsewhere (no longer dependent on the prompt), REMOVE its

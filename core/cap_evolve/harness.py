@@ -136,10 +136,21 @@ def evaluate_candidate(
     ks=(1, 2),
     tag: str = "cand",
     base_seed: int | None = None,
+    task_ids: list[str] | None = None,
+    record: bool = True,
 ) -> SplitResult:
     """Run + score a candidate on a split with multi-trial honesty.
 
     Writes per-rollout JSON under the run dir, returns the aggregate SplitResult.
+
+    ``task_ids`` (optional) restricts scoring to that subset of the split's frozen
+    ids — used by the optimizer's mid-turn ABLATION self-eval, which scores ONE
+    edit on just its target + protected tasks (not the whole split). ``record``
+    controls whether the run's authoritative state is touched: when False (the
+    ablation path), per-rollout JSON goes to a scratch dir under ``candidate_dir``,
+    and the run's spend counters + ``evaluate`` event are NOT updated — so the
+    agent can ablate freely without polluting budget, events, or the real
+    rollouts/<split> files the gate + resume read.
 
     Per-trial seeds (W1): trial ``k`` is run with ``seed = base_seed + k`` so distinct
     trials are independent draws (real variance ⇒ honest pass^k + significance gate).
@@ -163,7 +174,12 @@ def evaluate_candidate(
             base_seed = 0
 
     tasks = _tasks_for(adapter, run_dir, split)
-    out_dir = run_dir.rollouts / split
+    if task_ids is not None:
+        want = set(task_ids)
+        tasks = [t for t in tasks if t.id in want]
+    # Ablation (record=False) writes scratch rollouts under the candidate dir so the
+    # authoritative rollouts/<split> files (read by the gate + resume) are untouched.
+    out_dir = (run_dir.rollouts / split) if record else (candidate_dir / ".ablate_rollouts")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     from .stats import mean, stderr
@@ -253,12 +269,14 @@ def evaluate_candidate(
         ))
 
     elapsed = time.time() - t0
-    run_dir.update_spent(metric_calls=len(tasks) * n_trials, usd=run_cost,
-                         runner_tokens=run_tokens, runner_seconds=elapsed)
     result = aggregate_scores(split, scores, ks=ks)
     result.cost_usd, result.tokens, result.seconds = run_cost, run_tokens, elapsed
-    run_dir.log_event("evaluate", split=split, tag=tag, reward=result.reward,
-                      stderr=result.stderr, cost_usd=run_cost, tokens=run_tokens, seconds=round(elapsed, 2))
+    if record:
+        run_dir.update_spent(metric_calls=len(tasks) * n_trials, usd=run_cost,
+                             runner_tokens=run_tokens, runner_seconds=elapsed)
+        run_dir.log_event("evaluate", split=split, tag=tag, reward=result.reward,
+                          stderr=result.stderr, cost_usd=run_cost, tokens=run_tokens,
+                          seconds=round(elapsed, 2))
     return result
 
 
@@ -500,7 +518,8 @@ _PROCESS_SEED = (
 # State/handover files that are NOT part of the capability — excluded from any
 # capability diff (kept in one place; mirrors dashboard._DIFF_SKIP).
 _CAP_DIFF_SKIP = {"INSTRUCTIONS.md", "MEMORY.md", "STATE.md",
-                  "LEDGER.md", "JOURNAL.md", "PROCESS.md", "RUNMAP.md"}
+                  "LEDGER.md", "JOURNAL.md", "PROCESS.md", "RUNMAP.md",
+                  "ablate", "baseline_pertask.json"}
 
 
 def _capability_files(d: Path) -> dict[str, str]:
@@ -909,9 +928,133 @@ def _copy_step_trajectories(adapter, run_dir: RunDir, workdir: Path, split: str)
         run_dir.log_event("optimizer_context_warning", what="trajectories", error=str(e)[:300])
 
 
+_ABLATE_WRAPPER = r'''#!/usr/bin/env python3
+"""ablate — score the CURRENT edit on a TASK SUBSET vs the parent baseline.
+
+Usage:  ./ablate [--cand DIR] [--trials N] TASK_ID [TASK_ID ...]
+
+Scores `--cand` (default: this working directory) on just the given task ids and
+prints, per task, the parent baseline reward, this candidate's reward, the delta,
+and a verdict. Use it to check ONE edit before you keep it: pass the edit's TARGET
+task(s) and the PASSING tasks it might touch (its blast radius). Keep the edit only
+if its targets improve and no passing task regresses.
+
+This is a self-check ONLY — it never changes the run's score, budget, or events; the
+harness still does the authoritative final re-score after you STOP.
+"""
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+PY = __PY__
+EVAL = __EVAL__
+RUN_DIR = __RUN_DIR__
+PROJECT = __PROJECT__
+DEFAULT_TRIALS = __N_TRIALS__
+HERE = Path(__file__).resolve().parent
+
+
+def main(argv):
+    cand, trials, ids = ".", DEFAULT_TRIALS, []
+    args = list(argv)
+    while args:
+        a = args.pop(0)
+        if a == "--cand":
+            cand = args.pop(0)
+        elif a in ("--trials", "--n-trials"):
+            trials = int(args.pop(0))
+        elif a.startswith("--"):
+            sys.stderr.write("ablate: unknown flag " + a + "\n")
+            return 2
+        else:
+            ids.append(a)
+    if not ids:
+        sys.stderr.write(__doc__)
+        return 2
+    cand_abs = str(Path(cand).resolve())
+    out = HERE / ".ablate_result.json"
+    cmd = [PY, EVAL, "--run-dir", RUN_DIR, "--project", PROJECT, "--candidate", cand_abs,
+           "--split", "val", "--n-trials", str(trials), "--task-ids", ",".join(ids),
+           "--no-record", "--out", str(out)]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 or not out.exists():
+        sys.stderr.write(proc.stderr or "")
+        sys.stderr.write("\nablate: evaluation failed (see stderr above)\n")
+        return 1
+    data = json.loads(out.read_text(encoding="utf-8"))
+    per = {s["task_id"]: float(s.get("reward", 0.0)) for s in data.get("per_task", [])}
+    bpath = HERE / "baseline_pertask.json"
+    base = json.loads(bpath.read_text(encoding="utf-8")) if bpath.exists() else {}
+    regressed, improved = [], []
+    print("%-18s %9s %10s %8s  verdict" % ("task", "baseline", "candidate", "delta"))
+    for t in ids:
+        b = float(base.get(t, 0.0))
+        c = per.get(t, 0.0)
+        d = c - b
+        verdict = "REGRESSED" if d < -1e-9 else ("improved" if d > 1e-9 else "flat")
+        if d < -1e-9:
+            regressed.append(t)
+        elif d > 1e-9:
+            improved.append(t)
+        print("%-18s %9.3f %10.3f %+8.3f  %s" % (t, b, c, d, verdict))
+    tail = ("DROP this edit — it regresses " + ",".join(regressed)) if regressed else "no regression."
+    print("\nsummary: %d improved, %d REGRESSED (trials=%d). %s"
+          % (len(improved), len(regressed), trials, tail))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+'''
+
+
+def _inject_ablation_kit(run_dir: RunDir, workdir: Path, *, parent_val, n_trials: int,
+                         project_dir: Path | None, repo_root: Path) -> None:
+    """Write the ABLATION self-eval kit into the optimizer workdir.
+
+    Two files (both in ``_SNAPSHOT_IGNORE`` so they never enter candidate diffs):
+      - ``baseline_pertask.json`` — the PARENT candidate's per-task reward (the
+        numbers the optimizer's edits are compared against), straight from the
+        already-computed parent ``SplitResult.per_task`` (no re-eval).
+      - ``ablate`` — an executable wrapper that scores a candidate on a task SUBSET
+        via the generic evaluate entrypoint with ``--no-record`` (never touches the
+        run's authoritative state) and prints per-task baseline/candidate/delta.
+
+    Harness-agnostic: any optimizer agent can call ``./ablate`` sequentially. Skipped
+    silently if the project dir is unknown (nothing to score against).
+    """
+    if project_dir is None:
+        return
+    try:
+        per_task = getattr(parent_val, "per_task", None) or []
+        baseline = {}
+        for s in per_task:
+            tid = s.get("task_id") if isinstance(s, dict) else getattr(s, "task_id", None)
+            rew = s.get("reward") if isinstance(s, dict) else getattr(s, "reward", None)
+            if tid is not None and rew is not None:
+                baseline[tid] = round(float(rew), 6)
+        (workdir / "baseline_pertask.json").write_text(
+            json.dumps(baseline, indent=2), encoding="utf-8")
+
+        eval_script = repo_root / "skills" / "phases" / "evaluate" / "scripts" / "run.py"
+        wrapper = (_ABLATE_WRAPPER
+                   .replace("__PY__", repr(sys.executable))
+                   .replace("__EVAL__", repr(str(eval_script)))
+                   .replace("__RUN_DIR__", repr(str(run_dir.root)))
+                   .replace("__PROJECT__", repr(str(project_dir)))
+                   .replace("__N_TRIALS__", repr(int(n_trials))))
+        ablate_path = workdir / "ablate"
+        ablate_path.write_text(wrapper, encoding="utf-8")
+        ablate_path.chmod(0o755)
+    except Exception as e:  # noqa: BLE001 — never let the optional kit break a step
+        run_dir.log_event("optimizer_context_warning", what="ablation_kit", error=str(e)[:300])
+
+
 def _inject_optimizer_context(adapter, run_dir: RunDir, workdir: Path, *, split: str,
                               capabilities=None, optimizer_name: str | None = None,
-                              capability_sources=None, project_dir: Path | None = None) -> None:
+                              capability_sources=None, project_dir: Path | None = None,
+                              parent_val=None, n_trials: int = 1) -> None:
     """Give the optimizer everything it needs to read, inside its own working dir.
 
     Copies, VERBATIM and without parsing:
@@ -1010,6 +1153,11 @@ def _inject_optimizer_context(adapter, run_dir: RunDir, workdir: Path, *, split:
     # native placement (./guidance/ still works).
     if optimizer_name:
         _inject_native_skills(run_dir, workdir, caps, repo_root, optimizer_name)
+
+    # 6) the ABLATION self-eval kit (baseline_pertask.json + ./ablate). Harness-agnostic:
+    # every optimizer can call ./ablate sequentially to verify each edit before keeping it.
+    _inject_ablation_kit(run_dir, workdir, parent_val=parent_val, n_trials=n_trials,
+                         project_dir=project_dir, repo_root=repo_root)
 
 
 def _inject_native_skills(run_dir: RunDir, workdir: Path, caps, repo_root: Path,
@@ -1158,7 +1306,8 @@ def run_step(
     # Give the optimizer the full trajectories + capability guidance, in its own dir.
     _inject_optimizer_context(adapter, run_dir, workdir, split=eval_split,
                               capabilities=capabilities, optimizer_name=optimizer_name,
-                              capability_sources=capability_sources, project_dir=project_dir)
+                              capability_sources=capability_sources, project_dir=project_dir,
+                              parent_val=current_val, n_trials=n_trials)
 
     instructions = _augment_instructions(instructions, workdir, run_dir, rejected, history)
 
@@ -1488,7 +1637,8 @@ _DEFAULT_INSTRUCTIONS_TEMPLATE = (
 _SNAPSHOT_IGNORE = ("trajectories", "guidance", "prior_iterations",
                     "LEDGER.md", "JOURNAL.md", "RUNMAP.md",
                     ".claude", ".agents", ".gemini", ".opencode", ".bob",
-                    "CLAUDE.md", "AGENTS.md", "GEMINI.md")
+                    "CLAUDE.md", "AGENTS.md", "GEMINI.md",
+                    "ablate", "baseline_pertask.json", ".ablate_rollouts")
 
 
 def _failures_block(always_fail, flaky, errored) -> str:
@@ -1525,9 +1675,43 @@ def _failures_block(always_fail, flaky, errored) -> str:
     return "\n".join(lines)
 
 
+def _optimizer_parallel(optimizer_name: str | None) -> bool:
+    """Whether the resolved optimizer's harness can spawn parallel subagents.
+
+    Reads the optional ``parallel: "true"`` flag from the optimizer registry row.
+    Best-effort: an unknown agent / unreadable registry ⇒ False (sequential). This
+    gates ONLY the fan-out guidance; the ./ablate self-eval is injected regardless.
+    """
+    if not optimizer_name:
+        return False
+    try:
+        repo_root = Path(__file__).resolve().parents[2]
+        reg_path = repo_root / "skills" / "optimizers" / "registry.yaml"
+        if not reg_path.is_file():
+            return False
+        from .specfile import read_yaml
+        registry = read_yaml(reg_path.read_text(encoding="utf-8")) or {}
+        row = registry.get(optimizer_name) or {}
+        return str(row.get("parallel") or "").strip().lower() == "true"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _parallel_note(parallel: bool, optimizer_name: str | None) -> str:
+    """The {{PARALLEL_NOTE}} block — gates the fan-out on the agent's capability."""
+    if parallel:
+        ref = f"./guidance/optimizer/{optimizer_name}.md" if optimizer_name else "./guidance/optimizer/"
+        return ("Your agent supports parallel subagents/worktrees (see " + ref + "). In the "
+                "IMPLEMENT phase you MAY fan out one subagent per issue, each in its own "
+                "worktree/copy, then ablate and merge their edits per the loop below.")
+    return ("Your agent runs single-threaded (no subagents). Implement and ablate your edits "
+            "ONE AT A TIME — the ABLATE-AND-MERGE loop below is identical, just sequential.")
+
+
 def _focus_instructions(current_val: SplitResult, focus_ids, label: str,
                         capabilities=None, algorithm: str = "hill-climb",
-                        instructions_file=None, bench_repo: str | None = None) -> str:
+                        instructions_file=None, bench_repo: str | None = None,
+                        optimizer_name: str | None = None) -> str:
     """Render one iteration's INSTRUCTIONS by substituting dynamic blocks into the
     optimizer-instructions template.
 
@@ -1556,6 +1740,7 @@ def _focus_instructions(current_val: SplitResult, focus_ids, label: str,
              "you may consult to understand tools, scoring, or task structure."
              if bench_repo else "")
 
+    parallel_note = _parallel_note(_optimizer_parallel(optimizer_name), optimizer_name)
     repl = {
         "{{FOCUS_SUMMARY}}": focus_summary,
         "{{FAILURES}}": failures,
@@ -1563,6 +1748,7 @@ def _focus_instructions(current_val: SplitResult, focus_ids, label: str,
         "{{CAP_BRIEF}}": cap,
         "{{ALGO_BRIEF}}": algo,
         "{{BENCH_REPO}}": bench,
+        "{{PARALLEL_NOTE}}": parallel_note,
     }
 
     tmpl_path = Path(instructions_file) if instructions_file else _DEFAULT_INSTRUCTIONS_TEMPLATE
@@ -1667,7 +1853,7 @@ def hill_climb_loop(
         instructions = _focus_instructions(current_val, focus_ids, label,
                                             capabilities=capabilities, algorithm=algorithm,
                                             instructions_file=instructions_file,
-                                            bench_repo=bench_repo)
+                                            bench_repo=bench_repo, optimizer_name=optimizer_name)
         step = run_step(
             adapter, run_dir=run_dir, parent_dir=run_dir.candidate_dir(run_dir.best_id),
             optimizer=optimizer, instructions=instructions, current_val=current_val,

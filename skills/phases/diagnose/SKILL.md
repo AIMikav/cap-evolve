@@ -107,7 +107,9 @@ edits**, never patch blindly:
    passing task in that radius; and cross-check the run history (LEDGER / prior
    iterations) to SKIP any cluster whose fix was already tried and rejected (don't
    re-diagnose a refuted approach). A cluster's value is the score it can recover MINUS
-   the regression risk to its blast radius.
+   the regression risk to its blast radius. The blast-radius tasks you name here become
+   the **protected set** the optimizer ablates each edit against — so list concrete
+   passing task ids per cluster, not just "the same tool", whenever you can.
    Then name (b) the GOOD behaviors that occur only *sometimes* (tasks whose mean
    reward is between 0 and 1 pass on some trials and fail on others); identify what
    the good runs do so it can be made CONSISTENT. (Always-failing tasks, mean ≈ 0,

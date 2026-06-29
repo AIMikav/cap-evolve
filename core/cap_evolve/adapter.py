@@ -24,8 +24,8 @@ mutate the host. We split the two concerns:
     for the duration of one evaluation, and tears the live state down on exit.
     The yielded ``ctx`` defaults to ``candidate_dir`` so ``run_target``/``run_batch``
     signatures line up unchanged. The default ``live`` calls the still-supported
-    ``apply(candidate_dir)`` on enter, so adapters that define ``apply`` (e.g. tau2,
-    which injects a policy) keep working with no edit.
+    ``apply(candidate_dir)`` on enter, so adapters that define ``apply`` (e.g. one that
+    injects a candidate policy/toolset into the runner) keep working with no edit.
 
 ``apply(edits=None)`` remains a supported back-compat hook: "make the capability
 in ``candidate_dir`` the one the target actually uses" (prior work's *inject*).
@@ -116,8 +116,8 @@ class CapabilityAdapter(ABC):
         A context manager yielding the ``ctx`` the runner uses. The default yields
         ``candidate_dir`` itself (so ``run_target``/``run_batch`` keep their
         signatures) and, for back-compat, calls ``self.apply(candidate_dir)`` on
-        enter — that is how adapters that historically defined ``apply`` (e.g. tau2
-        injecting a policy) keep working unchanged. Override ``live`` when the live
+        enter — that is how adapters that historically defined ``apply`` (e.g. one
+        injecting a candidate policy) keep working unchanged. Override ``live`` when the live
         state needs explicit teardown, or to yield a richer ``ctx`` (a sandbox
         handle, a worktree path) so independent candidates can run concurrently
         without sharing a single global slot.
@@ -131,7 +131,7 @@ class CapabilityAdapter(ABC):
     def apply(self, candidate_dir: Path, edits: dict | None = None) -> None:
         """Back-compat hook: make ``candidate_dir`` the one the target uses.
 
-        Still supported so existing adapters (tau2 → inject) need no change. New
+        Still supported so existing adapters (apply → inject) need no change. New
         adapters should prefer the ``materialize`` (pure write) + ``live`` (context
         manager) split. The default ``apply`` materializes ``edits`` (if any) and
         otherwise does nothing global — a benchmark adapter overrides it to inject.
