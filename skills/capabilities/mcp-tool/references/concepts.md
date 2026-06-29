@@ -60,7 +60,7 @@ presentation. Mapped to this capability's actions:
 | which tools the model sees (`add`/`remove`) | client/host curation | yes |
 | `inputSchema` (types, required, enums) | **server** | no |
 | handler `code` / behavior | **server** | no |
-| a new composite that runs code | needs server code | no (compose agent-side via `tools`) |
+| a new composite that runs code | needs server code | no (out of scope: server owns the code) |
 
 A server can also change its tool list at runtime and emit
 `notifications/tools/list_changed`; treat `add`/`remove` as *your curation* of the
@@ -125,8 +125,8 @@ re-contract.
    stand out; selection degrades as the set grows.
 4. **Never document capabilities the server lacks** — overpromising causes
    confident wrong calls.
-5. If you need a real schema constraint or new behavior, that's a server change or
-   an agent-owned wrapper in [`tools`](../../tools/SKILL.md) — not an `mcp-tool` edit.
+5. If you need a real schema constraint or new behavior, that's a server change or an
+   agent-owned wrapper (a different capability) — out of scope for an `mcp-tool` edit.
 
 ## Sources
 

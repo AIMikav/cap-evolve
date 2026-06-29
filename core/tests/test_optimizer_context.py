@@ -85,3 +85,26 @@ def test_injects_trajectories_and_guidance_then_excludes_from_snapshot(tmp_path)
     assert snap.exists()
     assert not (snap / "trajectories").exists()
     assert not (snap / "guidance").exists()
+
+    # The framework folds an objective RESULT line into the run-level JOURNAL after the
+    # gate (the optimizer cannot know its own gate result while writing its entry).
+    journal = (run_dir.root / "JOURNAL.md").read_text(encoding="utf-8")
+    assert "RESULT (framework" in journal
+    assert ("ACCEPTED" in journal) or ("REJECTED" in journal)
+
+
+def test_parallel_note_gated_by_optimizer_capability():
+    """{{PARALLEL_NOTE}} fans out subagents only for a parallel-capable optimizer
+    (claude-code); a non-parallel one (mock) is told to cover clusters in turn."""
+    from cap_evolve import harness
+
+    assert harness._optimizer_parallel("claude-code") is True
+    assert harness._optimizer_parallel("mock") is False
+    assert harness._optimizer_parallel(None) is False
+
+    on = harness._parallel_note(True, "claude-code")
+    off = harness._parallel_note(False, "mock")
+    assert "fan out" in on.lower()
+    assert "fan out" not in off.lower()
+    # both still push breadth — many clusters in one candidate
+    assert "many" in on.lower() and "many" in off.lower()

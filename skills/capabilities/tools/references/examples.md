@@ -205,10 +205,10 @@ on the next turn instead of corrupting the record. (Verify the fix: run this bod
 the exact id from the failing trace and confirm it returns `available` rather than
 calling through.)
 
-## 3c-quater. A required, eligible action abandoned via bail-out / transfer-to-human — encapsulate the batch as a COMPOSITE WRITE
+## 3c-quater. A required, eligible action abandoned via bail-out / escalation — encapsulate the batch as a COMPOSITE WRITE
 
-Trace symptom (FIRST-CLASS, behavioral): the agent calls `transfer_to_human` /
-escalates / bails out instead of performing a REQUIRED action it was eligible to do
+Trace symptom (FIRST-CLASS, behavioral): the agent escalates / hands off to a human /
+bails out instead of performing a REQUIRED action it was eligible to do
 itself — often a batch of similar writes (cancel each eligible line, refund each
 qualifying charge). This is a behavioral STALL, not a missing capability; a "don't
 bail out" prose rule does not fix it. Encapsulate the eligible-action batch in ONE

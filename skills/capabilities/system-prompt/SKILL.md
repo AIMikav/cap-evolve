@@ -33,9 +33,13 @@ that fixes the biggest failure cluster. (1-line generic examples; depth in
    distinct constraint. *Ex:* three "confirm before deleting" lines → one "Confirm
    before any destructive action (delete, overwrite, send)."
 4. **Add a missing rule grounded in the source/policy** — add a rule the source
-   requires but the prompt omits (must trace to a real source, never invented).
+   requires but the prompt omits (must trace to a real source, never invented). The
+   added rule must be ADDITIVE (a constraint/predicate the prompt lacked) or NARROWING
+   (a stricter condition) — NEVER one that LOOSENS or broadens an existing
+   permission/decision, which regresses the whole class.
    *Ex:* source says refunds need a manager code → "Require a manager code before
-   any refund."
+   any refund." (A *narrowing* add. Adding "anyone may refund without a code" would be
+   a loosening — forbidden.)
 5. **Add an example** — 1, up to 3–5, `<example>`-tagged exemplars to pin format.
    *Ex:* add one `<example>` showing the exact JSON envelope expected.
 6. **Reorder** — long context/data to the top, query + instructions last; group
@@ -49,9 +53,9 @@ that fixes the biggest failure cluster. (1-line generic examples; depth in
    counts, balances), the contract must require the agent to STATE each computed figure
    explicitly in its final message. The agent often performs the DB action correctly
    but never reports the number, and the eval marks the omission as a miss. This is a
-   KNOWLEDGE / output-contract gap — prose-fixable here — and is DISTINCT from a DB
-   action (a missing write belongs in the [`tools`](../tools/SKILL.md) capability, not
-   in prose). *Ex:* "After computing a total/refund/savings, state the exact figure in
+   KNOWLEDGE / output-contract gap — prose-fixable here — and is DISTINCT from a missing
+   DB action/write (a behavioral execution failure, which prose cannot fix and is out of
+   scope for this capability). *Ex:* "After computing a total/refund/savings, state the exact figure in
    your final message (e.g. 'Your refund is $42.00')."
 9. **Soften over-strong language** — downgrade `CRITICAL/MUST/ALWAYS` to "Use …
    when …" when a cluster shows over-eagerness/over-triggering on current models.
@@ -76,6 +80,17 @@ The good practices, failure modes, and the full never-drop rule are in
   the cheapest class to fix.
 - **Decision rules** — when to call which tool, when to ask vs. act, refusal
   rules (many agents are scored on adherence to such decision rules).
+  **DANGER — a global decision/permission/refusal rule has UNBOUNDED blast radius.**
+  Loosening or broadening one to fix a failing cluster (e.g. relaxing "restricted
+  records may not be modified", or "any role may approve the request") flips behavior
+  for the WHOLE class and
+  regresses every currently-passing task where the original, stricter behavior was the
+  gold answer. NEVER loosen a global decision rule to fix a cluster. If a cluster needs
+  different behavior, state the EXACT discriminating CONDITION that NARROWS the rule to
+  the qualifying cases only. A prompt edit to a decision rule is safe ONLY when it ADDS
+  a predicate the agent lacked or NARROWS the rule — never when it broadens a permission
+  or flips a decision the
+  agent currently gets right.
 - **Few-shot exemplars / reasoning scaffolds** — 3–5 diverse, relevant examples
   wrapped in `<example>` tags steer format (caveat: long example dumps can hurt
   reasoning models — keep it to a handful).
@@ -101,8 +116,9 @@ These are *how* to phrase a prompt edit so it actually changes behavior:
   doesn't conflate them.
 - **Generalize, never hardcode.** A prompt rule must state the GENERAL policy that
   holds across the whole class of inputs, never a specific task's case or answer.
-  *Good:* "Refund to the original payment method on file." *Bad:* "If the
-  reservation is ABC123, refund $42." Baking one task's id/value/date/answer into
+  *Good:* "Reverse the charge to the original payment method on file." *Bad:* "If the
+  record id is `<TASK_SPECIFIC_ID>`, apply the exact amount that one task expects."
+  Baking one task's id/value/date/answer into
   the prompt overfits, fails the held-out gate, and can mislead other tasks. Use a
   failing task's specifics only to understand the class, then write the general rule.
 - **Ground new rules in a source; don't fabricate.** You MAY add a rule the source
@@ -113,31 +129,40 @@ These are *how* to phrase a prompt edit so it actually changes behavior:
   two existing rules conflict, rewrite toward the more restrictive one rather than
   dropping either.
 
-## Prose fixes KNOWLEDGE gaps, not BEHAVIORAL ones
+## Prose fixes KNOWLEDGE gaps — behavioral failures are OUT OF SCOPE here
 The system prompt is the right lever when a failure is a *knowledge* gap — the
 agent doesn't know the required output format, a decision criterion, or a rule.
 Telling it teaches it, and behavior changes. The prompt is the WRONG lever when a
 failure is *behavioral* — the agent already "knows" what to do (it analyzes,
 explains, even confirms) but then skips the action (e.g. stalls before issuing a
 write and stops). More prose does not fix a behavior the model already agreed to
-and declined; that class of failure belongs in the agent's tools/code (see the
-[`tools`](../tools/SKILL.md) capability — encapsulate the action so it can't be
-skipped). Diagnose every cluster as KNOWLEDGE (fix here) vs BEHAVIORAL (fix in
-code) before reaching for a prompt edit.
+and declined: that class of failure is OUT OF SCOPE for the prompt — only enforcing
+the action deterministically (outside this capability) fixes it. So before reaching
+for a prompt edit, classify each cluster as KNOWLEDGE (fix here) vs behavioral
+(not a prompt fix), and spend prose only on the knowledge gaps.
 
 **If a rule is a VIOLATION the agent commits despite knowing it (not a knowledge
-gap), do NOT add prose — flag it for an in-code check in the tool body** (the
-[`tools`](../tools/SKILL.md) capability: convert the violated rule into an in-body
-guard on the EXISTING tool that owns it). Adding another sentence to a rule the
-agent already read and broke just grows the prompt without changing behavior.
+gap), do NOT add prose.** Adding another sentence to a rule the agent already read
+and broke just grows the prompt without changing behavior — a known-but-broken rule
+needs deterministic enforcement the prompt cannot provide, so it is out of scope here.
 
-**Each prompt iteration should also CONSOLIDATE.** When a rule now lives in tool
-code (an in-body guard enforces it deterministically), REMOVE its now-redundant
-prose so the prompt stays sharp — the deterministic check is authoritative and the
-duplicate sentence only dilutes attention. This prevents prose pile-up: as
-behavioral rules migrate into code, the prompt should get shorter, not longer.
+**A DECISION / PERMISSION cluster is NOT a knowledge gap — never loosen a global rule
+to fix it.** When a cluster shows the agent making the wrong ACT-vs-REFUSE call, the
+agent usually already "knows" the rule; the real condition is just more specific than
+the prose. Relaxing the global rule makes the agent act on the WHOLE class and regresses
+every task where refusing/escalating was the gold answer (unbounded blast radius). The
+only safe prompt fix is a NARROWING rule that states the EXACT discriminating predicate
+that separates the qualifying cases — a prompt edit may only ADD knowledge or NARROW,
+never broaden a permission or flip a decision the agent currently gets right. If the
+condition cannot be expressed as a narrowing rule, it is out of scope for the prompt.
+
+**Each prompt iteration should also CONSOLIDATE.** When a rule is now enforced
+deterministically elsewhere (no longer dependent on the prompt), REMOVE its
+now-redundant prose so the prompt stays sharp — the deterministic enforcement is
+authoritative and the duplicate sentence only dilutes attention. This prevents prose
+pile-up: the prompt should get shorter as constraints become enforced, not longer.
 (This is consolidation under the never-drop rule — the constraint still lives,
-now in code, so removing its prose drops no rule.)
+enforced elsewhere, so removing its prose drops no rule.)
 
 ## How agents use it
 The prompt is prepended to context every turn. Agents read it literally and are

@@ -103,7 +103,12 @@ exists). Here is everything intake needs:
                 many tool docs, AND fix the prompt, together in ONE candidate, with each fix scoped to
                 protect passing tasks (non-regression). "Freedom" does NOT mean do little — a single
                 small edit is an under-used iteration; diagnose ALL clusters and fix as many as
-                possible. The authored INSTRUCTIONS MUST encode all three: (i) a STEP-0 reading
+                possible. CRITICAL — the authored INSTRUCTIONS MUST demand BREADTH: each iteration
+                diagnoses EVERY failure cluster in the trajectories and ships a fix for as many of them
+                as pass the three tests (REAL/SAFE/VERIFIED) in this ONE candidate — solving many issues
+                across many trajectories, not just the biggest. A one- or two-edit iteration is
+                under-used; the only edits left out are the speculative ones that fail a test. The
+                authored INSTRUCTIONS MUST also encode all three: (i) a STEP-0 reading
                 mandate — "read ./guidance/<cap>/SKILL.md (for EACH selected cap) + ./guidance/optimizer/
                 before diagnosing"; (ii) the EXISTING-tool-code mandate — "convert violated rules into
                 in-code checks across MANY EXISTING tool bodies; most violated rules govern a tool that
@@ -162,8 +167,9 @@ exists). Here is everything intake needs:
                 per-task broke/fixed columns + the currently-passing tasks the harness lists to steer
                 AWAY from regressions (don't re-introduce a change that broke a task) WITHOUT freezing;
                 make a bold, multi-part edit across the selected capabilities (multiple edit classes,
-                incl. a NEW tool for any capability-gap/stall cluster); fill ./PROCESS.md and APPEND
-                your entry to ./JOURNAL.md.
+                incl. a NEW tool for any capability-gap/stall cluster), scoping each edit to fire only
+                on its failing condition and confirming it doesn't change a passing task's behavior; fill
+                ./PROCESS.md (per-edit verify + blast-radius lines) and APPEND your entry to ./JOURNAL.md.
 
 # 6. BUDGET / GATE
 - algorithm:        hill-climb  (--focus all)
@@ -171,7 +177,7 @@ exists). Here is everything intake needs:
 - per-iteration optimizer $ cap:  optimizer_usd_per_iter 40   (claude --max-budget-usd, enforced by the CLI itself)
 - optimizer_max_turns: 400      (generous; the $ cap is the real per-iteration ceiling)
 - max_usd: 400      max_optimizer_usd: 400
-- gate:             significant (paired), k_se 0.2
+- gate:             paired (per-task paired SE — banks real 1-task gains), k_se 0.2
 - store:            git          (every iteration committed for an inspectable process)
 ```
 

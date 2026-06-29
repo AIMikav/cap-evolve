@@ -20,9 +20,9 @@ output contract, an unstated rule, an ambiguous criterion — telling the agent
 fixes it. Prose is WEAK for BEHAVIORAL failures the model already "knows" but
 skips: it analyzes, explains, confirms, then fails to perform the action (the
 classic stall before a write). You cannot instruct a model out of a behavior it
-already agreed to and then declined — that class belongs in the tools/code
-capability (encapsulate the action so it executes in code). Classify each failure
-cluster before editing: knowledge → here; behavioral → tools.
+already agreed to and then declined — that class is OUT OF SCOPE for the prompt; it
+needs the action enforced deterministically (outside this capability). Classify each
+failure cluster before editing and spend prose only on the knowledge gaps.
 
 ## How agents consume it
 The system prompt is prepended to context every turn, so the model is highly

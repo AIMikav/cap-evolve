@@ -52,7 +52,7 @@ split_ids_file: ""
 num_trials: 1
 
 # --- acceptance gate --------------------------------------------------------
-gate_mode: significant                   # significant | strict | threshold | simplicity_tiebreak
+gate_mode: paired                        # paired (recommended: per-task paired SE, same tasks both sides — banks real 1-task gains) | significant | strict | threshold | simplicity_tiebreak
 gate_k_se: 1.0
 
 # --- budget -----------------------------------------------------------------

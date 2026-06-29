@@ -22,7 +22,7 @@ split_ids_file: smoke_split.json
 
 num_trials: 1
 
-gate_mode: significant
+gate_mode: paired
 gate_k_se: 1.0
 
 max_iterations: 1

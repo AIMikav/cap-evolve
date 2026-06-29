@@ -32,6 +32,14 @@
 #                      natively. Per-agent: claude-code .claude/skills; codex
 #                      .agents/skills; gemini-cli .gemini/skills; opencode .opencode/skills;
 #                      ibm-bob .bob/skills. Omit/blank for openclaw (unverified), generic, mock.
+#   parallel         : OPTIONAL. "true" when THIS agent's harness can spawn parallel
+#                      subagents / isolated worktrees from within one run (so it can fan
+#                      out one implement-subagent per issue and cover many clusters at
+#                      once). Drives the optimizer INSTRUCTIONS' {{PARALLEL_NOTE}}: "true"
+#                      ⇒ fan out subagents per cluster then merge; absent ⇒ tell the agent
+#                      to work through the clusters in turn within one candidate. Set it
+#                      ONLY for an agent you have verified supports subagents (today:
+#                      claude-code).
 #   instructions_file : OPTIONAL. The agent's always-on project instructions filename
 #                      (auto-read every run). The harness writes a short pointer block into
 #                      <workdir>/<instructions_file> directing the agent to ./INSTRUCTIONS.md,
@@ -72,6 +80,7 @@ claude-code:
   offline: "false"
   skills_dir: ".claude/skills"
   instructions_file: "CLAUDE.md"
+  parallel: "true"   # claude-code supports parallel subagents / worktrees (fan-out per issue)
 
 codex:
   command_template: "codex exec --sandbox workspace-write -m {model} {prompt_text}"

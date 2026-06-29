@@ -139,7 +139,7 @@ def run_check(project_dir: Path, *, tolerance: float = 1e-6) -> CheckReport:
     #    this (a deterministic adapter SHOULD be identical), only WARN — and only when
     #    multi-trial evaluation is configured (CAPEVOLVE_N_TRIALS>1).
     #    Opt-in only (CAPEVOLVE_CHECK_TRIAL_PROBE=1): it fires REAL rollouts, which for
-    #    a network/LLM runner (e.g. tau2) costs money and is surprising inside a
+    #    a network/LLM runner (e.g. a hosted benchmark) costs money and is surprising inside a
     #    pre-flight gate — so it stays off by default even when n_trials>1.
     import os as _os
     if (int(_os.environ.get("CAPEVOLVE_N_TRIALS", "1")) > 1

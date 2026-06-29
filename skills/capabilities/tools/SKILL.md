@@ -17,10 +17,10 @@ the wire schema, and controls every caller — then names, descriptions, paramet
 docs, in-description examples, the JSON Schema, *and the implementation code* are
 all fair game.
 
-Use this when the agent owns its tools. Use [`mcp-tool`](../mcp-tool/SKILL.md)
-when the tools come from an external Model Context Protocol server you can only
-re-describe, not re-implement. The two share the same `tools.json` artifact and
-handlers; the only difference is which edits the action policy permits.
+Use this capability when the agent OWNS its tools — it implements the handlers and
+controls the wire schema, so the code itself is editable. (When the tools come from an
+external server you can only re-describe, not re-implement, the action policy here is
+tightened to documentation-only edits.)
 
 ## What you can change here
 
@@ -35,27 +35,52 @@ the same candidate. (1-line generic examples; worked bodies in
 [`references/examples.md`](references/examples.md), depth below and in
 [`references/concepts.md`](references/concepts.md).)
 
-**Read this skill in full before editing, and apply MULTIPLE edit classes every
-iteration.** The menu below has eight classes. A strong iteration ships several of
-them together — e.g. in-body guards on several existing tools, a NEW composite tool
-for a stall cluster, enriched returns, AND a prompt fix — in ONE candidate. An
-iteration that ships a single class (only docstrings, only one guard) is under-used.
+**Read this skill in full before editing. Ship MULTIPLE fixes per iteration — but
+every one must be REAL (targets a currently-failing task), SAFE (cannot change a
+passing task's behavior), and VERIFIED (proven to fix its target).** Several such fixes
+beat a long list that includes a speculative edit: one edit that regresses a passing
+task can sink the whole candidate at the gate. Quality over churn — never add an edit
+to hit a count, and never re-add a rule/tool the run already tried and rejected.
 
-**Two equally-first-class moves — pick by the failure type, not by a default:**
-- **Edit the BODY of an EXISTING tool** when the agent VIOLATES a rule a tool
-  already owns (a wrong field value, an id not on file, an action on a record whose
-  state forbids it). Convert
-  the prose rule into an in-body guard. Expect to touch SEVERAL existing bodies.
-- **ADD a NEW code-bearing tool** when the agent has a CAPABILITY GAP or STALLS at
-  an action — most importantly, a **composite atomic-WRITE tool** for a multi-step
-  action the agent narrates/confirms then fails to execute. *Adding a new tool is
-  ENCOURAGED, not an exception* — for a BEHAVIORAL stall a new composite is usually
-  the correct fix EVEN when a write primitive already exists (the primitive is what
-  the agent skips; the composite makes the action un-skippable). The failure mode is
-  "ship one change and stop / leave a stall as prose," NOT "add a new tool."
+**Per-change SAFETY (the rule that makes multi-change work).** Scope every guard to fire
+ONLY on the exact violating condition, and check its blast radius: run it on the args of
+1–2 currently-PASSING tasks that use the same tool and confirm it does NOT fire. A guard
+that fires on a passing task is a regression — rescope or drop it. This is how you ship
+many changes without net-zero churn.
 
-Optimizers that reword docstrings while leaving rules as prose, OR that never build
-the composite tool a stall cluster needs, leave most of the gain on the table.
+**Pick the lever by failure type — the in-body guard is the DEFAULT strong move:**
+- **Edit the BODY of an EXISTING tool (reach for this FIRST for a rule violation).** When
+  the agent VIOLATES a rule a tool already owns (a wrong field value, an id not on file,
+  an action on a record whose state forbids it), convert the prose rule into a scoped
+  in-body guard. This is the highest-yield, lowest-regression edit; expect to touch
+  SEVERAL existing bodies in one iteration.
+- **ADD a NEW code-bearing tool — for a genuine CAPABILITY GAP or action STALL.** A
+  composite atomic-WRITE tool for a multi-step action the agent narrates/confirms then
+  fails to execute is the canonical case (the primitive is what it skips; the composite
+  makes the action un-skippable; then REMOVE the raw primitives). New tools are
+  available and encouraged WHEN they close a real gap — but add one ONLY if the agent
+  will actually call it AND it changes the graded outcome. Do NOT add read/compute/summary
+  helper tools that a guard or a prompt line would subsume, and never add a tool just to
+  "ship a new tool" — that is churn the gate punishes.
+
+- **DECISION / PERMISSION cluster → a discriminating-predicate guard (the BOUNDED-blast-
+  radius alternative to a prompt change).** When a cluster is about ACT-vs-REFUSE (the
+  agent acted where it should have refused/escalated, or vice versa), the WRONG fix is
+  loosening a global decision rule in the prompt — that has UNBOUNDED blast radius and
+  regresses every task where the original behavior was gold. The RIGHT fix lives here:
+  an in-body guard on the tool that owns the action, expressing the EXACT policy
+  predicate, that refuses/raises ONLY when the qualifying condition is/isn't met. It
+  fires only on the narrow violating condition, so its blast radius is bounded to the
+  failing inputs — the SAFEST edit, preferred over any prompt/permission change.
+- **HARD-ZERO / capability-gap cluster → a REAL targeted tool, never prose.** A task
+  scoring 0.00 that needs a compute / composite / discriminating-predicate tool stays
+  0.00 after any docstring or prompt reword. Ship a tool the agent will CALL that
+  changes the graded state.
+
+The two failure modes to avoid: (1) leaving a rule the agent keeps breaking as loose
+prose instead of a guard, or loosening a global permission rule (unbounded regression)
+instead of a scoped guard; (2) padding the candidate with low-value helper tools or
+cosmetic rewrites that move no graded task.
 
 1. **Edit the CODE of EXISTING tools to enforce rules deterministically (the most
    common high-leverage edit)** — most violated textual rules govern a tool that
@@ -140,9 +165,16 @@ TOOL-REPLACEMENT PROTOCOL).
 **Generalize, never hardcode.** Every in-code guard must fire on the GENERAL
 condition that defines the failure class, never on a literal value from one task.
 *Good:* `if payment_id not in user_payment_methods: raise ...`. *Bad:*
-`if reservation_id == "ABC123": raise ...` — that overfits to one task, gets
+`if record_id == "<TASK_SPECIFIC_ID>": raise ...` — that overfits to one task, gets
 rejected by the held-out gate, and helps nothing else. Use a failing task's
 specifics only to identify the class, then write the general check.
+
+A discriminating-predicate guard for a decision/permission cluster must encode the
+GENERAL policy condition that separates the qualifying cases from the rest (e.g.
+`if record.tier == "restricted" and action == "modify": raise ...`), NOT a global
+behavior flip and NOT a task literal. The guard NARROWS — it fires only on the cases
+the policy actually governs — so passing tasks outside that condition keep their
+behavior unchanged.
 
 ## The highest-leverage edit: deterministic CODE (usually in an EXISTING tool body)
 
@@ -267,12 +299,14 @@ Map the trace symptom to the code-bearing edit. Each row is a failure the model
 These four rows carry most of the recoverable gain — diagnose for them FIRST, and
 verify the fix you ship actually FIRES on the failing trace (run the new body on the
 exact arguments from that trajectory; a guard that never triggers on the failing task
-is dead code, not a fix).
+is dead code, not a fix). These rows are independent: fix as MANY of them as appear in
+the trajectories in one candidate, not just the first — each guarded tool is its own
+bounded fix.
 
 | Trace symptom | Fix |
 |---------------|-----|
 | **Wrong ARGUMENT the tool could validate** — a write whose id / reference / count / unit is not consistent with the agent-visible state (an id not in the record, a count exceeding what's available, the wrong unit). Right tool, bad argument; partial credit or a corrupted write. | **Normalize-then-call wrapper**: wrap the write in a body that RESOLVES / VALIDATES the argument against the current state, and on mismatch returns `available=[...]` (the valid options) or raises an actionable error naming what's wrong and what to pass instead — never let a write proceed on an unvalidated reference. Coerce units, resolve ids, check the field is on file, then delegate to the primitive. |
-| **`transfer_to_human` / bail-out abandoning a REQUIRED, eligible action** — the agent escalates or hands off when it could and should have completed the action itself; this is a behavioral STALL, not a missing capability. | **Composite WRITE tool**: encapsulate the eligible-action batch in ONE tool whose body executes the steps in code (skipping any ineligible item with a recorded reason), then `remove` the raw primitives so completing the batch is the only path. Do NOT add a "don't bail out" prose rule — the agent already chose to bail; only code removes the choice. |
+| **Escalate / bail-out abandoning a REQUIRED, eligible action** — the agent hands off or gives up when it could and should have completed the action itself; this is a behavioral STALL, not a missing capability. | **Composite WRITE tool**: encapsulate the eligible-action batch in ONE tool whose body executes the steps in code (skipping any ineligible item with a recorded reason), then `remove` the raw primitives so completing the batch is the only path. Do NOT add a "don't bail out" prose rule — the agent already chose to bail; only code removes the choice. |
 | **Recoverable error that strands the agent** — a tool raises an opaque traceback / bare code, the agent retries the same bad call or gives up. | **Enriched RETURN that aids recovery**: on a recoverable error, return what's wrong + the valid options + the recommended next action (e.g. `{"error": "id not found", "available": [...], "next": "call search_x to resolve the id"}`), so the model self-corrects on the next turn instead of repeating the failure. |
 | **Execution stalls at the action boundary** — the agent analyzes, explains, even confirms, then never calls the write tool and stops (the task is left half-done). | **Composite WRITE tool** (pattern 3): one tool whose body performs the whole analyze→confirm→act sequence, then `remove` the raw primitives so the action is un-skippable. |
 | **The same primitive called N times in a row** — looping over a list in the agent's own context, dropping or mis-threading results. | **Loop tool** (pattern 2): one tool that takes the list and loops inside a single call. |
@@ -311,13 +345,22 @@ Reach for `tools` when a trace shows one of these failure signatures:
   normalization the model forgets. A tool that **enforces the rule in code**
   (validates, normalizes, or performs the steps in the right order) makes the
   mistake impossible rather than merely discouraged.
+- **A DECISION / PERMISSION the model gets wrong (ACT vs REFUSE)** — the agent acts
+  where the policy says refuse/escalate (or refuses where it should act). Do NOT fix
+  this by loosening the global rule in the prompt — that changes behavior for the whole
+  class and regresses every task where the original behavior was correct (unbounded
+  blast radius). Encode the EXACT discriminating policy predicate as an in-body guard on
+  the tool that owns the action: it refuses/raises ONLY on the qualifying condition, so
+  its blast radius is bounded to the violating cases. This is the SAFE, preferred
+  alternative to a permission-rule prompt edit.
 - **A bloated or overlapping toolset** — too many tools, or several that do
   nearly the same thing, distracting the agent. Remove or consolidate.
 - **A real behavioral bug in a handler** — the tool returns the wrong thing.
   Because you own the code, you can fix it directly.
 
-If the problem is *what the agent is told to do* rather than *what it can do*,
-optimize the [`system-prompt`](../system-prompt/SKILL.md) instead.
+If the problem is *what the agent is told to do* rather than *what it can do*, it is
+out of scope for this capability (it belongs to whatever capability edits the agent's
+instructions).
 
 ## What can be optimized (default policy = all of these)
 
@@ -559,8 +602,8 @@ Drawn from real runs where the optimizer left most of the gain on the table.
 **Good — what actually moves accuracy and cuts calls:**
 
 - **A loop/composite tool** that collapses the repeated-primitive pattern from the
-  traces (e.g. the agent fetching a user's records one id at a time, or sweeping
-  flight searches across many date/route combinations) into a single list call.
+  traces (e.g. the agent fetching records one id at a time, or sweeping a search across
+  many parameter combinations) into a single list call.
 - **A rule-enforcing tool** that reads-before-writes or validates a precondition
   the underlying API does not, turning a silent bad write into a clear refusal.
 - **Precise descriptions** that add genuinely new, always-true content: explicit

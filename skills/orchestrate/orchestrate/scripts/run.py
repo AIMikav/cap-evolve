@@ -105,7 +105,7 @@ def main(argv=None) -> int:
         "optimizer": spec.get("optimizer_skill"),
         "algorithm": _resolve_algorithm(spec.get("algorithm_skill", "hill-climb")),
         "focus": spec.get("algorithm_focus"),
-        "gate_mode": spec.get("gate_mode", "significant"),
+        "gate_mode": spec.get("gate_mode", "auto"),  # auto → harness uses the paired per-task gate
         "budget": {"max_iterations": spec.get("max_iterations"), "stall": spec.get("stall")},
         "rule": "cap-evolve check must be green before baseline; test scored once at finalize.",
     }

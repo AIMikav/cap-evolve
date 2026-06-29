@@ -462,15 +462,24 @@ _JOURNAL_SEED = (
     "delete earlier entries. Read the whole journal before proposing, so you build on "
     "EVERY prior attempt (not just the last accepted one) and never re-test a refuted "
     "idea.\n\n"
-    "Append your entry for THIS iteration below the marker, using this shape:\n\n"
+    "You CANNOT know your own gate result while you write — the harness scores you AFTER "
+    "you stop and stamps a **RESULT** line (outcome + Δ + the EXACT tasks you broke/fixed) "
+    "right below your entry. So do NOT write 'what worked' as a guess. To learn what "
+    "actually worked, READ the framework RESULT lines of prior entries (and LEDGER.md): an "
+    "entry whose RESULT says `rejected` with `broke={...}` tells you which specific edits to "
+    "drop or redesign — its diff.patch is in ./prior_iterations/<id>/.\n\n"
+    "Append your entry for THIS iteration below the marker, using this shape (INTENT only — "
+    "the framework appends the RESULT):\n\n"
     "    ## Iteration <your candidate id> — <one-line headline of what you tried>\n"
-    "    - What I tried (1 line per change):\n"
-    "    - What WORKED (claim ONLY when a real gated improvement was observed; cite task ids / Δ):\n"
-    "    - What REGRESSED as-implemented (verdict: dead idea vs worth-redesigning, and how):\n"
-    "    - Refuted hypotheses (proven NOT the cause — never re-test):\n"
-    "    - High-value clusters NOT yet cracked (and the guard/tool designs already tried):\n"
-    "    - Plateau signal (are the last few iters stalling? if so, which LEVER to switch to —\n"
-    "      e.g. a NEW composite tool instead of yet another guard, or the prompt instead of code):\n"
+    "    - Changes I made (1 line per edit; name the file/tool + cluster it targets):\n"
+    "    - Per change, the EXPECTED effect + why it's safe (which failing task it should fix;\n"
+    "      why no passing task changes behavior):\n"
+    "    - Building on prior RESULTS: which prior entries' broke/fixed I used, and what I\n"
+    "      did NOT re-try because a prior RESULT showed it regressed (cite ids):\n"
+    "    - Refuted hypotheses (a prior RESULT proved this is NOT the fix — never re-test):\n"
+    "    - High-value clusters still NOT cracked (and the guard/tool designs already tried):\n"
+    "    - Plateau signal (are the last few RESULTs flat/negative? if so, which LEVER to switch\n"
+    "      to — e.g. a NEW composite tool instead of another guard, or prompt instead of code):\n"
     "    - Focus next iteration:\n"
 )
 
@@ -727,7 +736,19 @@ def _reconcile_journal(workdir: Path, run_dir: RunDir, cid: str, *,
     base = run_journal.read_text(encoding="utf-8") if run_journal.exists() else _JOURNAL_SEED
     # Run-level file is pure accumulated entries — strip any marker before appending.
     base = base.replace(_JOURNAL_MARK, "").rstrip()
-    stamp = (f"\n\n<!-- {cid}: {'ACCEPTED' if accepted else 'rejected'} "
+    # Framework-owned RESULT: the objective gate outcome + the EXACT tasks this candidate
+    # broke/fixed (vs its parent), folded VISIBLY into the journal so the next iteration
+    # learns what actually worked/regressed from the narrative — not just a terse comment.
+    impact = _candidate_task_impact(run_dir, cid, "val") or {}
+    broke = ", ".join(str(t) for t in (impact.get("broke") or [])[:30]) or "—"
+    fixed = ", ".join(str(t) for t in (impact.get("fixed") or [])[:30]) or "—"
+    verdict = "ACCEPTED (new champion)" if accepted else "REJECTED (champion unchanged)"
+    guidance = ("" if accepted else
+                " — its WHOLE batch was reverted; re-introduce only the edits that did NOT "
+                "break a task above, dropping/redesigning the ones that did.")
+    stamp = (f"\n\n> **RESULT (framework, objective):** {verdict} · val={val:.3f} "
+             f"Δ={delta:+.3f} · fixed={{{fixed}}} · broke={{{broke}}}.{guidance}\n"
+             f"<!-- {cid}: {'ACCEPTED' if accepted else 'rejected'} "
              f"val={val:.3f} Δ={delta:+.3f} -->")
     tail = tail.strip()
     # Dedup guard: if the optimizer dropped the marker without appending (so the tail
@@ -1525,9 +1546,46 @@ def _failures_block(always_fail, flaky, errored) -> str:
     return "\n".join(lines)
 
 
+def _optimizer_parallel(optimizer_name: str | None) -> bool:
+    """Whether the resolved optimizer's harness can spawn parallel subagents.
+
+    Reads the optional ``parallel: "true"`` flag from the optimizer registry row.
+    Best-effort: an unknown agent / unreadable registry ⇒ False (sequential). This
+    gates ONLY the parallel fan-out guidance in {{PARALLEL_NOTE}}.
+    """
+    if not optimizer_name:
+        return False
+    try:
+        repo_root = Path(__file__).resolve().parents[2]
+        reg_path = repo_root / "skills" / "optimizers" / "registry.yaml"
+        if not reg_path.is_file():
+            return False
+        from .specfile import read_yaml
+        registry = read_yaml(reg_path.read_text(encoding="utf-8")) or {}
+        row = registry.get(optimizer_name) or {}
+        return str(row.get("parallel") or "").strip().lower() == "true"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _parallel_note(parallel: bool, optimizer_name: str | None) -> str:
+    """The {{PARALLEL_NOTE}} block — gates the fan-out on the agent's capability."""
+    if parallel:
+        ref = f"./guidance/optimizer/{optimizer_name}.md" if optimizer_name else "./guidance/optimizer/"
+        return ("Your agent supports parallel subagents/worktrees (see " + ref + "). FAN OUT to "
+                "cover MANY clusters at once: one read-only subagent per trajectory-group to "
+                "diagnose, then one edit-subagent per issue (each in its own worktree), then "
+                "MERGE every edit into this ONE candidate with no conflicts. This is how a single "
+                "iteration fixes many issues across many trajectories, not just the biggest one.")
+    return ("Your agent runs single-threaded (no subagents). Still address as MANY clusters as you "
+            "can in this ONE candidate — work through them in turn, drafting and keeping every "
+            "real, safe fix, not just the biggest one.")
+
+
 def _focus_instructions(current_val: SplitResult, focus_ids, label: str,
                         capabilities=None, algorithm: str = "hill-climb",
-                        instructions_file=None, bench_repo: str | None = None) -> str:
+                        instructions_file=None, bench_repo: str | None = None,
+                        optimizer_name: str | None = None) -> str:
     """Render one iteration's INSTRUCTIONS by substituting dynamic blocks into the
     optimizer-instructions template.
 
@@ -1556,6 +1614,7 @@ def _focus_instructions(current_val: SplitResult, focus_ids, label: str,
              "you may consult to understand tools, scoring, or task structure."
              if bench_repo else "")
 
+    parallel_note = _parallel_note(_optimizer_parallel(optimizer_name), optimizer_name)
     repl = {
         "{{FOCUS_SUMMARY}}": focus_summary,
         "{{FAILURES}}": failures,
@@ -1563,6 +1622,7 @@ def _focus_instructions(current_val: SplitResult, focus_ids, label: str,
         "{{CAP_BRIEF}}": cap,
         "{{ALGO_BRIEF}}": algo,
         "{{BENCH_REPO}}": bench,
+        "{{PARALLEL_NOTE}}": parallel_note,
     }
 
     tmpl_path = Path(instructions_file) if instructions_file else _DEFAULT_INSTRUCTIONS_TEMPLATE
@@ -1667,7 +1727,7 @@ def hill_climb_loop(
         instructions = _focus_instructions(current_val, focus_ids, label,
                                             capabilities=capabilities, algorithm=algorithm,
                                             instructions_file=instructions_file,
-                                            bench_repo=bench_repo)
+                                            bench_repo=bench_repo, optimizer_name=optimizer_name)
         step = run_step(
             adapter, run_dir=run_dir, parent_dir=run_dir.candidate_dir(run_dir.best_id),
             optimizer=optimizer, instructions=instructions, current_val=current_val,

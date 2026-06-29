@@ -5,7 +5,7 @@ how to detect each from traces or from `validate`.
 
 ## Stripping error info / `Raises:` to "clean up" the description
 The error conditions a tool can raise are *guidance for the model*, not clutter.
-Knowing a call raises "gift card balance too low" or "reservation not found" is
+Knowing a call raises "balance too low" or "record not found" is
 what lets the model pick a different argument or a different tool instead of
 failing. Deleting that text removes a guard rail and typically does not improve
 selection at all.

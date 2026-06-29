@@ -97,7 +97,7 @@ Downstream, `implement-and-check` consumes `project`; `baseline` consumes
         a GENERAL rule/policy/validation that generalizes across the whole class of
         inputs — NEVER hardcode a specific task's id/value/date/name/answer. A guard
         must fire on the general condition (e.g. "id not in the user's profile"), not
-        match a literal value (NOT `if id == "ABC123"`). A literal special-case that
+        match a literal value (NOT `if id == "<TASK_SPECIFIC_ID>"`). A literal special-case that
         only helps one task is forbidden — it overfits, fails the held-out gate, and
         hurts other tasks. Per-task specifics are for understanding the failure CLASS
         only; the fix must be general.
