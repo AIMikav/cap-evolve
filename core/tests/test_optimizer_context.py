@@ -86,6 +86,12 @@ def test_injects_trajectories_and_guidance_then_excludes_from_snapshot(tmp_path)
     assert not (snap / "trajectories").exists()
     assert not (snap / "guidance").exists()
 
+    # The framework folds an objective RESULT line into the run-level JOURNAL after the
+    # gate (the optimizer cannot know its own gate result while writing its entry).
+    journal = (run_dir.root / "JOURNAL.md").read_text(encoding="utf-8")
+    assert "RESULT (framework" in journal
+    assert ("ACCEPTED" in journal) or ("REJECTED" in journal)
+
 
 def test_parallel_note_gated_by_optimizer_capability():
     """{{PARALLEL_NOTE}} fans out subagents only for a parallel-capable optimizer

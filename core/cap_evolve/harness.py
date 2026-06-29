@@ -462,15 +462,24 @@ _JOURNAL_SEED = (
     "delete earlier entries. Read the whole journal before proposing, so you build on "
     "EVERY prior attempt (not just the last accepted one) and never re-test a refuted "
     "idea.\n\n"
-    "Append your entry for THIS iteration below the marker, using this shape:\n\n"
+    "You CANNOT know your own gate result while you write — the harness scores you AFTER "
+    "you stop and stamps a **RESULT** line (outcome + Δ + the EXACT tasks you broke/fixed) "
+    "right below your entry. So do NOT write 'what worked' as a guess. To learn what "
+    "actually worked, READ the framework RESULT lines of prior entries (and LEDGER.md): an "
+    "entry whose RESULT says `rejected` with `broke={...}` tells you which specific edits to "
+    "drop or redesign — its diff.patch is in ./prior_iterations/<id>/.\n\n"
+    "Append your entry for THIS iteration below the marker, using this shape (INTENT only — "
+    "the framework appends the RESULT):\n\n"
     "    ## Iteration <your candidate id> — <one-line headline of what you tried>\n"
-    "    - What I tried (1 line per change):\n"
-    "    - What WORKED (claim ONLY when a real gated improvement was observed; cite task ids / Δ):\n"
-    "    - What REGRESSED as-implemented (verdict: dead idea vs worth-redesigning, and how):\n"
-    "    - Refuted hypotheses (proven NOT the cause — never re-test):\n"
-    "    - High-value clusters NOT yet cracked (and the guard/tool designs already tried):\n"
-    "    - Plateau signal (are the last few iters stalling? if so, which LEVER to switch to —\n"
-    "      e.g. a NEW composite tool instead of yet another guard, or the prompt instead of code):\n"
+    "    - Changes I made (1 line per edit; name the file/tool + cluster it targets):\n"
+    "    - Per change, the EXPECTED effect + why it's safe (which failing task it should fix;\n"
+    "      why no passing task changes behavior):\n"
+    "    - Building on prior RESULTS: which prior entries' broke/fixed I used, and what I\n"
+    "      did NOT re-try because a prior RESULT showed it regressed (cite ids):\n"
+    "    - Refuted hypotheses (a prior RESULT proved this is NOT the fix — never re-test):\n"
+    "    - High-value clusters still NOT cracked (and the guard/tool designs already tried):\n"
+    "    - Plateau signal (are the last few RESULTs flat/negative? if so, which LEVER to switch\n"
+    "      to — e.g. a NEW composite tool instead of another guard, or prompt instead of code):\n"
     "    - Focus next iteration:\n"
 )
 
@@ -727,7 +736,19 @@ def _reconcile_journal(workdir: Path, run_dir: RunDir, cid: str, *,
     base = run_journal.read_text(encoding="utf-8") if run_journal.exists() else _JOURNAL_SEED
     # Run-level file is pure accumulated entries — strip any marker before appending.
     base = base.replace(_JOURNAL_MARK, "").rstrip()
-    stamp = (f"\n\n<!-- {cid}: {'ACCEPTED' if accepted else 'rejected'} "
+    # Framework-owned RESULT: the objective gate outcome + the EXACT tasks this candidate
+    # broke/fixed (vs its parent), folded VISIBLY into the journal so the next iteration
+    # learns what actually worked/regressed from the narrative — not just a terse comment.
+    impact = _candidate_task_impact(run_dir, cid, "val") or {}
+    broke = ", ".join(str(t) for t in (impact.get("broke") or [])[:30]) or "—"
+    fixed = ", ".join(str(t) for t in (impact.get("fixed") or [])[:30]) or "—"
+    verdict = "ACCEPTED (new champion)" if accepted else "REJECTED (champion unchanged)"
+    guidance = ("" if accepted else
+                " — its WHOLE batch was reverted; re-introduce only the edits that did NOT "
+                "break a task above, dropping/redesigning the ones that did.")
+    stamp = (f"\n\n> **RESULT (framework, objective):** {verdict} · val={val:.3f} "
+             f"Δ={delta:+.3f} · fixed={{{fixed}}} · broke={{{broke}}}.{guidance}\n"
+             f"<!-- {cid}: {'ACCEPTED' if accepted else 'rejected'} "
              f"val={val:.3f} Δ={delta:+.3f} -->")
     tail = tail.strip()
     # Dedup guard: if the optimizer dropped the marker without appending (so the tail
