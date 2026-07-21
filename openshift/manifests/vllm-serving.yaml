@@ -70,7 +70,8 @@ spec:
                   key: HF_TOKEN
                   optional: true
           ports:
-            - containerPort: 8000
+            - name: http
+              containerPort: 8000
           readinessProbe:
             httpGet:
               path: /health

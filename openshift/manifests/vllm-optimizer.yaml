@@ -59,6 +59,10 @@ spec:
           env:
             - name: HOME
               value: /tmp
+            # HOME=/tmp would send the HF cache to /tmp (ephemeral); pin it to
+            # the mounted PVC so 14B weights persist across restarts.
+            - name: HF_HOME
+              value: /.cache/huggingface
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
