@@ -49,7 +49,8 @@ spec:
         component: vllm
         role: optimizer
     spec:
-      serviceAccountName: harbor-task
+      serviceAccountName: cap-evolve-runner
+      # Match this to your cluster's GPU node label (oc get nodes --show-labels | grep gpu)
       nodeSelector:
         gpu-pool-size: xlarge
       containers:

@@ -12,21 +12,6 @@
 #     --project .capevolve/project --run-ts run1 --dashboard off
 # =============================================================================
 
-# --- PVC: workspace for run artifacts ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: cap-evolve-workspace
-  namespace: cap-evolve
-  labels:
-    app.kubernetes.io/part-of: cap-evolve
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -45,7 +30,7 @@ spec:
       labels:
         app: cap-evolve-runner
     spec:
-      serviceAccountName: harbor-task
+      serviceAccountName: cap-evolve-runner
       containers:
         - name: runner
           image: quay.io/<YOUR_ORG>/cap-evolve-runner:latest
@@ -57,22 +42,20 @@ spec:
               value: "/app/skills"
             - name: TAU2_DATA_DIR
               value: "/app/tau2-bench/data"
-            # --- Agent model (vLLM, cross-namespace) ---
-            - name: TAU2_MODEL
+            # --- Agent model (vLLM via model_config.py convention) ---
+            - name: MODEL
               value: "openai/qwen2.5-7b-instruct"
-            - name: TAU2_API_BASE
+            - name: OPENAI_API_BASE
               value: "http://vllm-agent:80/v1"
-            - name: TAU2_API_KEY
+            - name: OPENAI_API_KEY
               value: "dummy"
             - name: TAU2_MAX_CONCURRENCY
               value: "30"
-            # --- Optimizer model (vLLM, cross-namespace) ---
-            - name: OPTIMIZER_MODEL
-              value: "openai/qwen2.5-14b-instruct"
-            - name: OPTIMIZER_API_BASE
-              value: "http://vllm-optimizer:80/v1"
-            - name: OPTIMIZER_API_KEY
-              value: "dummy"
+            # --- Optimizer ---
+            # The optimizer is a coding-agent CLI (claude-code, codex, gemini-cli, …)
+            # configured via optimizer_skill in capevolve.yaml.
+            # For claude-code: set ANTHROPIC_API_KEY (or log in interactively).
+            # For other agents: see skills/optimizers/registry.yaml.
           resources:
             requests:
               cpu: 500m

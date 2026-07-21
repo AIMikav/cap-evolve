@@ -48,7 +48,7 @@ spec:
         component: vllm
         role: agent
     spec:
-      serviceAccountName: harbor-task
+      serviceAccountName: cap-evolve-runner
       containers:
         - name: vllm
           image: vllm/vllm-openai:v0.21.0
@@ -131,7 +131,7 @@ spec:
   ports:
     - name: http
       port: 80
-      targetPort: 8000
+      targetPort: http
   selector:
     app: vllm-agent
     component: vllm
@@ -148,7 +148,7 @@ metadata:
     app.kubernetes.io/part-of: cap-evolve
 spec:
   port:
-    targetPort: 8000
+    targetPort: http
   tls:
     termination: edge
   to:
