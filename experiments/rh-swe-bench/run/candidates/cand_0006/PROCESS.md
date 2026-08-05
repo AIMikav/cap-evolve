@@ -1,0 +1,41 @@
+# PROCESS — what I did this iteration (explainability; REQUIRED)
+
+## Ranked issue list (clusters by # failing tasks × trials, biggest first)
+| rank | cluster | tasks | shared root cause | tag | planned change class |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Wrong implementation (ArgoCD, osbuild, CVO) | 12 (0543,0544,0547,0550,0552,0554,0562,0604,0606,0608,0611,0613) | Agent codes close-but-wrong fix; doesn't verify against test expectations. 9/12 would benefit from reading test code first. | BEHAVIORAL+CAPABILITY | SKIP — "read test code" edit tried in cand_0003,0004,0005, all REJECTED with regressions |
+| 2 | Environmental P2P — buildah/storage/kubevirt | 8 (0098,0102,0103,0161,0163,0357,0359,0360) | F2P mostly COMPLETE but P2P tests require kernel capabilities (mount/xattr/chroot) OR go.work.sum contamination | ENVIRONMENTAL+KNOWLEDGE | go.work.sum cleanup for kubevirt (3 tasks); buildah/storage unfixable |
+| 3 | Molecule incomplete fix | 4 (0037,0039,0059,0082) | Agent dismisses F2P tests as environmental despite existing rule; behavioral violation | BEHAVIORAL | SKIP — adding more prose about this is proven harmful |
+| 4 | Infrastructure/context | 3 (0263,0536,0538) | Agent never ran (0263) or exhausted context (0536,0538) | INFRASTRUCTURE | SKIP — unfixable with prompt |
+| 5 | kubectl P2P (0278) | 1 | go.mod/go.sum contamination, stash loss | MARGINAL | go.work.sum may partially help |
+
+## Changes made this iteration (one row per edit — aim for MULTIPLE classes)
+| cluster | edit class | file / tool | what & why it generalizes | protects passing? |
+| --- | --- | --- | --- | --- |
+| 2 (kubevirt go.work.sum) | Add to existing rule (cleanup list) | SKILL.md, prompt.md | Added "go.work.sum" to the list of generated files to revert before final diff. Go workspace operations silently modify go.work.sum, contaminating the patch with build artifact changes that break unrelated P2P tests. | BOUNDED: adds 14 characters to an existing file list. Agent only reverts go.work.sum if it appears in the diff. Passing tasks don't include go.work.sum in their diffs → no behavior change. |
+| General (attention budget) | Consolidate redundant text (Step A) | SKILL.md, prompt.md | Removed Go-specific and Python-specific sentences from Step A that duplicate the preceding general instruction ("run tests in sibling and parent packages"). Net reduction of ~25 words. | BOUNDED: same rule preserved in general form. The Go/Python specifics were restating what the general instruction already says. Passing tasks already follow the general form. |
+
+## Verify-the-fix (one line per change)
+- Edit 1 (go.work.sum): trace task-0357 shows `diff --git a/go.work.sum b/go.work.sum` in the agent's final output. The agent's code fix is correct (F2P 1/1) but the go.work.sum diff causes 17 P2P failures in pkg/virtctl/. Adding go.work.sum to the cleanup list → agent runs `git checkout -- go.work.sum` → clean diff → P2P tests unaffected. Same pattern for task-0359 (F2P 1/1, 17 P2P) and task-0360 (F2P 1/1, 17 P2P). Passing Go tasks (0132, 0180, 0183, 0194, 0202, 0229, 0264, etc.) already produce clean diffs without go.work.sum → rule does NOT fire on them.
+- Edit 2 (Step A consolidation): Removed "For Go: run `go test` on parent directories and sibling packages, not just the one you changed. For Python: run the project's full test suite." This text restates "Then ALSO run tests in sibling and parent packages" which immediately precedes it. The general instruction is preserved. Passing tasks already follow the general instruction → no behavior change.
+
+## Process & features used
+- 3 parallel diagnostic subagents to read and cluster all 28 failing trajectories
+- Read all cross-iteration files: LEDGER, JOURNAL, RUNMAP, prior iterations cand_0001-0005 diffs + PROCESS
+- Built on cand_0002 (ACCEPTED, current champion). Did NOT re-introduce "read test code" (present in all 3 rejected candidates, consistently caused regressions). Did NOT re-introduce nil-safety, shared-root-cause, or "MUST fix seeded bugs" emphasis.
+
+## Good things to PRESERVE
+- Step B rewrite from iter 1 (investigate pre-existing failures as seeded bugs)
+- "NEVER dismiss as environmental" from iter 2 (catches code bugs)
+- Stash safety from iter 2 (prevents lost fixes)
+- All test-file rules (no create, no delete, no rename)
+- grep-r for same pattern
+- go build check
+- Minimal edit emphasis in §4
+
+## Deliberately skipped (cluster + why)
+- Cluster 1 "wrong implementation" (12 tasks): "Read test code" edit was tried in cand_0003, 0004, 0005 — ALL REJECTED. Each time it regressed 3-9 passing tasks, even when minimal (cand_0005 had only this + go.work.sum and broke 9 tasks). This is the primary refuted hypothesis from the run. The cluster is a fundamental capability gap — the agent codes close-but-wrong solutions. No safe prompt fix exists.
+- Cluster 3 "molecule" (4 tasks): BEHAVIORAL violation — agent knows the "don't dismiss as environmental" rule but violates it. Adding more prose proven harmful. Prior iterations' emphasis of this rule consistently regressed other tasks.
+- Cluster 4 "infrastructure" (3 tasks): Agent never ran (0263) or exhausted context (0536, 0538). Unfixable with prompt.
+- Cluster 5 "kubectl P2P" (1 task, 0278): Marginal task that flips with any prompt change. go.work.sum may partially help but this is not specifically targeted.
+- buildah/storage P2P (5 tasks): ENVIRONMENTAL — tests require Linux kernel capabilities (mount namespaces, xattr, unshare) absent from sandbox. Agent fixes are correct (F2P 12/12 for task-0161, 2/2 for task-0102, 1/1 for task-0163). Cannot fix with prompt.

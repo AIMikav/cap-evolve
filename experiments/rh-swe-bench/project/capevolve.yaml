@@ -1,0 +1,24 @@
+# rh-swe-bench v4 — ALL data as train/val, no holdout test
+# train==val gives the optimizer maximum trajectory signal.
+# The test number is a fit metric, not a generalization claim.
+capabilities:       [skill-package, system-prompt]
+capability_path:    seed_capability
+actions:            [edit]
+optimizer_skill:    claude-code
+optimizer_model:    claude-opus-4-6
+optimizer_max_turns: 40
+optimizer_usd_per_iter: 10.0
+algorithm_skill:    hill-climb
+algorithm_focus:    all
+dataset_source:     adapter
+split_train:        1.0
+split_val:          1.0
+split_test:         1.0
+num_trials:         1
+gate_mode:          paired
+gate_k_se:          1.0
+max_iterations:     10
+stall:              5
+max_usd:            3000.0
+max_optimizer_usd:  100.0
+store:              git

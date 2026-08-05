@@ -1,0 +1,1925 @@
+{
+  "val": {
+    "split": "val",
+    "reward": 0.5798319327731093,
+    "stderr": 0.04543824851431213,
+    "pass_k": {
+      "1": 0.5798319327731093,
+      "2": 0.0
+    },
+    "pass_at_k": {
+      "1": 0.5798319327731093,
+      "2": 0.5798319327731093
+    },
+    "per_task": [
+      {
+        "task_id": "task-0007",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0009",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0010",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0023",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0025",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0029",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0037",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0039",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0041",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0042",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0053",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0059",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0061",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0069",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0072",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0082",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0086",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0093",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0098",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 4/7 | P2P: 90/92\nReward: 0\n  F2P MISS: go.podman.io/buildah/copier::TestGetNoCrossDevice = fail\n  F2P MISS: go.podman.io/buildah/copier::TestGetPermissionErrorNoChroot = fail\n  F2P MISS: go.podman.io/buildah/copier::TestGetPermissionErrorChroot = fail\n  P2P failures: 2\n    go.podman.io/buildah/internal/volumes::TestBindFromChroot = fail\n    go.podman.io/buildah/internal/open::TestBindFdToPath = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0102",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 2/2 | P2P: 98/102\nReward: 0\n  P2P failures: 4\n    go.podman.io/buildah/copier::TestGetPermissionErrorNoChroot = fail\n    go.podman.io/buildah/copier::TestGetNoCrossDevice = fail\n    go.podman.io/buildah/internal/open::TestBindFdToPath = fail\n    go.podman.io/buildah/internal/volumes::TestBindFromChroot = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0103",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 7/10 | P2P: 93/95\nReward: 0\n  F2P MISS: go.podman.io/buildah/copier::TestGetPermissionErrorChroot = fail\n  F2P MISS: go.podman.io/buildah/copier::TestGetPermissionErrorNoChroot = fail\n  F2P MISS: go.podman.io/buildah/copier::TestGetNoCrossDevice = fail\n  P2P failures: 2\n    go.podman.io/buildah/internal/volumes::TestBindFromChroot = fail\n    go.podman.io/buildah/internal/open::TestBindFdToPath = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0132",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 596/596\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0161",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0163",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 1/1 | P2P: 389/401\nReward: 0\n  P2P failures: 12\n    github.com/containers/storage/pkg/system::TestEnsureRemoveAllWithMount = fail\n    github.com/containers/storage/pkg/mount::TestMount = fail\n    github.com/containers/storage/pkg/mount::TestSubtreePrivate = fail\n    github.com/containers/storage/pkg/mount::TestSubtreeSharedSlave = fail\n    github.com/containers/storage/pkg/mount::TestSubtreeUnbindable = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0180",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 4/4 | P2P: 345/345\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0183",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 2/2 | P2P: 348/348\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0194",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0202",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 5/5 | P2P: 337/337\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0205",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 3/3 | P2P: 347/347\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0208",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 3/3 | P2P: 347/347\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0225",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 759/759\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0229",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 759/759\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0230",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 716/716\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0231",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 759/759\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0245",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 3/5 | P2P: 716/716\nReward: 0\n  F2P MISS: k8s.io/kubectl/pkg/cmd/edit::TestEdit = fail\n  F2P MISS: k8s.io/kubectl/pkg/cmd/apply::TestApplySetParentValidation = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0246",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 6/6 | P2P: 714/715\nReward: 0\n  P2P failures: 1\n    k8s.io/kubectl/pkg/cmd/apply::TestApplySetParentValidation = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0258",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 2/2 | P2P: 718/719\nReward: 0\n  P2P failures: 1\n    k8s.io/kubectl/pkg/cmd/apply::TestApplySetParentValidation = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0263",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0264",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0276",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 688/688\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0278",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 3/3 | P2P: 717/718\nReward: 0\n  P2P failures: 1\n    k8s.io/kubectl/pkg/cmd/apply::TestApplySetParentValidation = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0297",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0304",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 4/4 | P2P: 716/717\nReward: 0\n  P2P failures: 1\n    k8s.io/kubectl/pkg/cmd/apply::TestApplySetParentValidation = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0305",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 2/2 | P2P: 706/707\nReward: 0\n  P2P failures: 1\n    k8s.io/kubectl/pkg/cmd/apply::TestApplySetParentValidation = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0309",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 4/5 | P2P: 716/716\nReward: 0\n  F2P MISS: k8s.io/kubectl/pkg/cmd/apply::TestApplySetParentValidation = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0319",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 3/3 | P2P: 717/718\nReward: 0\n  P2P failures: 1\n    k8s.io/kubectl/pkg/cmd/apply::TestApplySetParentValidation = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0322",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 17/19 | P2P: 579/579\nReward: 0\n  F2P MISS: k8s.io/kubectl/pkg/util/completion::TestClusterCompletionFunc = fail\n  F2P MISS: k8s.io/kubectl/pkg/cmd/rollout::TestRolloutStatus = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0323",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 4/4 | P2P: 707/708\nReward: 0\n  P2P failures: 1\n    k8s.io/kubectl/pkg/cmd/apply::TestApplySetParentValidation = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0331",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0333",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 9/9 | P2P: 711/712\nReward: 0\n  P2P failures: 1\n    k8s.io/kubectl/pkg/cmd/apply::TestApplySetParentValidation = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0342",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 2/2 | P2P: 718/719\nReward: 0\n  P2P failures: 1\n    k8s.io/kubectl/pkg/cmd/apply::TestApplySetParentValidation = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0347",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 1/1 | P2P: 719/720\nReward: 0\n  P2P failures: 1\n    k8s.io/kubectl/pkg/cmd/apply::TestApplySetParentValidation = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0357",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 1/1 | P2P: 212/229\nReward: 0\n  P2P failures: 18\n    kubevirt.io/kubevirt/pkg/virtctl/softreboot::TestSoftReboot = fail\n    kubevirt.io/kubevirt/pkg/virtctl/objectgraph::TestObjectGraph = fail\n    kubevirt.io/kubevirt/pkg/virtctl/guestfs::TestGuestfs = fail\n    kubevirt.io/kubevirt/pkg/virtctl/template/create::TestCreate = fail\n    kubevirt.io/kubevirt/pkg/virtctl/memorydump::TestVm = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0359",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 0/1 | P2P: 200/216\nReward: 0\n  F2P MISS: kubevirt.io/kubevirt/pkg/virt-api/rest::TestRest = fail\n  P2P failures: 17\n    kubevirt.io/kubevirt/pkg/virtctl/template/process::TestProcess = fail\n    kubevirt.io/kubevirt/pkg/virtctl/vmexport::TestVMExport = fail\n    kubevirt.io/kubevirt/pkg/virtctl/softreboot::TestSoftReboot = fail\n    kubevirt.io/kubevirt/pkg/virtctl/template/create::TestCreate = fail\n    kubevirt.io/kubevirt/pkg/virtctl/credentials/addkey::TestAddKey = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0360",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0). Verifier: F2P: 1/1 | P2P: 209/225\nReward: 0\n  P2P failures: 17\n    kubevirt.io/kubevirt/pkg/virtctl/softreboot::TestSoftReboot = fail\n    kubevirt.io/kubevirt/pkg/virtctl/credentials/removekey::TestRemoveKey = fail\n    kubevirt.io/kubevirt/pkg/virtctl/reset::TestReset = fail\n    kubevirt.io/kubevirt/pkg/virtctl/unpause::TestPauseUnpause = fail\n    kubevirt.io/kubevirt/pkg/virtctl/template/process::TestProcess = fail",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0363",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 2/2 | P2P: 4/4\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0370",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0371",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 55/55\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0385",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0388",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 55/55\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0389",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 0/0\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0392",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 2/2 | P2P: 53/53\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0395",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0404",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0421",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 661/661\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0425",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 662/662\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0426",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 2/2 | P2P: 675/675\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0427",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 662/662\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0428",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 715/715\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0439",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 2/2 | P2P: 572/572\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0440",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 1/1\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0442",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 3/3 | P2P: 1293/1293\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0447",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 189/189\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0448",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 2/2 | P2P: 605/605\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0461",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 69/69\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0462",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 2/2 | P2P: 220/220\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0470",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 124/124\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0471",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 131/131\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0478",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 662/662\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0485",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 496/496\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0496",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 137/137\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0498",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 120/120\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0500",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 133/133\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0507",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 135/135\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0509",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0). Verifier: F2P: 1/1 | P2P: 131/131\nReward: 1",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0517",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0519",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0522",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0526",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0536",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0538",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0542",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0543",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0544",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0547",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0550",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0551",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0552",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0554",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0562",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0563",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0572",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0573",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0576",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0578",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0579",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0583",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0587",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0588",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0590",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0591",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0593",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0597",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0600",
+        "reward": 1.0,
+        "feedback": "Task fully solved (reward 1.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          1.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0604",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0606",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0608",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0611",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      },
+      {
+        "task_id": "task-0613",
+        "reward": 0.0,
+        "feedback": "Task not solved (reward 0.0).",
+        "n": 1,
+        "stderr": 0.0,
+        "trial_rewards": [
+          0.0
+        ],
+        "raw": {
+          "errored": false,
+          "errored_trials": 0,
+          "n_trials": 1
+        },
+        "metrics": []
+      }
+    ],
+    "cost_usd": 0.0,
+    "tokens": 0,
+    "seconds": 6533.140772104263
+  },
+  "best_id": "seed"
+}
