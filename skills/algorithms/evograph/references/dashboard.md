@@ -4,9 +4,10 @@ This is a **file-format contract**: agents only ever *write* the files described
 the run dir, in the formats given. **Agents never call any backend** — they write these files
 and the viewer reflects them within a couple of seconds.
 
-The read-only viewer that renders these files (a small FastAPI backend serving a prebuilt React
-app, pointed at the run dir) ships separately with the weakness-graph view. This skill on its own
-just produces the files; the view is optional and mounted via cap-evolve's custom-view tab.
+The renderer is the **cap-evolve dashboard itself**: its reducer reads `wiki/` straight out of the
+run dir and shows a **Weakness graph** tab. There is no separate server, no port to pick, and no
+registration step — the tab appears because the files exist, in the live dashboard and in the
+self-contained static export alike.
 
 So: *anything you want the user to see, write into one of these files in this format.*
 
@@ -59,12 +60,15 @@ is rendered in its **own Final-test panel**, not plotted on the rounds line — 
 
 Front-matter drives the graph: `slug, status (open|in-progress|completed|solved|reverted), tags,
 discovered_in_round, attacked_in_rounds, solved_in_round, reverted_in_rounds, branch,
-affected_tasks, solutions`. Schema + example: [clustering.md](clustering.md).
+affected_tasks, solutions, related`. Each `related` entry is a `slug` + a one-line `why` — those
+are the graph's edges. `status` is one of `open | in-progress | completed | solved | reverted`, and
+`affected_tasks` is frozen after the weakness's discovery round.
 
 ### Solutions → `wiki/solutions/<weakness-slug>/<sol-id>/{solution.md,changes.diff}`
 
 Front-matter drives the solution cards (`outcome, primary_metric, secondary_metrics, new_record,
-timestamp, …`) and `changes.diff` drives the diff tabs. Schema: [graph.md](graph.md).
+timestamp, weakness, round, attempt_index, branch, tags`) and `changes.diff` drives the diff tabs.
+The `sol-id` is `r<N>-h<M>`: round N, hypothesis M for that weakness.
 
 ### Live progress → `runs/round-<N>/agents/<weakness-slug>.log`
 
@@ -74,23 +78,19 @@ line doesn't already start with a `HH:MM[:SS]` time, the dashboard prefixes it w
 of the machine running the dashboard** (i.e. your timezone), so timestamps stay consistent — the
 same clock as `scripts/now.py`.
 
-## API the backend exposes (for reference; agents don't call it)
+## What the dashboard renders from these files (for reference; agents only write files)
 
-- `GET /api/graph` → weakness nodes (`slug, status, tags, num_solutions, has_record, related, …`) +
-  **edges between related weaknesses** (from each weakness's `related` field). The UI lays this out as
-  a graph (dagre) and offers a status filter (solved / completed / in-progress / open / reverted). Solutions are not graph
-  nodes — they live in the weakness detail.
-- `GET /api/weakness/{slug}` → front-matter + rendered markdown + its solutions + per-task metric
-  history.
-- `GET /api/solution/{weakness}/{sol_id}` → rendered markdown + `changes.diff` + metric + record flag.
-- `GET /api/results` → the metric-over-rounds series from `wiki/results/*.json`.
-- `GET /api/run-config` → the run's `<run_dir>/run-config.json` (free-form; optional). If you drop a
-  `run-config.json` in the `<run_dir>/` dir, a **Run config** button appears in the header and opens a
-  pretty, generic view of whatever JSON is there — no schema required.
-- `GET /api/progress/{slug}/stream` → Server-Sent Events tailing the weakness's latest agent log.
+- **Weakness graph tab** — one row per `wiki/weaknesses/<slug>.md`, showing `status`, `tags`,
+  `discovered_in_round` / `solved_in_round`, `affected_tasks`, the `related` edges, and how many
+  solution dirs exist under `wiki/solutions/<slug>/`.
+- **Primary metric over rounds** — one bar per `wiki/results/round-<N>.json`, read from the metric
+  marked `"primary": true`. A round with no `completed_at` is labelled *running*.
+- **Final-test panel** — `wiki/results/final-test.json`, shown apart from the rounds so a number
+  scored once on sealed data is never mistaken for another round.
+- Everything else in these files is preserved and ignored, so extra keys are always safe.
 
 ## What this buys the agents
 
 No registration, no build step, no API client. Write a markdown file or append a log line and the
-user sees it. The wiki stays the single source of truth (see
-[the SKILL.md honesty rules](../SKILL.md)).
+user sees it. The wiki stays the single source of truth for what an
+evograph run recorded — but see SKILL.md: its per-weakness numbers were never val-gated.

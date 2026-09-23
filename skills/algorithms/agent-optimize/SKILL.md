@@ -1,141 +1,323 @@
 ---
 name: agent-optimize
-description: Fully-agentic, free-form optimization algorithm. Use in agent orchestration mode when you want the conversational agent to own the whole search — understand the benchmark/inputs first, run the baseline, then freely propose capability edits, triage on cheap task subsets, and accept only on a full-val significance gate, all bounded by a free-text stop_condition it re-reads with the run-dir spend. Agent-mode only (orchestration_mode: agent); for a deterministic loop use hill-climb | gepa | skillopt.
+description: 'Free-form optimization algorithm for agent orchestration mode: the conversational agent owns the whole search — proposing capability edits itself, screening them cheaply, gating each on full val, and sealing test once. Use when orchestration_mode is agent and algorithm_skill is agent-optimize. For a deterministic loop use hill-climb, gepa or skillopt instead.'
 component: algorithm
 argument-hint: "agent-mode only — set orchestration_mode: agent + algorithm_skill: agent-optimize"
-allowed-tools: Read, Write, Edit, Bash
+allowed-tools: Read, Write, Edit, Bash, Task
 provides: [candidate]
 needs: [scores, traces, candidate]
 ---
 
 # agent-optimize — the free-form loop you own
 
-This is the one algorithm with **no deterministic subprocess** and **no per-iteration
-optimizer**. You — the conversational agent that ran intake — are the optimizer, the
-scheduler, and the stopping rule. `cap-evolve run` (with `orchestration_mode: agent`)
-does check → baseline, prints a handoff with the `run_dir`, and returns. From there the
-search is yours: what to edit, what to evaluate, when to evaluate it, when to call it
-done. Your freedom is bounded by exactly two things — the **honesty invariants** below
-(most of which core enforces whether you cooperate or not) and the project's free-text
-**`stop_condition`**.
+The one algorithm with **no deterministic subprocess** and **no per-iteration optimizer**: you — the agent
+that ran intake — are the optimizer, the scheduler and the stopping rule. `cap-evolve run` (with
+`orchestration_mode: agent`) does check → baseline, prints a handoff, and returns. From there the search is
+yours, bounded by core's invariants and the free-text **`stop_condition`**. Drive the *existing*
+primitives so the run dir and dashboard stay populated as in a deterministic run (unattended:
+`host.py`/`--agent-driver`).
 
-Nothing new lives in core for this. You drive the *existing* cap-evolve primitives (the
-phase scripts + the `RunDir` API), so `events.jsonl` / rollouts / results / snapshots stay
-populated and the dashboard renders unchanged.
+## Shell variables used below
+
+```bash
+R="<run_dir from the agent-mode handoff>"      # e.g. .capevolve/run_20250101_120000
+P="<project dir>"                              # the dir holding capevolve.yaml + adapters/
+S="${CAPEVOLVE_SKILLS_DIR:?set CAPEVOLVE_SKILLS_DIR to the skills/ dir}"
+A="$S/algorithms/agent-optimize/scripts"       # this skill's helpers
+mkdir -p "$R/work"                             # working copies live here (RunDir does NOT create it)
+```
+
+Every script imports `_bootstrap` itself (no `PYTHONPATH`) and prints JSON on stdout.
 
 ## Phase 0 — understand before you optimize
 
-Do this once, before any edit, and **ask the user any blocking question here** (mirror
-intake's ask-if-missing discipline) so the loop then runs unattended:
+Once, before any edit, and **ask the user any blocking question here** so the loop then runs unattended.
+Read `PROJECT.md`, `capevolve.yaml`, the adapter, every file under `capability_path`,
+`./guidance/<cap>/SKILL.md`, `optimizer/INSTRUCTIONS.md` if present; understand the task,
+`run_target` output, `score()` reward, per-task feedback, val/test size, `num_trials`,
+`gate_mode`/`gate_k_se`, edit surface.
 
-- Read `PROJECT.md`, `capevolve.yaml`, the adapter (`adapters/adapter.py`), and every file
-  under `capability_path` (the seed capability you'll edit).
-- Understand what **one evaluation** does: what a task is, what `run_target` produces, what
-  `score()` rewards, and what the per-task **feedback** says (that is your learning signal).
-- Note the **val and test sizes**, `num_trials`, `gate_mode`/`gate_k_se`, and the capabilities
-  under optimization (the allowed edit surface, e.g. `system-prompt`, `tools`).
-- Read the free-text **`stop_condition`** and restate it to yourself as concrete checks
-  (score goal on full val, cost ceilings, time). This is what tells you when to finish.
+Then let `spend.py` parse the free-text **`stop_condition`** rather than restating it: it prints
+`constraints.predicates`, every concrete check it extracts. **If
+`constraints.ambiguous` is non-empty, ASK THE USER before the loop starts** — a vague clause is reported,
+never guessed at; this is the cheapest moment to ask.
 
 ## Agent-mode loop
 
-Everything below runs against the handed-off `run_dir` (call it `$R`) and project (`$P`).
-`$S` is the skills dir (`$CAPEVOLVE_SKILLS_DIR`). Baseline has already scored the seed on
-val and set `best_id = seed`; read its val mean/stderr from `$R/baseline.json`.
+**Every round's objective: the fewest evaluations that reach the target score.**
 
-Each round:
+Baseline has scored the seed on val and set `best_id = seed`. Each round:
 
-1. **Read the signal.** Look at the current best candidate's per-task val rollouts under
-   `$R/rollouts/val/` (and the diagnose skill if you want them clustered) to see which tasks
-   fail and *why*. This is free — no new evaluation.
-2. **Propose ONE coherent edit yourself.** Copy the current best into a fresh candidate dir
-   and edit it (you may consult the `system-prompt` / `tools` capability skills for guidance,
-   and spawn helper subagents for parallel sub-tasks — but you make the edit):
-   ```bash
-   cp -r "$R/candidates/$(python -c "from cap_evolve import RunDir;print(RunDir.open('$R').best_id)")" "$R/work/cand_N"
-   # …edit $R/work/cand_N/policy/policy.md and/or tools/tools.py …
-   ```
-   Every edit must encode a **general rule** — never hardcode a task's id, gold value, or answer.
-3. **(Optional) Cheap triage.** To decide if an edit is even worth a full-val eval, you may
-   informally sample a **subset** of tasks. Triage is *informational only* — it may **never**
-   be the accept/reject decision (see honesty invariant 1).
-4. **Honest gate on FULL val.** Evaluate the candidate on the whole val split — this writes
-   rollouts+results into the run dir:
-   ```bash
-   python "$S/phases/evaluate/scripts/run.py" --run-dir "$R" --project "$P" \
-          --candidate "$R/work/cand_N" --split val --n-trials <num_trials>
-   ```
-   Then apply the significance gate against the current best's val mean:
-   ```bash
-   python "$S/phases/gate/scripts/run.py" --mode paired --k-se <gate_k_se> \
-          --current <best_mean> --candidate <cand_mean> \
-          --current-stderr <best_se> --candidate-stderr <cand_se>
-   ```
-   Accept **only** if the gate says Δ > k·SE. Also apply **no-regression**: reject if the
-   candidate breaks any val task the current best passed, even when the mean rises.
-5. **Commit the decision through the run dir** (so the dashboard + `best_id` stay real):
-   ```bash
-   python - <<'PY'
-   from cap_evolve import RunDir
-   rd = RunDir.open("$R")
-   rd.snapshot("cand_N", "$R/work/cand_N")   # persist as a candidate
-   rd.set_best("cand_N")                       # ACCEPT: make it the new parent
-   rd.log_event("accept", candidate="cand_N", val=<cand_mean>, note="<one-line why>")
-   rd.update_spent(iterations=1)
-   PY
-   ```
-   On **reject**: `log_event("reject", …)` + `update_spent(iterations=1)` and keep the old best.
+**0. Check you can afford the round — for the number of candidates you intend to run**, with
+`--n-siblings N` whenever you plan N of them, *before* spending:
 
-## See your constraints every few steps
-
-There is no `cap-evolve status` command — you read what already exists. **Every 2–3 rounds**,
-re-read both:
-
-- the free-text `stop_condition` from `capevolve.yaml` (score goal, cost ceilings, time), and
-- the run-dir spend:
-  ```bash
-  python -c "from cap_evolve import RunDir; import json; print(json.dumps(RunDir.open('$R').spent.to_dict(), indent=2))"
-  ```
-
-Compare spend and the latest **full-val** mean against the `stop_condition`, then decide:
-keep optimizing, or stop and seal. (The Stop hook also re-nudges you across turns so you
-keep driving until the run is finalized.)
-
-## Stop & seal (exactly once)
-
-Stop when the `stop_condition` is met (e.g. full-val mean ≥ the score goal) or the budget/
-stall is hit. Then seal the held-out **test** split exactly once and write the report:
 ```bash
-python "$S/phases/finalize/scripts/run.py" --run-dir "$R" --project "$P" --n-trials <num_trials>
-python "$S/phases/report/scripts/run.py"   --run-dir "$R"
+python "$A/spend.py" --run-dir "$R" --project "$P" --n-siblings 3
 ```
-(There is **no `cap-evolve finalize` subcommand** — the orchestrate/host prose uses that as
-shorthand; the real seal is the finalize *phase script* above, which scores the best on test
-once and burns the seal. A second finalize raises `TestSealError`.) A run with no finalize
-has no result.
 
-## Honesty invariants (non-negotiable; core enforces most of these)
+Act on the single `recommendation`: **`stop`** (a ceiling breached, `budget_exhausted()` true, or the score
+goal met on FULL val) → **Stop & seal**; **`narrow_scope`** (≥80% of a ceiling consumed, goal unmet) → ONE
+cheap candidate at tier 1, no fan-out; **`continue`** → run the round you planned.
 
-1. **Accept/reject and the score-goal check are ALWAYS on FULL val through the gate.** Cheap
-   subset triage is informational only and may never gate.
-2. **The test split stays sealed until the single finalize.** You never score test during the
-   loop — the evaluate phase physically restricts `--split` to `train|val`; only finalize
-   touches test, once.
-3. **Never edit** `splits.json`, anything under `rollouts/test/`, or gold/test files (a
-   PreToolUse hook blocks it and core owns the seal).
-4. **Generalize, don't overfit** — every edit is a general rule, never a task-specific answer.
-5. **Drive through cap-evolve primitives, never around them** — every val eval via the
-   evaluate phase, every accept via `snapshot` + `set_best` + `log_event`. A round that
-   produced no run-dir artifacts is a bug: fix it before continuing.
-6. **Always finish with finalize + report.**
+`afford.affordable: false` (with `afford.blockers` naming the ceiling) means **do not fan out N** — check
+BEFORE dispatching proposers, since N candidates can blow a budget with room for one.
+`afford.runner_spend_metered: false` means $0 is *unmetered*, not free — bound such a run with
+`max_metric_calls` and report **rollout counts, not dollars**.
 
-## What good vs bad looks like
+**1. Read the signal.** Free — no new evaluation:
 
-- **Good:** Phase 0 done and blocking questions asked up front; each accepted candidate has
-  rollouts + a `set_best`/`accept` event; the score goal is confirmed on full val; the run
-  ends with a single sealed-test number — even if the honest answer is "no significant gain".
-- **Bad:** gating on a triage subset; accepting a mean gain that regresses a passing task;
-  peeking at test mid-run; declaring success on val without ever finalizing.
+```bash
+BEST="$(python "$A/spend.py" --run-dir "$R" | python -c 'import json,sys;print(json.load(sys.stdin)["best_id"])')"
+python "$S/phases/diagnose/scripts/run.py" --run-dir "$R" --tag "$BEST" --split train
+python "$S/phases/diagnose/scripts/run.py" --run-dir "$R" --tag "$BEST" --split val
+```
+
+Read `clusters` for what to fix and `kept_good` for what not to break. **With a disjoint train split,
+diagnose it too and compare its cluster signatures to val's** — free, and it decides whether the round can
+work at all: if the signatures are disjoint, no train-driven edit can move the val mean, and every candidate
+is rejected for a reason that looks exactly like a null result. Say which, in the report. (Baseline
+scores val only, so pay one `evaluate --split train` first.)
+
+**Read the per-task pass rate, not the per-task pass/fail.** At `num_trials: n` a task's reward is
+`k/n`, and that fraction is what separates defects from noise:
+
+| per-task rate | what it is | what to do |
+| --- | --- | --- |
+| `0/n` – `3/10` | a real, reproducible defect | this is where every edit should aim |
+| `4/10` – `7/10` | genuinely unstable behaviour | fix by *removing* ambiguity, not adding rules |
+| `8/10` – `9/10` | noise around a working path | **leave it alone**; "fixing" it is how churn starts |
+
+**Audit the MEASUREMENT before you credit a failure**, in round 1 while free (scoring re-derives
+on persisted rollouts): a failing task is a claim by the scorer. Does the feedback name the
+**defect** or only the tool; does any helper fail **silently**; is *silent* distinguished from
+*wrong*; did the rollout **run**, or is this missing data wearing a 0.0; which components
+actually **gate**? `references/edit-design-lessons.md`.
+
+**After two rejected rounds, read the candidate's TRACE before writing a third** — not "was the rule
+right" but "did the agent follow it at all". Never exercised ⇒ the **form** is wrong; exercised and
+still wrong ⇒ the content is.
+
+**2. Bucket every edit before spending, per the form table below** (deterministic → B,
+probabilistic → A). **A:** sibling candidates, N≥3, gated separately — unchanged default.
+**B:** merge every low-risk structural fix into one working copy, gate once via steps 3–4 — no
+per-fix screen/gate, each part already cleared its own bar alone. Details:
+`references/algorithm.md`, "Bucketing edits before spending".
+
+```bash
+TAG="cand_1"                                   # unique per candidate — it IS the rollout tag
+python "$A/prepare_candidate.py" -r "$R" -t "$TAG"
+# edit the files under $R/work/$TAG your capability owns (Example only: see capability_path).
+```
+
+Every edit encodes a **general rule** — never a task's id, gold value, or answer.
+
+**Choose the edit FORM from the failure TYPE, before you write a word** — the form that fixes one
+failure type measurably backfires on another:
+
+| the failure you observed | the form that fixes it | the form that makes it worse |
+| --- | --- | --- |
+| the rule is stated and the agent skips it under pressure | a prohibition plus the symptom that precedes it ("if you are about to X, you have already failed") | restating the rule — a mid-tier model gets *less* compliant |
+| the agent complies but the call has the wrong shape | a **positive recipe**: what the correct call IS, its parts, in order | a list of things not to do — it produced *more* unwanted output than no guidance |
+| a required element is missing | a **structural REQUIRED slot**, or a code-level precondition | a prose reminder mid-document |
+| behaviour should differ by situation | a conditional on an **observable predicate** the agent can evaluate from tool output | an unconditional rule plus exemptions |
+
+Then: **no nuance clauses**; **exemption clauses do not scope** (still suppresses X); **prefer an in-code
+guard to a prose rule where the capability owns its tools** — prose when the agent lacks a decision
+criterion, code when it has one and violates it. Costs, and the guard-closure trap: `edit-design-lessons.md`.
+
+**Every round evaluates a null control first** — a byte-for-byte copy of the current best; that
+eval is the noise floor. **Read `$R/rejected.jsonl`, and make each proposal STRUCTURALLY
+different** — never a narrower version of a rejected rule.
+
+**2b. Micro-test first, when the cluster has one** — `microcase.py run-all`; `micro_test_fail`
+rejects on the spot, no rollout paid.
+
+**3. Cheap SUBSET screen — the promotion ladder.** Do not pay full val to learn an edit is bad.
+Default to your own subset, named via `--ids` — the tasks THIS edit plausibly touches (the primary
+interface, `references/algorithm.md` "Choosing your own subset"; `--tier 1/2/3` falls back with no
+better idea which tasks to pick):
+
+```bash
+python "$A/screen.py" --run-dir "$R" --project "$P" \
+       --candidate "$R/work/$TAG" --ids <comma-separated task ids> --k-se 1.0
+```
+
+Only the candidate pays, for the subset. `decision` is `kill` or `promote`
+— **never accept** — kills only on proven harm. **Check the arithmetic before trusting a screen:**
+`savings.breakeven_kill_rate` (`fired / full_val_rollouts`) is the fraction it must kill to pay for itself;
+`savings.net_rollouts` books what it cost. Screen only when that break-even sits below your observed kill
+rate — on a small val the tier-1 floor makes it unreachable, so pay full val directly — and read a screen as
+evidence about the tasks the edit targeted, never as a gate decision.
+
+**4. Honest gate on FULL val.** Before this step, confirm every addressable diagnosed cluster
+for the round is folded in or deferred (with why) — "Bucketing edits before spending",
+`algorithm.md`. Evaluate the whole split (this writes rollouts + results under tag
+`$TAG` — the evaluate phase tags by the candidate **dir name**), then decide off those rollouts:
+
+```bash
+python "$S/phases/evaluate/scripts/run.py" --run-dir "$R" --project "$P" \
+       --candidate "$R/work/$TAG" --split val --n-trials <num_trials>
+python "$A/gate_check.py" --run-dir "$R" --candidate "$TAG" --k-se <gate_k_se>
+```
+
+`"verdict"` is evidence, not a command — decide accept/reject yourself, citing the numbers in
+`commit.py --note` (`references/algorithm.md`, "Gate as evidence"). `"indecisive"` means too little of val
+ran, not a rejection. **`regressions` is diagnosis, not a veto**: a per-task drop at `n` trials is an
+estimate, not proof (`--veto-regressions` restores the old no-regression veto; see `gate_check.py`). **Read
+`footprint` before the delta; `unresolved` is no evidence** — `references/algorithm.md`, "Measuring only
+what the edit reaches". `phases/gate/scripts/run.py` inspects the same gate but books no decision.
+
+**5. Commit the decision through the run dir**, so `best_id`, the stall counter and the audit log
+stay real. `--decision reject` keeps the old best; it snapshots the candidate, logs the event
+and advances `iterations` + stall:
+
+```bash
+python "$A/commit.py" --run-dir "$R" --candidate-id "$TAG" --from-dir "$R/work/$TAG" \
+       --decision accept --val <cand_mean> --note "<one line: the general rule you added>"
+cap-evolve dashboard --export "$R"
+```
+
+**On a reject, pass `--reject-basis`** — `screen.py`'s "promote" means "could not prove harm", never "was
+evaluated on full val", so conflating the two makes the run's artifacts contradict themselves. `gate` (a
+full-val paired gate ran and said reject), `screen_kill` (the screen proved harm), `ceiling` (arithmetic
+proved no accept reachable, full val never paid), `budget` (screen evidence plus a budget call, not a
+gate decision), `infra` (missing data). So `screen: promote` + `reject_basis: ceiling` is coherent.
+
+`commit.py` **refuses a `--candidate-id` that already carries a decision event** (`--force` only to
+repair a record deliberately): two drivers tagging a candidate alike otherwise produce two decision
+events over ONE set of rollouts. Pass `--optimizer-usd/--optimizer-tokens/--optimizer-seconds` for
+**your own** proposal cost — the evaluate phase records the runner's, nothing records the proposer's.
+
+**Two decisions that are NOT rejects** (a reject advances **stall**): `--decision inconclusive` for an
+unresolved round (`verdict_stable: false`) — run `grow.py` first, required unless forced;
+`--decision provisional` for a Δ>0 round under the bar (`directionally_positive_but_inconclusive`),
+after which `grow.py` buys trials on the SAME candidate, re-gating at the pooled n, capped at 2.
+`references/algorithm.md`.
+
+**6. Write the handover before ending this round** — append one `## Iteration <cid>` entry below
+`work/$TAG/JOURNAL.md`'s marker (never `$R/JOURNAL.md`, framework-owned): what you tried, why, what
+the numbers said. The only thing the NEXT round reads (`references/algorithm.md`).
+
+## Parallel round (optional)
+
+**The whole of steps 3–4 for a round is one command.** `round.py` builds the null control, evaluates
+every tag in parallel *processes* (each runs its own adapter `apply()`, which mutates a process-global
+registry and must never be shared), gates them serially, and prints one table:
+
+```bash
+python "$A/round.py" --run-dir "$R" --project "$P" \
+       --candidates cand_1,cand_2,cand_3 \
+       --n-trials <num_trials> --k-se <gate_k_se> --concurrency 8 --max-parallel 2
+```
+
+`--concurrency` is the gate's *measurement* concurrency, deliberately low by default; `round.py`
+refuses one too hot to resolve its own verdict — never raise it to buy wall clock. Read
+`noise_floor_from_control` FIRST: a candidate inside that band is not evidence, whatever its verdict.
+`round.py` never commits — which part of a bundle to keep is your call.
+
+Four invariants, to state before every fan-out (the reasoning, and where fan-out pays best, are under
+*Parallelism* in [`references/algorithm.md`](references/algorithm.md)):
+
+1. **Diagnosis fans out freely** — read-only, zero rollouts: one `cap-evolve-diagnoser` per failure
+   cluster or rollout shard, then merge their JSON.
+2. **Proposal fans out across distinct copies, one `prepare_candidate.py` per sibling (never
+   bare `cp -r`), tag unique per sibling** — rollouts are `<task>__<tag>__t<k>.json`, so a
+   shared tag interleaves two evals into the same filenames and corrupts both scores.
+3. **The gate stays serial** — gate + commit one sibling at a time, and after any accept **re-run
+   `gate_check.py` for every remaining sibling against the new best**. Skipping that re-gate
+   double-counts a gain and admits an edit that never beat what it now stacks on.
+4. **Never fan out across the test split, and pay before you fan out** — `spend.py --n-siblings N`
+   must say `affordable: true` first.
+
+Concurrency also composes *inside* one evaluation (`screen.py --workers N` / `CAPEVOLVE_WORKERS=N`,
+pooling rollout generation only — byte-identical to serial). Opt in only when `run_target` is
+thread-safe: no shared scratch dir, single live container, or module-global client.
+
+### Per-task fan-out — the cheap gradient
+
+Reach for this only when the baseline's `k/n` bands show the loss **concentrated in a few named tasks**: one
+task at `n_trials` then buys the same bit as a `val_n × n_trials` full-val round, about a failure that
+demonstrably exists. Helpers, in order — `taskeval.py` (run **detached**: a per-task eval can outlive a
+harness timeout while healthy), `mechanisms.py` (the shared ledger; `list` BEFORE you diagnose, or two
+optimisers implement one fix and collide at merge with only one measured), `integrate.py`, `funcmerge.py`,
+`merge_taskopt.py` — then gate the artifact once on full val via `round.py`. Economics, briefing contract,
+canary selection, every flag: [`references/per-task-fanout.md`](references/per-task-fanout.md). Two rules
+decide whether the shape is safe at all, so they live here:
+
+**A parallel optimiser's deliverable is a MECHANISM WITH TRACE PROOF, not a rate.** A fan-out is a
+high-load regime by construction — where a per-task rate cannot resolve the effect — so ask for
+load-independent evidence (the guard fired, the next action changed), then gate the survivors serially.
+
+**A multi-branch artifact is assembled with `integrate.py`, never by one merge**, one branch at a time with
+a measurement after each: fewer mechanisms routinely beat more, and one number for N simultaneous changes
+cannot tell you that. `funcmerge` merging cleanly is **not** evidence the branches compose — Clean merge is
+a syntactic property; composition is an empirical one.
+
+## Measurement discipline
+
+**Measure step 2's null control twice**: the gap between two byte-identical parents is the round's bar, and a
+bar smaller than that is not a gate. `round.py` does that, and reuses the replicates while `best_id` is
+unchanged (`control_reuse`). Two more rules; the rest — ceiling arithmetic, the binomial floor,
+mechanism-vs-artifact designs, gating the sum, the sign test — is in
+[`references/measured-lessons.md`](references/measured-lessons.md).
+
+1. **Explore fast, gate slow, gate ALONE.** The load knob is *total in-flight requests* (K processes at
+   concurrency C is K·C), not any per-process flag, and oversubscription fails silently as latency, not an
+   error. Pause the fan-out, run both gate arms in one batch alone; if you cannot quiet the machine, say
+   so next to the verdict.
+2. **Two independently-seeded blocks, agreeing in sign, before a small effect is a result.** A paired
+   run's SE is over *tasks*, so it cannot see run-to-run nondeterminism; `multirep.py` takes the error
+   across whole runs (`--base-seed` picks the block — raising `--n` extends the same one, not a
+   replication). Several full runs unaffordable ⇒ "not resolvable at this budget" is the honest output.
+
+## Stop & seal, then MEASURE (once)
+
+**Before you stop, merge disjoint-cluster `accepted` candidates — required** (`algorithm.md`
+§Merging). Spend is not a CLI subcommand: **every 2–3 rounds** run `spend.py`.
+Everything it reports is re-read from the run dir, never a total in your head — which keeps a `$6.00`
+cap from becoming `$6.01`. (The Stop hook re-nudges until finalized; `goal_reminder.py` re-injects.)
+Stop when `recommendation` is `stop`, then produce the run's one honest table — seed vs best on
+**val**, on **train** when the spec defines one worth reporting, and on the **sealed test** split
+scored once:
+
+```bash
+python "$A/measure.py" --run-dir "$R" --project "$P" --train auto
+python "$S/phases/report/scripts/run.py" --run-dir "$R"
+```
+
+`measure.py` reads val off the rollouts the gate already used (free), evaluates train only when it adds
+information, and seals test through the same `harness.finalize` the finalize phase calls — so it is
+interchangeable with `phases/finalize/scripts/run.py`. Report its four refusals unsoftened: an **empty** split is `empty`, not 0.0; a **no-holdout** spec is a **FIT metric, not
+generalisation**, with the overlap counted; a negative `screen_ledger.net_rollouts` says screening was
+pure overhead; `best_id == "seed"` is a **null result with a diagnosed cause**, not a 0.000 gain.
+(Sealing is that phase script, **not a CLI subcommand**; a second finalize raises `TestSealError`.)
+Wait for it to exit, or the seal is wasted. No finalize, no result.
+
+## Honesty invariants that are yours by hand
+
+Core enforces the split seal, the val-only gate and the tamper guard whether you cooperate or not
+(`skills/phases/{evaluate,gate,finalize}` document them). Two are yours: **never hand a subset result
+to `gate_check.py`** — its `coverage` reads 1.0 because its denominator *is* the subset; and **a round
+with no run-dir artifacts is a bug**, so fix it rather than drive around the primitives.
+
+**Report a broken framework file, don't hand-work around it.** `references/algorithm.md` §honesty.
 
 ## References
-- `references/algorithm.md` — why free-form + how honesty survives full agent autonomy, with sources.
+
+One level deep — each read standalone, none points at another.
+
+- [`references/algorithm.md`](references/algorithm.md) — why free-form, how honesty survives full
+  autonomy, screening break-even, parallel-safe steps, the constraint surface. **Load** before
+  relying on a screen, growing a candidate, or skipping a rule.
+- [`references/measured-lessons.md`](references/measured-lessons.md) — every measurement rule:
+  binomial floor, full val vs a hard subset, load-vs-noise tables, the sign test. **Load** before
+  your first gate decision on a new benchmark, or when a result surprises you.
+- [`references/per-task-fanout.md`](references/per-task-fanout.md) — fan-out economics, briefing
+  contract, canary selection, every helper's flags. **Load** when the loss is concentrated in a
+  few named tasks.
+- [`references/edit-design-lessons.md`](references/edit-design-lessons.md) — scorer audit, guard
+  closure, measured backfires behind the edit-form table. **Load** before editing a surface the
+  first time, or after two rejects.
+- [`references/microcase.md`](references/microcase.md) — micro-test schema, `gen` contract.
+  **Load** before proposing a candidate for a cluster with (or needing) a case.
+- [`references/context-sources.md`](references/context-sources.md) — the Phase-0 sources compared.

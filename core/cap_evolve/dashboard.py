@@ -25,18 +25,43 @@ The candidate **graph** schema (``reduced["graph"]``)::
         {"id", "parent", "children": [...], "status": seed|accepted|rejected|failed,
          "val", "stderr", "per_task": {task_id: reward}, "feedback": {task_id: str},
          "cost_usd", "tokens", "seconds", "optimizer_seconds", "runner_seconds",
-         "iteration", "reason", "epoch"?, "merge_of"?, "best_so_far"}
+         "iteration", "reason", "epoch"?, "merge_of"?, "best_so_far",
+         "gate_delta"?, "gate_stderr"?, "gate_n"?, "gate_k_se"?, "gate_threshold"?,
+         "gate_resolvable_effect_size"?, "screened": bool | None,
+         "cluster_ids"?: [...], "subset"?: {"task_ids": [...], "tier": int | None},
+         "micro_tests"?: [...]}
      ],
      "root": "seed", "best_id": "..."}
+
+``cluster_ids``/``subset``/``micro_tests`` are a courtesy copy from ``graph.jsonl`` (see
+``graph.py``) when that candidate has a node there — the events-based reconstruction above has
+no other source for which diagnose() cluster an edit targeted or which task subset a cheap
+screen ran on, only whether one ran at all (``screened``).
+
+The ``gate_*`` keys are present when the algorithm's commit step RECORDED that number on its
+accept/reject event — under either naming convention on disk: the prefixed ``gate_delta`` a
+current ``commit.py`` writes, or the UNPREFIXED ``delta`` an older one wrote (see
+``_GATE_FIELD_ALIASES``). The gate-decisions table prefers whichever is present and falls back
+to regexing the prose ``reason`` only when neither is.
+``screened`` is ``None`` when no event recorded compliance for this candidate's tag, else
+the ``screened_before_fullval`` value read generically off any event that carries it.
 
 The **summary** schema (``reduced["summary"]``)::
 
     {"run_id", "baseline_val", "best_val", "delta_pct", "test_reward", "test_sealed",
-     "test_pass_k", "counts": {accepted, rejected, failed, seed, total},
+     "test_pass_k", "train_reward", "train_baseline_reward", "train_delta", "train_equals_val",
+     "counts": {accepted, rejected, failed, seed, total},
      "frontier": int, "tasks": [task_id, ...],
      "wall_clock_seconds", "optimizer_seconds", "runner_seconds",
      "cost": {optimizer_usd, runner_usd, total_usd}, "tokens": int,
-     "gate_warnings": [...], "diagnoses": [...], "git_log": [...]}
+     "gate_warnings": [...], "diagnoses": [...], "git_log": [...],
+     "controls": [{"tag", "reward", "stderr", "n", "iteration", "t"}, ...]}
+
+``controls`` lists null-control replicate evaluations — evaluate-only measurements with no
+candidate-graph node — detected by ``_is_control_event``: the documented ``ctl_null`` TAG
+PREFIX convention (agent-optimize's ``ctl_null_i<N>`` plus its ``r<k>``/``a<k>`` replicates),
+or an explicit ``role: "control"`` / truthy ``is_control`` field on the event. They also appear
+in ``evaluations`` with ``kind: "control"``, so a control is never in neither place.
 
 Optional panels degrade silently: when per-task data / diffs / finalize are missing
 the renderer hides the panel rather than crashing.
@@ -51,6 +76,8 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+
+from . import graph as graph_mod
 
 # ---------------------------------------------------------------------------
 # Secret redaction
@@ -131,21 +158,53 @@ def redact(obj):
 # Reducer
 # ---------------------------------------------------------------------------
 
-def _read_jsonl(path: Path) -> list[dict]:
+def _safe_subpath(base, *parts) -> Path | None:
+    """``base`` joined with ``parts``, proven to stay *inside* ``base``, else ``None``.
+
+    Every filesystem path this module builds goes through here. The run dir arrives
+    from a caller — the dashboard backend resolves it from an HTTP path segment — and
+    several of the segments joined onto it come from the run's own artifacts (a
+    candidate id in the event log, a ``slug:`` in wiki front matter), so containment is
+    proven *here*, locally and visibly, instead of being trusted from a resolver two
+    modules away. ``realpath`` collapses ``..`` and resolves symlinks first, so a
+    ``rollouts`` symlink pointing out of the run dir is refused just like ``../../etc``.
+
+    ``None`` means "escapes the base"; every call site treats that as "not there".
+    """
+    base_dir = os.path.realpath(base) + os.sep
+    p = os.path.realpath(os.path.join(base_dir, *(str(x) for x in parts)))
+    if not p.startswith(base_dir):
+        return None
+    return Path(p)
+
+
+def _exists_in(base, *parts) -> bool:
+    """Does ``base/*parts`` exist *and* stay inside ``base``? (An escape is "no".)"""
+    p = _safe_subpath(base, *parts)
+    return p is not None and p.exists()
+
+
+def _read_jsonl(path: Path | None) -> list[dict]:
     out = []
-    if path.exists():
+    if path is not None and path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line:
                 try:
-                    out.append(json.loads(line))
+                    rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                # A line that decodes to valid JSON but not an object (e.g. a bare
+                # string) is not a record any caller here can use — every caller
+                # treats each line as a dict (``ev.get(...)``); skip it like a
+                # malformed line rather than handing callers a non-dict to crash on.
+                if isinstance(rec, dict):
+                    out.append(rec)
     return out
 
 
-def _read_json(path: Path) -> dict:
-    if path.exists():
+def _read_json(path: Path | None) -> dict:
+    if path is not None and path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
@@ -169,6 +228,51 @@ def _per_task_from_rollouts(run_dir, tag: str, split: str = "val"):
     return per, fb
 
 
+def _val_per_task_file(root: Path) -> dict:
+    """``val_per_task.json`` — per-candidate per-task val rewards, when the run wrote it.
+
+    Rollouts are the primary source, but they are not always kept: an agent-driven run
+    commonly persists the re-derived per-candidate record as ``val_per_task.json`` and
+    prunes the raw rollout files. Without this the per-task matrix showed a lone seed
+    column and every candidate's "tasks scored" read 0 — for a run whose whole point was
+    which tasks each edit fixed and broke.
+
+    Three shapes exist across real runs and all three are read, because a reader who has
+    the data on disk should not be shown a blank column over a serialisation detail::
+
+        {tag: {"per_task": {tid: reward}, "stderr": .., "n_scored": .., "fixed": [..]}}
+        {tag: {tid: reward}}
+        {tag: {tid: {"reward": .., "feedback": ".."}}}
+
+    Returns ``{tag: {per_task, feedback, stderr, n_scored, fixed, broke}}``; anything
+    unrecognised is skipped rather than guessed at, so absent stays absent.
+    """
+    def _norm(inner: dict) -> tuple[dict, dict]:
+        per, fb = {}, {}
+        for k, v in inner.items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                per[str(k)] = float(v)
+            elif isinstance(v, dict) and isinstance(v.get("reward"), (int, float)):
+                per[str(k)] = float(v["reward"])
+                if isinstance(v.get("feedback"), str):
+                    fb[str(k)] = v["feedback"]
+        return per, fb
+
+    raw = _read_json(_safe_subpath(root, "val_per_task.json"))
+    out = {}
+    for tag, rec in (raw.items() if isinstance(raw, dict) else ()):
+        if not isinstance(rec, dict):
+            continue
+        inner = rec.get("per_task")
+        per, fb = _norm(inner if isinstance(inner, dict) else rec)
+        if per:
+            out[str(tag)] = {"per_task": per, "feedback": fb,
+                             "stderr": rec.get("stderr"), "n_scored": rec.get("n_scored"),
+                             "fixed": [str(x) for x in (rec.get("fixed") or [])],
+                             "broke": [str(x) for x in (rec.get("broke") or [])]}
+    return out
+
+
 def _trials_for(run_dir, tag: str, split: str) -> int:
     """How many trials a ``tag`` was evaluated with, read from its rollout files.
 
@@ -176,8 +280,8 @@ def _trials_for(run_dir, tag: str, split: str) -> int:
     ``harness.evaluate_candidate``); the trial count is ``max(k)+1`` over the files
     of a single task. Returns 0 when no rollouts were persisted (synthetic logs).
     """
-    vdir = Path(run_dir.rollouts) / split
-    if not vdir.exists():
+    vdir = _safe_subpath(run_dir.rollouts, split)
+    if vdir is None or not vdir.exists():
         return 0
     best = 0
     seen_task = None
@@ -205,7 +309,8 @@ def _trials_from_per_task(per_task: list) -> int:
 
 def _git_log(root: Path) -> list[dict]:
     """One row per iteration commit from the run dir's git store (empty if none)."""
-    if not (root / ".git").exists() or not shutil.which("git"):
+    gitdir = _safe_subpath(root, ".git")
+    if gitdir is None or not gitdir.exists() or not shutil.which("git"):
         return []
     try:
         r = subprocess.run(
@@ -229,16 +334,844 @@ def _step_candidate(ev: dict):
     return ev.get("candidate") or ev.get("candidate_id")
 
 
+# ---------------------------------------------------------------------------
+# Algorithm identity, run status, phases — all DERIVED FROM EVIDENCE
+# ---------------------------------------------------------------------------
+
+# An event kind that only one algorithm ever emits identifies the algorithm. Ordered
+# most-specific first; the first hit wins. Nothing here guesses: a run with no
+# distinguishing event stays ``None`` (the UI says "not recorded", never invents one).
+_ALGO_MARKERS = (
+    ("gepa", ("gepa_start", "gepa_val_gate", "gepa_local_gate", "gepa_select",
+              "gepa_merge_local", "gepa_merge_skip", "gepa_stop", "gepa_resume")),
+    ("skillopt", ("skillopt_start", "skillopt_step", "skillopt_slow_update",
+                  "skillopt_slow_eval")),
+    ("evograph", ("evograph_round", "evograph_weakness", "evograph_solution")),
+    # ``screen`` is agent-optimize's tiered cheap-screen event (skills/algorithms/
+    # agent-optimize/scripts/screen.py) and no other algorithm emits it. Without it a
+    # real agent-optimize run that logs only screen/accept/reject — the shape every
+    # actual run has, since the agent drives the loop and emits no "agent_round" —
+    # matched nothing and rendered as "algorithm not recorded" with no agent panels.
+    ("agent-optimize", ("agent_round", "agent_subset", "agent_optimize_step", "screen",
+                        "agent_optimize_compliance")),
+    ("hill-climb", ("convergence", "step")),
+)
+
+#: Every event kind that means "one candidate was proposed and judged". Every algorithm
+#: now writes ``step`` via ``harness.record_iteration`` (#216/#224).
+#:
+#: The legacy kinds STAY here — ``gepa_val_gate`` and agent-mode ``commit.py``'s
+#: ``accept``/``reject`` — because run dirs recorded BEFORE that fix have no ``step``
+#: events at all (that was the bug), and this reducer is what renders them. Dropping
+#: ``gepa_val_gate`` took a historic gepa run's graph from 2 nodes to 1, retroactively.
+#: They cost nothing on a new run: the loop below keys one iteration per CANDIDATE, so
+#: the extra kind lands on the node ``step`` already created.
+#:
+#: ``skillopt_step`` is the one kind deliberately absent, and for a different reason —
+#: it is not a legacy record but epoch DETAIL logged alongside a ``step`` for the same
+#: candidate on the same (current) runs, so it never carried a graph anyone needs.
+#:
+#: ``inconclusive`` is commit.py's third booking kind (``accept``/``reject``/
+#: ``inconclusive``) and carries the SAME audit fields (``gate_verdict``,
+#: ``overrode_gate``, ``reject_basis``) that ``accept``/``reject`` do. Leaving it out
+#: made the carry-forward block below never see them: the ``inconclusive`` event was
+#: skipped outright, and the ``step`` event ``record_iteration`` writes right after it
+#: carries none of those fields itself. ``indecisive_ids`` (above) still keeps its
+#: status out of "accepted"/"rejected" — it was never validly judged either way.
+_STEP_KINDS = ("step", "gepa_val_gate", "accept", "reject", "provisional", "inconclusive")
+
+#: Kinds whose presence means "this candidate was accepted" without an ``accept`` field.
+_ACCEPT_KINDS = ("accept",)
+
+#: Prefixed gate field → the UNPREFIXED spelling of the same number. Both conventions are
+#: real and both are on disk: older ``commit.py`` revisions wrote ``delta``/``stderr``/``n``/
+#: ``k_se``/``threshold``/``resolvable_effect_size`` straight onto the accept/reject event,
+#: current ones write ``gate_*``. The reducer reads the prefixed name first and falls back to
+#: the unprefixed one, so a run renders its real gate numbers whichever version produced it.
+_GATE_FIELD_ALIASES = {
+    "gate_delta": "delta",
+    "gate_stderr": "stderr",
+    "gate_n": "n",
+    "gate_k_se": "k_se",
+    "gate_threshold": "threshold",
+    "gate_resolvable_effect_size": "resolvable_effect_size",
+}
+
+#: Tag-naming convention for a null-control replicate: any evaluate tag starting with
+#: ``ctl_null`` (agent-optimize's ``round.py`` writes ``ctl_null_i<N>`` per round plus
+#: ``...r<k>``/``...a<k>`` replicates). This is a DOCUMENTED convention, not one algorithm's
+#: private detail — an algorithm that wants its controls surfaced either follows the prefix
+#: or sets ``role: "control"`` / ``is_control`` on the event.
+_CONTROL_TAG_PREFIX = "ctl_null"
+
+
+def _is_control_event(ev: dict) -> bool:
+    """Is this ``evaluate`` event a null-control replicate (a noise-floor measurement)?
+
+    Three signals, any of which suffices: an explicit ``role: "control"``, a truthy
+    ``is_control``, or the ``ctl_null`` tag prefix. Only the last one is actually emitted
+    today (checked round.py/commit.py), which is exactly why reading only the first two
+    dropped the whole noise-floor section for every real run; the explicit fields stay
+    recognized so an algorithm that starts setting them needs no reducer change.
+    """
+    return bool(ev.get("role") == "control" or ev.get("is_control")
+                or str(ev.get("tag") or "").startswith(_CONTROL_TAG_PREFIX))
+
+
+def _algorithm_from_spec(root: Path) -> str | None:
+    """``algorithm_skill`` from the sibling project spec, or None.
+
+    A run dir does not record which algorithm produced it, so a free-form agent run
+    (which emits no algorithm-specific event) has no marker in its log. The project
+    spec that launched it sits next to the run dir (``<base>/project/capevolve.yaml``)
+    and is real evidence — read, never guessed. Flat ``key: value`` only, matching the
+    zero-dependency reader the rest of the codebase uses.
+    """
+    for spec in (_safe_subpath(root.parent, "project", "capevolve.yaml"),
+                 _safe_subpath(root, "capevolve.yaml")):
+        if spec is None or not spec.is_file():
+            continue
+        try:
+            for line in spec.read_text(encoding="utf-8").splitlines():
+                if line.startswith("algorithm_skill:"):
+                    val = line.split(":", 1)[1].split("#", 1)[0].strip().strip("'\"")
+                    if val:
+                        return val
+        except OSError:
+            continue
+    return None
+
+#: How long the event log may be silent before a non-finalized run stops counting as
+#: running. A real iteration can take tens of minutes (see run_wide: 25-min optimizer
+#: calls), so the window is deliberately generous — better "running" for a while after
+#: a kill than "dead" during a legitimately slow step.
+STALE_AFTER_SECONDS = 45 * 60.0
+
+#: The same window, widened, for a run whose last event is an ``eval_start`` with no
+#: closing ``evaluate`` — i.e. a split is provably mid-flight. Nothing is logged inside
+#: an evaluation, and a legitimate one runs from minutes to many hours (639 test tasks;
+#: swebench builds a container per task), so the ordinary window would call a healthy
+#: run dead partway through its baseline. An evaluation that has not returned in eight
+#: hours is a different matter, and past that the run is reported as interrupted.
+EVAL_STALE_AFTER_SECONDS = 8 * 3600.0
+
+_PHASE_OF_KIND = {
+    "intake": "intake", "target_profile": "intake", "seed_dir_created": "intake",
+    "splits": "baseline", "splits_warning": "baseline", "baseline": "baseline",
+    "baseline_reused": "baseline",
+    "finalize": "finalize",
+}
+
+
+def _phase_for(ev: dict) -> str:
+    kind = str(ev.get("kind") or "")
+    if kind in _PHASE_OF_KIND:
+        return _PHASE_OF_KIND[kind]
+    if kind in ("evaluate", "eval_start"):
+        # The seed-on-val eval IS the baseline; the sealed test eval is finalize.
+        # ``eval_start`` is the same evaluation, just its opening bracket.
+        if ev.get("split") == "test":
+            return "finalize"
+        if ev.get("tag") == "seed":
+            return "baseline"
+    return "optimize"
+
+
+def _infer_algorithm(kinds: set) -> str | None:
+    for name, markers in _ALGO_MARKERS:
+        if kinds.intersection(markers):
+            return name
+    return None
+
+
+def _budget_exhausted(budget, spent) -> str | None:
+    """Which budget limit is spent out, or None. Mirrors RunDir.budget_exhausted."""
+    if budget is None or spent is None:
+        return None
+    if budget.stop_at_reward and spent.best_val >= budget.stop_at_reward - 1e-9:
+        return f"reward ceiling reached (best val {spent.best_val:.4f} >= {budget.stop_at_reward:.4f})"
+    checks = (
+        ("max_iterations", budget.max_iterations, spent.iterations),
+        ("max_metric_calls", budget.max_metric_calls, spent.metric_calls),
+        ("max_usd", budget.max_usd, spent.usd + spent.optimizer_usd + spent.intake_usd),
+        ("max_optimizer_usd", budget.max_optimizer_usd, spent.optimizer_usd),
+    )
+    for name, limit, used in checks:
+        if limit and used >= limit:
+            return f"{name} reached ({used:g} / {limit:g})"
+    if budget.stall and spent.stall >= budget.stall:
+        return f"stalled ({spent.stall} consecutive non-improving iterations)"
+    return None
+
+
+def _orchestration_mode(root: Path) -> str | None:
+    """``orchestration_mode`` from the sibling project spec (``agent`` / ``deterministic``)."""
+    for spec in (_safe_subpath(root.parent, "project", "capevolve.yaml"),
+                 _safe_subpath(root, "capevolve.yaml")):
+        if spec is None or not spec.is_file():
+            continue
+        try:
+            for line in spec.read_text(encoding="utf-8").splitlines():
+                if line.startswith("orchestration_mode:"):
+                    val = line.split(":", 1)[1].split("#", 1)[0].strip().strip("'\"")
+                    if val:
+                        return val
+        except OSError:
+            continue
+    return None
+
+
+def _paid_calls(spent, evaluations: list) -> int:
+    """How many runner calls this run actually made (0 if we cannot tell)."""
+    n = int(getattr(spent, "metric_calls", 0) or 0)
+    if n:
+        return n
+    # No Spent state (e.g. a curated export): fall back to the evaluations that
+    # actually scored something.
+    return sum(1 for e in evaluations if (e.get("n_scored") or e.get("n_tasks") or 0))
+
+
+def _spend_metered(total_usd: float, paid_calls: int) -> bool:
+    """False when a run made calls yet recorded exactly $0 — no cost was REPORTED.
+
+    Rendering that as "$0.000" states a fact nobody measured — the same class of lie
+    as `pass^k NaN%` or a red `failed` badge for an absent status. Two very different
+    runs land here:
+
+      * a zero-API adapter (toy_calc, a mock optimizer) — genuinely free;
+      * a real model behind a self-hosted vLLM, an internal RITS endpoint, or an
+        OpenAI-compatible proxy that returns no usage, so litellm prices every call
+        at 0.0 and the ledger sums to $0.0000 — real spend, unpriced.
+
+    **The run dir cannot distinguish them.** Neither records tokens or cost, and the
+    spec's target model is not reliably present. So this returns only what is
+    certain — no per-call cost was reported — and callers must word it that way
+    ("not reported"), never as a claim that money was or was not spent.
+
+    What IS certain: zero dollars with zero calls is a real $0.00 (nothing ran), so
+    that stays `True` and renders as a number.
+    """
+    return not (paid_calls > 0 and total_usd == 0.0)
+
+
+def _eval_busy(ev: dict) -> str:
+    """"scoring <tag> on <split> (N rollouts)" — what an open ``eval_start`` is doing.
+
+    Only facts the event carries; a field the event omits is left out rather than
+    guessed at, so the sentence never over-claims.
+    """
+    split = ev.get("split") or "a split"
+    tag = ev.get("tag")
+    n = ev.get("rollouts")
+    who = f"candidate {tag}" if tag and tag != "seed" else "the seed"
+    if tag == "FINAL":
+        who = "the best candidate"
+    scale = f" ({int(n)} rollouts)" if isinstance(n, (int, float)) and n else ""
+    return f"scoring {who} on the {split} split{scale}"
+
+
+def _heartbeat_pid_alive(pid) -> bool:
+    """Same liveness check `watchdog.py` uses, duplicated rather than imported: `core`
+    (this module) must not depend on a `skills/` script, so a 3-line stdlib check is
+    cheaper than a shared util module for it.
+    """
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _derive_status(*, events: list, now: float, budget, spent, agent_mode: bool,
+                   has_candidates: bool, has_baseline: bool,
+                   heartbeat: dict | None = None) -> tuple[str, str]:
+    """``(status, reason)`` for a run — the six outcomes an operator must tell apart.
+
+    ``completed`` (finalize sealed the test) · ``budget_exhausted`` (a cap was hit and
+    no finalize followed) · ``stalled`` (the algorithm declared convergence) ·
+    ``running`` (the log is still moving) · ``interrupted`` (no finalize, no recent
+    activity — died, was killed, or the shell went away) · ``failed`` (nothing ran).
+
+    The old logic collapsed everything that was not finalized into ``live``, so a run
+    that died weeks ago still reported as running. Here the last event's timestamp is
+    the evidence, and a truncated/killed run is never called live.
+
+    **Freshness is evidence, and it outranks "nothing has been scored yet."** A run
+    writes ``splits``/``splits_warning`` and then goes quiet for as long as the seed's
+    baseline takes — for spreadsheetbench that is ten agent rollouts, many minutes with
+    no event in between. Judging "no baseline and no candidate" *before* looking at the
+    clock stamped a red ``failed`` badge on every live snapshot taken during that window
+    (run 33492876620), which is the same class of lie as calling a dead run live: it
+    reports an outcome for a run that has not reached one. So the timestamps are read
+    first, and "nothing evaluated" is only a failure once the log has actually stopped
+    moving (or a cap/convergence already ended the run).
+
+    ``heartbeat`` (``host/heartbeat.json``, written by `agent-optimize`'s ``host.py`` while
+    an agent invocation is in flight) is a second, independent liveness signal on top of
+    events: an unattended `host.py` that dies mid-turn (machine sleep, closed terminal)
+    leaves events silent with no distinguishing event to explain it, which otherwise reads
+    identically to "still mid-eval" until the wide `EVAL_STALE_AFTER_SECONDS` window also
+    expires. A confirmed-dead heartbeat pid turns that "interrupted" into an explicit
+    "needs relaunch" reason instead of a bare "died, was killed, or ...".
+    """
+    kinds = [str(e.get("kind") or "") for e in events]
+    if not events:
+        return "failed", "no events recorded — the run never started"
+    if "finalize" in kinds:
+        return "completed", "finalize sealed the test split"
+
+    last_t = 0.0
+    for e in reversed(events):
+        try:
+            last_t = float(e.get("t") or 0.0)
+        except (TypeError, ValueError):
+            last_t = 0.0
+        if last_t:
+            break
+    silent = (now - last_t) if last_t else None
+
+    exhausted = _budget_exhausted(budget, spent)
+    stop_kinds = {"gepa_stop", "convergence"}
+    stopped = next((k for k in reversed(kinds) if k in stop_kinds), None)
+
+    # An ``eval_start`` that no ``evaluate`` has closed means a split is provably being
+    # scored right now, and evaluations log nothing while they run — so the silence is
+    # expected and gets the wider window. `open_eval` is the event itself, so the reason
+    # string can name what the run is busy with instead of inferring it.
+    open_eval = None
+    for e in reversed(events):
+        k = str(e.get("kind") or "")
+        if k == "evaluate":
+            break
+        if k == "eval_start":
+            open_eval = e
+            break
+    window = EVAL_STALE_AFTER_SECONDS if open_eval else STALE_AFTER_SECONDS
+    fresh = silent is not None and silent < window
+    alive = fresh and not exhausted and not stopped
+
+    if not has_baseline and not has_candidates:
+        if alive:
+            # The phase that produces the very first number has not returned yet. That
+            # is progress, not an outcome, and must never be reported as one.
+            return "running", (f"{_eval_busy(open_eval)}; last event {silent:.0f}s ago"
+                               if open_eval else
+                               "the seed's baseline is still being scored — no candidate "
+                               f"has been evaluated yet; last event {silent:.0f}s ago")
+        why = "no baseline and no candidate was ever evaluated"
+        if exhausted:
+            return "failed", f"{why} ({exhausted})"
+        if stopped:
+            return "failed", f"{why} (algorithm stopped: {stopped})"
+        if silent is None:
+            return "failed", f"{why}; events carry no timestamps"
+        if open_eval is not None:
+            # It started measuring and never came back. "failed — nothing ran" would be
+            # wrong about the one thing that is certain: something did run.
+            return "interrupted", (
+                f"{_eval_busy(open_eval)} and never returned — silent for "
+                f"{silent / 60.0:.0f} min, so {why}")
+        return "failed", f"{why}; silent for {silent / 60.0:.0f} min"
+    if agent_mode and has_baseline and not has_candidates and not (alive and open_eval):
+        # ``cap-evolve run`` in agent mode deliberately stops after baseline and hands
+        # the loop to the coding agent. That is neither finished nor dead nor running —
+        # it is waiting for a human/agent to drive it, and saying "live" (or "failed")
+        # about it is the exact class of wrong status the old logic produced.
+        #
+        # An OPEN eval is the one thing that overrides it: "awaiting" asserts that
+        # nothing is happening, and an evaluation in flight is a counter-example — the
+        # agent is scoring its first candidate right now, not waiting to be driven.
+        return "awaiting_agent", (
+            "baseline is done and `cap-evolve run` handed off — the agent has not "
+            "committed a candidate yet (agent-mode runs end by running the finalize "
+            "phase script)")
+
+    if alive:
+        return "running", (f"{_eval_busy(open_eval)}; last event {silent:.0f}s ago"
+                           if open_eval else f"last event {silent:.0f}s ago")
+    if stopped:
+        return "stalled", f"algorithm stopped ({stopped}) without finalizing the test split"
+    if exhausted:
+        return "budget_exhausted", f"{exhausted}; test split never sealed"
+    if silent is None:
+        return "interrupted", "events carry no timestamps — cannot tell if it is still alive"
+
+    heartbeat_pid = (heartbeat or {}).get("pid")
+    heartbeat_dead = heartbeat is not None and not _heartbeat_pid_alive(heartbeat_pid)
+    if heartbeat_dead:
+        return "interrupted", (
+            f"stalled — no activity in {silent / 60.0:.0f}m and host.py's pid ({heartbeat_pid}) "
+            "is gone: it died mid-turn rather than stopping cleanly. Needs relaunch — re-run "
+            "host.py against this run dir, or point watchdog.py at it")
+    return "interrupted", (
+        f"no finalize and no event for {silent / 60.0:.0f} min — the run died, was "
+        "killed, or is still being written by a process that is no longer logging")
+
+
+def _sanitize_text(value, limit: int = 4000) -> str:
+    """Model/subprocess-authored text, made safe to hand to a renderer.
+
+    Strips C0/C1 control characters (ANSI escapes, NULs, carriage returns) that could
+    otherwise smuggle terminal escapes into the ANSI report or break out of a JSON
+    island, and caps the length. Markup is NOT escaped here — that is the renderer's
+    job (``textContent`` in the HTML, JSX in the SPA) — but the value is guaranteed
+    to be a plain, bounded, control-free string.
+    """
+    s = value if isinstance(value, str) else json.dumps(value, default=str)
+    s = re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", " ", s)
+    if len(s) > limit:
+        s = s[:limit] + f" …[+{len(s) - limit} chars truncated]"
+    return s
+
+
+#: Event fields that are huge and already surfaced elsewhere — dropped from the log
+#: stream's detail blob so one event cannot balloon the payload.
+_LOG_DROP_FIELDS = {"t", "kind", "optimizer_report", "error_full", "per_task", "report"}
+
+
+def _now() -> float:
+    import time
+    return time.time()
+
+
+def _front_matter(text: str) -> dict:
+    """Parse the flat ``key: value`` YAML front matter evograph writes (stdlib only).
+
+    Only the shapes evograph's contract uses: scalars and inline ``[a, b]`` lists.
+    Anything else is kept as the raw string — a reader, not a YAML implementation.
+    """
+    if not text.startswith("---"):
+        return {}
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}
+    out: dict = {}
+    for line in text[3:end].splitlines():
+        if not line.strip() or line.lstrip().startswith("#") or ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        k, v = k.strip(), v.strip()
+        if v.startswith("[") and v.endswith("]"):
+            out[k] = [x.strip().strip("'\"") for x in v[1:-1].split(",") if x.strip()]
+        else:
+            out[k] = v.strip("'\"")
+    return out
+
+
+def _read_evograph(root: Path) -> dict:
+    """evograph's wiki, read straight from the run dir (no separate server, no iframe).
+
+    evograph is agent-driven and records itself as files under the run dir:
+    ``wiki/results/round-<N>.json``, ``wiki/weaknesses/<slug>.md`` front matter, and
+    ``wiki/solutions/<slug>/<id>/solution.md``. Reading them here makes the weakness
+    graph a first-class panel of the one dashboard instead of an embedded foreign app.
+    Returns ``{}`` when the run is not an evograph run.
+    """
+    wiki = _safe_subpath(root, "wiki")
+    if wiki is None or not wiki.is_dir():
+        return {}
+    rdir = _safe_subpath(wiki, "results")
+    rounds = []
+    for f in sorted(rdir.glob("*.json")) if rdir is not None and rdir.is_dir() else []:
+        d = _read_json(f)
+        if not d:
+            continue
+        metrics = d.get("metrics") or {}
+        primary = next((k for k, v in metrics.items()
+                        if isinstance(v, dict) and v.get("primary")), None)
+        rounds.append({
+            "round": d.get("round"), "split": d.get("split"),
+            "started_at": d.get("started_at") or d.get("timestamp"),
+            "completed_at": d.get("completed_at"),
+            "num_tasks": d.get("num_tasks"),
+            "primary_metric": primary,
+            "metrics": {k: v.get("value") for k, v in metrics.items() if isinstance(v, dict)},
+            "cost_usd": d.get("cost_usd"),
+        })
+    weaknesses = []
+    wdir = _safe_subpath(wiki, "weaknesses")
+    if wdir is not None and wdir.is_dir():
+        for f in sorted(wdir.glob("*.md")):
+            try:
+                fm = _front_matter(f.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            fm.setdefault("slug", f.stem)
+            # ``slug`` is front matter an agent wrote — a traversal vector, not a name
+            # we chose. _safe_subpath refuses anything that leaves wiki/solutions/.
+            sol_dir = _safe_subpath(wiki, "solutions", str(fm.get("slug")))
+            fm["num_solutions"] = (len([p for p in sol_dir.iterdir() if p.is_dir()])
+                                   if sol_dir is not None and sol_dir.is_dir() else 0)
+            weaknesses.append({k: (_sanitize_text(v, 400) if isinstance(v, str) else v)
+                               for k, v in fm.items()})
+    if not rounds and not weaknesses:
+        return {}
+    return {"rounds": rounds, "weaknesses": weaknesses}
+
+
+#: run-level narrative files, in reading order — see harness.py's cross-iteration
+#: file-header comment (JOURNAL/INSIGHTS/META_INSIGHTS/FRAMEWORK_IMPROVEMENTS).
+_NARRATIVE_FILES = (
+    ("JOURNAL.md", "Journal — per-iteration handover"),
+    ("INSIGHTS.md", "Insights — verified findings"),
+    ("META_INSIGHTS.md", "Meta-insights — the optimization process"),
+    ("FRAMEWORK_IMPROVEMENTS.md", "Framework improvements — for cap-evolve itself"),
+)
+
+
+# ---------------------------------------------------------------------------
+# Config tab: the full run configuration (spec + PROJECT.md + project dir)
+# ---------------------------------------------------------------------------
+
+#: A small, generic classification of the ``capevolve.yaml`` keys documented in
+#: ``skills/phases/intake/inputs/INPUTS.md``. Anything NOT listed here (an older key,
+#: or a new input a future intake adds) falls into "Other" rather than disappearing —
+#: this is a display grouping only, never a schema/validation of the spec.
+_CONFIG_KEY_GROUPS = {
+    "capabilities": "Capability", "capability_path": "Capability",
+    "capability_sources": "Capability", "actions": "Capability",
+    "intervention": "Delivery", "skill_name": "Delivery", "protected_paths": "Delivery",
+    "algorithm_skill": "Algorithm & optimizer", "optimizer_skill": "Algorithm & optimizer",
+    "optimizer_model": "Algorithm & optimizer", "optimizer_max_turns": "Algorithm & optimizer",
+    "optimizer_usd_per_iter": "Algorithm & optimizer",
+    "optimizer_instructions_file": "Algorithm & optimizer",
+    "orchestration_mode": "Algorithm & optimizer", "stop_condition": "Algorithm & optimizer",
+    "target_model": "Algorithm & optimizer", "target_profile_file": "Algorithm & optimizer",
+    "runner_repo_path": "Algorithm & optimizer",
+    "dataset_source": "Data & splits", "split_seed": "Data & splits",
+    "split_train": "Data & splits", "split_val": "Data & splits", "split_test": "Data & splits",
+    "split_ids_file": "Data & splits", "num_trials": "Data & splits",
+    "max_iterations": "Budget & gate", "stall": "Budget & gate",
+    "max_metric_calls": "Budget & gate", "max_usd": "Budget & gate",
+    "max_optimizer_usd": "Budget & gate", "gate_mode": "Budget & gate",
+    "gate_k_se": "Budget & gate", "no_regression": "Budget & gate",
+    "memory_skill": "Memory",
+    "metric_primary": "Metrics & display", "metrics_display": "Metrics & display",
+    "metric_directions": "Metrics & display",
+    "github_integration": "GitHub",
+}
+_CONFIG_GROUP_ORDER = ("Capability", "Delivery", "Algorithm & optimizer", "Data & splits",
+                        "Budget & gate", "Memory", "Metrics & display", "GitHub", "Other")
+
+#: A file this big gets size + path only in the Config tab's file tree — never an
+#: attempt to read and render megabytes of adapter/trajectory content.
+_PROJECT_PREVIEW_MAX_BYTES = 200_000
+
+
+def _find_project_dir(root: Path) -> Path | None:
+    """The ``project/`` dir that scaffolded this run, or ``None``.
+
+    Same two candidate locations ``_algorithm_from_spec`` already reads (a sibling
+    ``project/`` next to the run dir is the normal shape; some fixtures write
+    ``capevolve.yaml`` directly under the run dir).
+
+    A sibling ``project/`` dir with NO ``capevolve.yaml`` still counts: it holds adapters/,
+    seed_capability/, split files — the whole Config section used to vanish with no explanation
+    when the spec file was missing, hiding project artifacts that were sitting right there.
+    ``root`` itself is only accepted WITH a spec, since a run dir full of rollouts/ and
+    events.jsonl is not a project listing.
+    """
+    for cand in (_safe_subpath(root.parent, "project"), root):
+        if cand is not None and cand.is_dir() and (cand / "capevolve.yaml").is_file():
+            return cand
+    sibling = _safe_subpath(root.parent, "project")
+    if sibling is not None and sibling.is_dir():
+        return sibling
+    return None
+
+
+def _read_project_files(project_dir: Path, skip: set) -> list[dict]:
+    """Every file under ``project_dir`` except ``skip`` (top-level names already
+    shown elsewhere — ``capevolve.yaml``, ``PROJECT.md``), walked generically so a
+    NEW artifact (a future intake output, a split file, an intake transcript) shows
+    up automatically instead of needing a new reader.
+
+    Returns ``[{"path", "size", "preview", "truncated", "binary"}]`` sorted by path.
+    ``preview`` is ``None`` for a binary file or one over ``_PROJECT_PREVIEW_MAX_BYTES``
+    — those degrade to size + path only, never a megabyte dump.
+    """
+    out = []
+    for f in sorted(project_dir.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(project_dir)
+        if str(rel) in skip or "__pycache__" in rel.parts or ".git" in rel.parts:
+            continue
+        try:
+            size = f.stat().st_size
+        except OSError:
+            continue
+        rec = {"path": str(rel), "size": size, "preview": None,
+               "truncated": False, "binary": False}
+        if size == 0:
+            rec["preview"] = ""
+        elif size <= _PROJECT_PREVIEW_MAX_BYTES:
+            try:
+                text = f.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                rec["binary"] = True
+            else:
+                rec["preview"] = _sanitize_text(text, 4000)
+                rec["truncated"] = len(text) > 4000
+        out.append(rec)
+    return out
+
+
+def _read_config(root: Path) -> dict:
+    """The full run configuration, generically — every intake artifact on disk.
+
+    Reads the sibling ``project/`` dir's ``capevolve.yaml`` (the parsed spec, grouped
+    for display — see ``_CONFIG_KEY_GROUPS``), ``PROJECT.md`` (the intake-authored
+    narrative of what was resolved/defaulted), and every other file under the project
+    dir (adapters/, seed_capability/, split files, ...) as a generic listing/preview.
+    Returns ``{}`` when no project dir is found — the panel hides itself.
+    """
+    project_dir = _find_project_dir(root)
+    if project_dir is None:
+        return {}
+    from .specfile import read_yaml
+    # Joined through _safe_subpath like every other path here: the spec is read (and its
+    # presence reported) only when it is proven inside the project dir, so a capevolve.yaml
+    # symlinked out of it is treated as absent rather than followed.
+    spec_file = _safe_subpath(project_dir, "capevolve.yaml")
+    spec = {}
+    if spec_file is not None:
+        try:
+            spec = read_yaml(spec_file.read_text(encoding="utf-8")) or {}
+        except OSError:
+            spec = {}
+    groups: dict[str, list] = {}
+    # `intervention` absent means direct, so render that rather than nothing: two runs of one
+    # capability can differ only in how it was delivered.
+    for k, v in {"intervention": "direct", **spec}.items():
+        groups.setdefault(_CONFIG_KEY_GROUPS.get(k, "Other"), []).append({"key": k, "value": v})
+    spec_groups = [{"group": g, "items": groups[g]} for g in _CONFIG_GROUP_ORDER if g in groups]
+
+    project_md = None
+    pmd = project_dir / "PROJECT.md"
+    if pmd.is_file():
+        try:
+            project_md = _sanitize_text(pmd.read_text(encoding="utf-8"), 20000)
+        except OSError:
+            project_md = None
+
+    files = _read_project_files(project_dir, {"capevolve.yaml", "PROJECT.md"})
+    if not spec_groups and not project_md and not files:
+        return {}
+    return {
+        "project_dir": str(project_dir),
+        # True ⇒ the project dir exists but has no capevolve.yaml. The section says so and still
+        # lists the artifacts that ARE there, instead of disappearing without explanation.
+        "spec_missing": spec_file is None or not spec_file.is_file(),
+        "spec_groups": spec_groups,
+        "project_md": project_md,
+        "files": files,
+    }
+
+
+def _read_narrative(root: Path, best_id: str | None) -> dict:
+    """The optimizer-authored process narrative for this run, read straight off disk.
+
+    Every run gets this by default (#400): the run-level accumulator files the
+    optimizer wrote across iterations, plus the best candidate's final ``PROCESS.md``
+    (why THAT iteration was done the way it was). Returns ``{}`` when none of these
+    exist yet (e.g. a synthetic log with no real optimizer session).
+
+    Each file is compared against its own known seed-template text (harness.py's
+    ``_seed_journal``/``_seed_accumulator``/``_PROCESS_SEED``): a file whose content is
+    STILL exactly that template — no real entry ever appended — carries
+    ``"template_only": True`` so the renderer can flag it instead of presenting an
+    unedited instructional template as real optimizer narrative.
+    """
+    try:
+        from . import harness
+        seed_by_name = {
+            "JOURNAL.md": harness._JOURNAL_SEED,
+            "INSIGHTS.md": harness._INSIGHTS_SEED,
+            "META_INSIGHTS.md": harness._META_INSIGHTS_SEED,
+            "FRAMEWORK_IMPROVEMENTS.md": harness._FRAMEWORK_IMPROVEMENTS_SEED,
+        }
+        process_seed = harness._PROCESS_SEED.strip()
+    except Exception:  # noqa: BLE001 — template detection is a nicety, not load-bearing
+        seed_by_name, process_seed = {}, None
+    files = []
+    for name, title in _NARRATIVE_FILES:
+        p = _safe_subpath(root, name)
+        if p is None or not p.is_file():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            seed_text = seed_by_name.get(name)
+            # ``name`` is the bare filename: the section intro lists what this run ACTUALLY
+            # wrote instead of the fixed catalogue of every narrative file that could exist.
+            files.append({"name": name, "title": title, "text": _sanitize_text(text, 20000),
+                          "template_only": bool(seed_text) and text == seed_text.strip()})
+    process_text = None
+    if best_id:
+        p = _safe_subpath(root, "candidates", best_id, "PROCESS.md")
+        if p is not None and p.is_file():
+            try:
+                process_text = p.read_text(encoding="utf-8").strip() or None
+            except OSError:
+                process_text = None
+    if process_text:
+        files.append({"name": "PROCESS.md",
+                      "title": f"Process — best candidate ({best_id})",
+                      "text": _sanitize_text(process_text, 20000),
+                      "template_only": bool(process_seed) and process_text == process_seed})
+    if not files:
+        return {}
+    return {"files": files}
+
+
+#: A real transcript.jsonl can be 1.6MB / 600+ lines (a full Claude Code session for one
+#: agent-optimize run). Never parsed/embedded whole — capped on both bytes (read at all)
+#: and turns (rendered), same "preview + point at the real path" shape as _read_project_files.
+_HOST_PROMPT_MAX_BYTES = 40_000
+_HOST_TRANSCRIPT_MAX_BYTES = 8_000_000
+_HOST_TRANSCRIPT_MAX_TURNS = 300
+
+
+def _transcript_turn(ev: dict) -> dict | None:
+    """One line of ``host/transcript.jsonl`` -> a compact turn, or ``None`` to skip it.
+
+    Only ``assistant`` (text / tool_use / thinking) and ``user`` (tool_result) lines carry
+    anything a human would read here; ``system``/``tool_progress``/``result`` lines are
+    session plumbing and are dropped rather than rendered as empty turns.
+    """
+    t = ev.get("type")
+    msg = ev.get("message")
+    if not isinstance(msg, dict):
+        # e.g. a "system" permission-denial line whose "message" is a plain string,
+        # not the usual {"content": [...]} shape — plumbing either way, drop it.
+        return None
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return None
+    parts = []
+    if t == "assistant":
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            bt = block.get("type")
+            if bt == "text" and block.get("text"):
+                parts.append(_sanitize_text(block["text"], 500))
+            elif bt == "tool_use":
+                parts.append(f"[tool] {block.get('name')} "
+                             f"{_sanitize_text(json.dumps(block.get('input', {})), 400)}")
+            elif bt == "thinking" and block.get("thinking"):
+                parts.append("[thinking] " + _sanitize_text(block["thinking"], 300))
+    elif t == "user":
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                c = block.get("content")
+                if isinstance(c, list):
+                    c = "".join(x.get("text", "") for x in c if isinstance(x, dict))
+                parts.append("[result] " + _sanitize_text(str(c or ""), 500))
+    if not parts:
+        return None
+    return {"role": t, "t": ev.get("timestamp"), "text": "\n".join(parts)}
+
+
+def _read_host_session(root: Path) -> dict:
+    """The agent-optimize host's own record of the run — the ONLY place the full
+    turn-by-turn optimizer session lives (#432). ``events.jsonl`` records coarse
+    accept/reject decisions; this reads what actually produced them.
+
+    Returns ``{}`` when there is no ``host/`` dir (e.g. a deterministic-loop algorithm
+    with no LLM driver session) so the panel hides itself rather than showing empty.
+    """
+    hdir = _safe_subpath(root, "host")
+    if hdir is None or not hdir.is_dir():
+        return {}
+    out: dict = {}
+    pf = _safe_subpath(hdir, "driver_prompt.md")
+    if pf is not None and pf.is_file():
+        try:
+            out["driver_prompt"] = _sanitize_text(
+                pf.read_text(encoding="utf-8"), _HOST_PROMPT_MAX_BYTES)
+        except OSError:
+            pass
+    tf = _safe_subpath(hdir, "transcript.jsonl")
+    if tf is not None and tf.is_file():
+        try:
+            size = tf.stat().st_size
+        except OSError:
+            size = 0
+        out["transcript_path"] = str(tf)
+        out["transcript_bytes"] = size
+        if size > _HOST_TRANSCRIPT_MAX_BYTES:
+            # Too big to safely read+parse into this HTML — point at the real file
+            # instead of embedding a partial/garbled slice of it.
+            out["transcript_too_large"] = True
+        else:
+            lines = _read_jsonl(tf)
+            out["transcript_total_lines"] = len(lines)
+            turns = [turn for ev in lines[:_HOST_TRANSCRIPT_MAX_TURNS]
+                     if (turn := _transcript_turn(ev)) is not None]
+            out["transcript_turns"] = turns
+            out["transcript_truncated"] = len(lines) > _HOST_TRANSCRIPT_MAX_TURNS
+    if not out.get("driver_prompt") and not out.get("transcript_turns") \
+            and not out.get("transcript_too_large"):
+        return {}
+    return out
+
+
 def reduce_run(run_dir) -> dict:
     """Fold the run dir into ``{"graph": ..., "summary": ...}`` (redacted)."""
     root = Path(run_dir.root)
-    events = _read_jsonl(root / "events.jsonl")
-    baseline = _read_json(root / "baseline.json")
-    final = _read_json(root / "final.json")
+    events = _read_jsonl(_safe_subpath(root, "events.jsonl"))
+    baseline = _read_json(_safe_subpath(root, "baseline.json"))
+    final = _read_json(_safe_subpath(root, "final.json"))
+
+    per_task_file = _val_per_task_file(root)
 
     base_val_obj = baseline.get("val") or {}
     baseline_val = base_val_obj.get("reward")
     tasks = [pt["task_id"] for pt in base_val_obj.get("per_task", [])]
+
+    kinds = {str(e.get("kind") or "") for e in events}
+    # An algorithm-specific event kind is the strongest evidence; the project spec that
+    # launched the run is the fallback (a free-form agent run emits no marker). Both are
+    # read from the run's own artifacts — never inferred from the run name.
+    # `run_config` wins when present: it is what the CLI actually RESOLVED for this run,
+    # not an inference. It is also the only reliable source for the agent-driven algorithms
+    # (agent-optimize, evograph), which emit no distinctive event kind at all -- inferring
+    # from kinds alone leaves those runs permanently labelled "algorithm not recorded".
+    cfg_algo = next((str(e.get("algorithm")) for e in events
+                     if e.get("kind") == "run_config" and e.get("algorithm")), None)
+    algorithm = cfg_algo or _infer_algorithm(kinds)
+    algorithm_source = "run_config" if cfg_algo else ("events" if algorithm else None)
+    wiki_dir = _safe_subpath(root, "wiki")
+    has_wiki = wiki_dir is not None and wiki_dir.is_dir()
+    # ``wiki/`` used to mean "this is an evograph run" unconditionally — now any
+    # algorithm can write it via ``memory_skill: wiki`` (#400, #404), so it is only a
+    # fallback label for the genuinely-unlabeled case (an old evograph run with no
+    # ``run_config`` event), never an override of an algorithm already known from
+    # ``run_config``/events.
+    if algorithm is None:
+        from_spec = _algorithm_from_spec(root)
+        if from_spec:
+            algorithm, algorithm_source = from_spec, "capevolve.yaml"
+        elif has_wiki:
+            algorithm, algorithm_source = "evograph", "run-dir wiki/"
+    # Candidates the gate REFUSED TO JUDGE (low coverage, an integrity tamper, or
+    # commit.py's own ``--decision inconclusive`` — the verdict flipped across control
+    # replicates, so the measurement itself could not resolve it). All three are
+    # neither accepted nor rejected: the edit was never validly judged.
+    indecisive_ids = {
+        _step_candidate(e) for e in events
+        if e.get("kind") in ("step_indecisive", "tamper_detected", "inconclusive")
+    } - {None}
 
     # --- nodes: start with the seed -------------------------------------
     nodes: dict[str, dict] = {}
@@ -246,6 +1179,9 @@ def reduce_run(run_dir) -> dict:
     if not seed_per:  # no rollouts persisted (synthetic logs) → fall back to baseline.json
         seed_per = {pt["task_id"]: pt["reward"] for pt in base_val_obj.get("per_task", [])}
         seed_fb = {pt["task_id"]: pt.get("feedback", "") for pt in base_val_obj.get("per_task", [])}
+    if not seed_per and "seed" in per_task_file:
+        seed_per = per_task_file["seed"]["per_task"]
+        seed_fb = per_task_file["seed"]["feedback"] or seed_fb
     nodes["seed"] = {
         "id": "seed", "parent": None, "children": [], "status": "seed",
         "val": baseline_val, "stderr": base_val_obj.get("stderr"),
@@ -261,15 +1197,64 @@ def reduce_run(run_dir) -> dict:
     diagnoses: list[dict] = []
     minibatch_evals: set[str] = set()  # tags only seen on a minibatch (gepa) — not full val
 
-    # First pass: which tags were evaluated on val (vs only minibatch).
+    # First pass: per-tag val stderr from the `evaluate` events. The `step` event
+    # carries the mean but not its uncertainty, so without this every candidate's mean
+    # rendered bare — the exact sloppiness the honesty rules forbid.
+    val_stderr: dict = {}
+    val_n_scored: dict = {}
+    #: tag → its full-val ``evaluate`` event. An AGENT-mode commit (``accept``/``reject``)
+    #: records the verdict but no spend, while the eval that produced the number recorded
+    #: real cost/time/tokens one event earlier. Without this join every agent-driven
+    #: candidate's eval cost read "—" in the evaluations table while the cost ledger right
+    #: above it showed the same dollars — the tables contradicted each other.
+    val_eval: dict = {}
+    for ev in events:
+        if ev.get("kind") == "evaluate" and ev.get("split") == "val":
+            if ev.get("stderr") is not None:
+                val_stderr[ev.get("tag")] = ev.get("stderr")
+            if ev.get("n_scored") is not None:
+                val_n_scored[ev.get("tag")] = ev.get("n_scored")
+            val_eval[ev.get("tag")] = ev
+    for tag, rec in per_task_file.items():
+        val_stderr.setdefault(tag, rec.get("stderr"))
+        val_n_scored.setdefault(tag, rec.get("n_scored"))
+
+    # Which tags were evaluated on val (vs only minibatch).
     for ev in events:
         if ev.get("kind") == "evaluate" and ev.get("split") == "val":
             minibatch_evals.discard(ev.get("tag"))
         if ev.get("kind") == "minibatch":
             minibatch_evals.add(ev.get("tag"))
 
+    # Cheap-screen compliance, keyed by candidate tag: whether a candidate paid for a
+    # cheap screen before its full-val eval. Read generically off ANY event that carries a
+    # ``screened_before_fullval`` field (agent-optimize's ``agent_optimize_compliance`` is
+    # the first emitter, but nothing here assumes that kind name — a future algorithm
+    # emitting the same field under a different event kind is picked up identically).
+    screened_by_tag: dict = {}
+    for ev in events:
+        if "screened_before_fullval" in ev:
+            tag = ev.get("tag") or ev.get("candidate")
+            if tag:
+                screened_by_tag[str(tag)] = bool(ev.get("screened_before_fullval"))
+
+    # optimizer_context_warning: the driver's own handover file (JOURNAL.md, or
+    # whatever an algorithm uses) came back empty/malformed, so the note attached to
+    # this candidate is framework-reconstructed after the fact, not the optimizer's
+    # live reasoning. Read generically off ANY event of this kind — not tied to
+    # agent-optimize, since any driver's handover can go missing the same way.
+    context_warning_by_tag: dict = {}
+    for ev in events:
+        if ev.get("kind") == "optimizer_context_warning":
+            tag = ev.get("candidate") or ev.get("tag")
+            if tag:
+                context_warning_by_tag[str(tag)] = {
+                    "what": ev.get("what"), "error": ev.get("error"),
+                }
+
     best = baseline_val if baseline_val is not None else 0.0
     it = 0
+    last_accepted = "seed"
     for ev in events:
         kind = ev.get("kind")
         if kind == "gate_warning":
@@ -283,58 +1268,177 @@ def reduce_run(run_dir) -> dict:
                 "text": ev.get("error") or ev.get("summary") or ev.get("note") or "",
             })
             continue
-        if kind not in ("step", "skillopt_step", "gepa_val_gate"):
+        if kind not in _STEP_KINDS:
             continue
 
         cid = _step_candidate(ev)
         if not cid:
             continue
-        it += 1
-        accepted = bool(ev.get("accept"))
+        # One iteration per CANDIDATE, not per step-like event. skillopt logs both
+        # ``skillopt_step`` and a plain ``step`` for the same candidate, and gepa logs a
+        # local gate then a val gate — counting events made iteration numbers skip
+        # (1,2,4,5) and the per-iteration charts lie about how many steps ran.
+        if cid in nodes:
+            it = nodes[cid].get("iteration") or it
+        else:
+            it = max((n.get("iteration") or 0) for n in nodes.values()) + 1
+        accepted = bool(ev.get("accept")) or kind in _ACCEPT_KINDS
         parent = ev.get("parent_id") or ev.get("parent")
+        if parent is None and kind in ("accept", "reject"):
+            # Agent-mode commits carry no parent edge. The candidate WAS gated against
+            # the run's current best (``gate_check --current`` defaults to ``best_id``),
+            # so the last accepted candidate is the real comparison parent, not a guess.
+            parent = last_accepted
         # gepa val-gate / step events don't always carry the parent edge; fall back
         # to "seed" if we have nothing better so the lineage tree stays connected.
         val = ev.get("val")
         parent_val = ev.get("parent_val")
 
         per, fb = _per_task_from_rollouts(run_dir, cid, "val")
-        # A candidate that errored out / produced no rollouts and no val score is "failed".
-        if val is None and not per:
+        if not per and cid in per_task_file:
+            per = per_task_file[cid]["per_task"]
+            fb = per_task_file[cid]["feedback"] or fb
+        if not per:
+            # A candidate killed on a cheap screen has per-task rewards only under its
+            # SCREEN tag (``<cid>__screenN``) and over a subset of val. Showing those is
+            # the difference between "we can see it regressed task 12" and a blank row:
+            # ``val`` stays None so nothing claims a val score, and the tasks the screen
+            # never ran render as "not run" (missing), not as zeros.
+            for tag, rec in per_task_file.items():
+                if tag.startswith(f"{cid}__"):
+                    per = {**(per or {}), **rec["per_task"]}
+                    fb = {**(fb or {}), **rec["feedback"]}
+        # Order matters. An INDECISIVE step (coverage collapse / integrity tamper) is
+        # not a rejection and not a failure: the gate declined to judge, so the edit's
+        # quality is unknown. Collapsing it into "rejected" (the old behaviour) told
+        # the reader a measured verdict existed when none did.
+        if kind == "provisional":
+            # Directionally positive (Δ>0) but not yet gate-significant, and the driver
+            # chose to buy more trials on this SAME candidate (scripts/grow.py) instead of
+            # a final accept/reject — neither "accepted" nor "rejected" describes that, and
+            # falling through to the accepted/rejected branch below would misreport it as
+            # one or the other while it is still pending.
+            status = "provisional"
+        elif cid in indecisive_ids:
+            status = "indecisive"
+        elif val is None and not per and kind not in ("accept", "reject"):
+            # ``failed`` means NO VERDICT AND NO MEASUREMENT — a step that produced
+            # nothing. An explicit ``accept``/``reject`` commit is a recorded verdict
+            # even when ``val`` is null, which is the normal shape for a candidate
+            # agent-optimize KILLED on a cheap screen before paying for full val.
+            # Calling that "failed / no measurement" put a red failure badge on the
+            # cheap-screen mechanism working exactly as designed.
             status = "failed"
         else:
             status = "accepted" if accepted else "rejected"
 
-        if val is not None:
+        # ONLY a candidate the gate ACCEPTED may set the running-best record. This used
+        # to exclude `indecisive` alone, which let a REJECTED candidate raise the stair:
+        # on the real v4 tau2 run two candidates scored a raw 0.5833, were vetoed on
+        # no-regression, and every cumulative-best chart then read 58.3% while the run's
+        # actual best was the seed at 0.5667 — the chart contradicted the KPI tile beside
+        # it, and the chart was wrong. A rejected capability is one you cannot ship, so it
+        # is not the best of anything. (`best` is seeded from baseline_val above, so the
+        # seed's own score is already in.) The rejected candidate is still PLOTTED via
+        # `val`; hiding a measurement would be its own dishonesty.
+        if val is not None and status == "accepted":
             best = max(best, val)
 
         merge_of = ev.get("merge_of")
+        # The eval that produced this candidate's val is the only record of what it cost.
+        vev = val_eval.get(cid) or {}
+        movement = per_task_file.get(cid) or {}
         node = {
             "id": cid,
             "parent": parent if parent in (None,) or True else parent,
             "children": [],
             "status": status,
             "val": val,
-            "stderr": None,
+            "stderr": val_stderr.get(cid),
+            "n_scored": val_n_scored.get(cid),
             "per_task": per,
             "feedback": fb,
-            "cost_usd": ev.get("cost_usd") or 0.0,
-            "tokens": ev.get("tokens") or 0,
+            "cost_usd": ev.get("cost_usd") or vev.get("cost_usd") or 0.0,
+            "tokens": ev.get("tokens") or vev.get("tokens") or 0,
             # Per-iteration optimizer cost/tokens (RITS runner cost is often $0/null,
             # but the optimizer agent CLI reports opt_cost_usd / opt_tokens per step).
             "opt_cost_usd": ev.get("opt_cost_usd") or ev.get("optimizer_cost_usd"),
             "opt_tokens": ev.get("opt_tokens") or ev.get("optimizer_tokens") or 0,
-            "seconds": (ev.get("runner_seconds") or 0.0) + (ev.get("optimizer_seconds") or 0.0),
+            "seconds": (ev.get("runner_seconds") or vev.get("seconds") or 0.0)
+                       + (ev.get("optimizer_seconds") or 0.0),
             "optimizer_seconds": ev.get("optimizer_seconds") or 0.0,
-            "runner_seconds": ev.get("runner_seconds") or 0.0,
+            "runner_seconds": ev.get("runner_seconds") or vev.get("seconds") or 0.0,
             "iteration": it,
-            "reason": ev.get("reason") or "",
+            # Agent-mode commits (``accept``/``reject``, written by the algorithm's
+            # commit.py) put the gate rationale in ``note``; the deterministic loops use
+            # ``reason``. Reading only ``reason`` silently discarded every agent-authored
+            # justification — the single most informative field in an agent-driven run.
+            "reason": ev.get("reason") or ev.get("note") or "",
+            # Which tasks this edit fixed / broke versus its parent, when the run recorded
+            # the movement. Not derived here: a mean-preserving edit that swaps which
+            # tasks pass is churn, and only the recorded lists prove it.
+            "fixed": movement.get("fixed") or [],
+            "broke": movement.get("broke") or [],
             "parent_val": parent_val,
             "best_so_far": best,
+            # Cheap-screen compliance for this candidate tag, when ANY event recorded it —
+            # looked up generically by tag below (see ``screened_by_tag``), not tied to the
+            # agent-optimize algorithm that happens to be the first emitter.
+            "screened": screened_by_tag.get(cid),
+            # optimizer reasoning for this round was NOT captured live — the note shown
+            # is reconstructed after the fact. Generic across drivers (see
+            # ``context_warning_by_tag`` above).
+            "context_warning": context_warning_by_tag.get(cid),
         }
+        # Structured gate numbers, when the algorithm recorded them instead of leaving them
+        # to be regexed out of a reason string (agent-optimize's commit.py reads them back
+        # from round.py's persisted table). Copied verbatim and only when present, so a
+        # deterministic step is byte-identical to before.
+        for _gk in ("gate_delta", "gate_stderr", "gate_n", "gate_k_se", "gate_threshold",
+                    "gate_resolvable_effect_size",
+                    "gate_mode", "gate_table", "control_relative_verdict",
+                    "control_relative_delta", "evidence_bar", "gate_verdict",
+                    "overrode_gate", "reject_basis"):
+            _v = ev.get(_gk)
+            # Version skew, not a hypothetical: older commit.py revisions wrote these on the
+            # accept/reject event UNPREFIXED (``delta``/``stderr``/``n``/...), current ones write
+            # ``gate_*``. Reading only the prefixed name made every already-completed run render
+            # "—" for every gate stat while the real numbers sat in the same event, and pushed the
+            # gate table onto its lossy regex-on-prose fallback. Accept both spellings.
+            if _v is None:
+                _v = ev.get(_GATE_FIELD_ALIASES.get(_gk, ""))
+            if _v is not None:
+                node[_gk] = _v
+        # ``verdict_stable`` (does the drift-controlled verdict agree across EVERY
+        # control replicate, not just on average?) is not on the event itself — it lives
+        # in the round's own gate table (``work/<gate_table>.json``, referenced by the
+        # ``gate_table`` field above), keyed by candidate tag. Read it from there so the
+        # UI can show "stable" vs "split" rather than nothing at all.
+        if node.get("gate_table"):
+            _gt = _read_json(_safe_subpath(root, "work", str(node["gate_table"])))
+            for _c in (_gt.get("candidates") or []):
+                if isinstance(_c, dict) and _c.get("tag") == cid and "verdict_stable" in _c:
+                    node["verdict_stable"] = _c["verdict_stable"]
+                    break
         if "epoch" in ev:
             node["epoch"] = ev.get("epoch")
         if merge_of:
             node["merge_of"] = merge_of
+        # A candidate commonly emits TWO step-kind events for the same cid — e.g.
+        # agent-optimize's ``reject`` (which carries gate_verdict/overrode_gate/
+        # reject_basis) followed by its own ``step`` (which carries none of those). Each
+        # rebuilds ``node`` from scratch, so without this the second event silently threw
+        # the first one's evidence away — the exact fields #3 exists to surface. Carry
+        # forward any of the earlier record's gate/override fields the new one didn't
+        # itself set, rather than losing them to whichever event happened to come last.
+        if cid in nodes:
+            for _carry in ("gate_delta", "gate_stderr", "gate_n", "gate_k_se",
+                           "gate_threshold", "gate_resolvable_effect_size", "gate_mode",
+                           "gate_table", "control_relative_verdict",
+                           "control_relative_delta", "evidence_bar", "gate_verdict",
+                           "overrode_gate", "reject_basis", "verdict_stable"):
+                if _carry not in node and _carry in nodes[cid]:
+                    node[_carry] = nodes[cid][_carry]
         # Last write wins if the same cid appears twice (e.g. gepa local-gate then
         # val-gate); keep the richer (val-bearing) record.
         if cid in nodes and nodes[cid].get("val") is not None and val is None:
@@ -342,6 +1446,8 @@ def reduce_run(run_dir) -> dict:
         else:
             node["parent"] = parent
             nodes[cid] = node
+        if accepted:
+            last_accepted = cid
 
     # --- wire parent → children edges -----------------------------------
     for nid, n in nodes.items():
@@ -372,7 +1478,7 @@ def reduce_run(run_dir) -> dict:
             frontier += 1
 
     # --- counts ----------------------------------------------------------
-    counts = {"accepted": 0, "rejected": 0, "failed": 0, "seed": 0}
+    counts = {"accepted": 0, "rejected": 0, "failed": 0, "seed": 0, "indecisive": 0}
     for n in nodes.values():
         counts[n["status"]] = counts.get(n["status"], 0) + 1
     counts["total"] = len(nodes)
@@ -392,7 +1498,7 @@ def reduce_run(run_dir) -> dict:
     # separately by headless backends as opt_cost_usd when present.
     opt_usd = 0.0
     for ev in events:
-        if ev.get("kind") in ("step", "skillopt_step", "gepa_val_gate"):
+        if ev.get("kind") in _STEP_KINDS:
             opt_usd += float(ev.get("opt_cost_usd") or ev.get("optimizer_cost_usd") or 0.0)
     tokens = sum(int(n.get("tokens") or 0) for n in nodes.values())
     intake_usd = intake_tokens = intake_secs = 0.0
@@ -444,14 +1550,22 @@ def reduce_run(run_dir) -> dict:
             "tokens": int(intake_ev.get("tokens") or intake_tokens or 0),
             "output_summary": intake_ev.get("output_summary") or "",
             "implemented": list(intake_ev.get("implemented") or []),
+            # An "intake" event exists ⇒ <project>/intake.json was written and its
+            # numbers (however small) were actually recorded.
+            "recorded": True,
         }
     else:
+        # No event at all. Intake usually runs as part of the SAME conversational
+        # agent session that drives the whole run (see orchestrate SKILL.md: "one
+        # continuous agent"), not a separately-spawned, cost-measurable CLI call —
+        # so $0 here is "never metered", never a confirmed "spent nothing".
         intake = {
             "usd": round(intake_usd, 4),
             "seconds": round(intake_secs, 2),
             "tokens": int(intake_tokens),
             "output_summary": "",
             "implemented": [],
+            "recorded": False,
         }
 
     # Consuming-LLM profile (the runtime model the capabilities are optimized FOR;
@@ -462,6 +1576,35 @@ def reduce_run(run_dir) -> dict:
         "tier": tp_ev.get("tier") or "",
         "resolution_note": tp_ev.get("resolution_note") or "",
     } if tp_ev is not None else None)
+
+    # --- null-control replicates: the noise-floor check, kept OUT of the candidate graph ---
+    # A control replicate (a byte-identical re-measurement, run to bound run-to-run noise) is
+    # evaluate-only: it never gets an accept/reject commit, so it has no graph node. Detection
+    # is ``_is_control_event`` — the ``ctl_null`` tag-prefix CONVENTION plus the explicit
+    # ``role``/``is_control`` fields. Reading only the explicit fields (which nothing emits)
+    # produced an empty list and a silently dropped section on every real run that measured a
+    # noise floor: run_finalrun5 has four such evaluations (ctl_null_i0=0.58, ctl_null_i0r1=0.57,
+    # ctl_null_i3=0.653, ctl_null_i3r1=0.593) whose 0.06 swing is larger than the accepted
+    # candidate's own Δ — the single most important finding in that run.
+    #
+    # Kept as its own top-level summary list (not nested under algo_extra): a null-control
+    # replicate is a generic evaluation-methodology signal any algorithm could emit, not a
+    # per-algorithm extra like screens/gepa/skillopt.
+    control_events = [e for e in events
+                      if e.get("kind") == "evaluate" and _is_control_event(e)]
+    controls = [{
+        "tag": e.get("tag"),
+        "split": e.get("split"),
+        "reward": e.get("reward"),
+        "stderr": e.get("stderr"),
+        # ``n_scored`` is the modern field; older evaluate events wrote ``n``.
+        "n": e.get("n_scored") if e.get("n_scored") is not None else e.get("n"),
+        "iteration": e.get("iteration"),
+        "cost_usd": e.get("cost_usd"),
+        "seconds": e.get("seconds"),
+        "tokens": e.get("tokens"),
+        "t": e.get("t"),
+    } for e in control_events]
 
     # --- first-class evaluations (split-oriented, distinct from per_iteration) ---
     # An evaluation is one scoring of a candidate on one split: the seed baseline on
@@ -486,6 +1629,7 @@ def reduce_run(run_dir) -> dict:
             "cost_usd": (base_val_obj.get("cost_usd") or 0.0),
             "seconds": (base_val_obj.get("seconds") or 0.0),
             "tokens": int(base_val_obj.get("tokens") or 0),
+            "cost_source": base_val_obj.get("cost_source") or {},
         })
 
     # candidates (one per candidate node that earned a full val score)
@@ -494,7 +1638,7 @@ def reduce_run(run_dir) -> dict:
         if n.get("val") is None:
             continue
         cid = n["id"]
-        n_tasks = len(n.get("per_task") or {})
+        n_tasks = len(n.get("per_task") or {}) or (val_n_scored.get(cid) or 0)
         trials = _trials_for(run_dir, cid, "val") or 1
         evaluations.append({
             "id": cid,
@@ -508,6 +1652,24 @@ def reduce_run(run_dir) -> dict:
             "cost_usd": float(n.get("cost_usd") or 0.0),
             "seconds": float(n.get("runner_seconds") or 0.0),
             "tokens": int(n.get("tokens") or 0),
+            "cost_source": n.get("cost_source") or {},
+        })
+
+    # null-control replicates. They have no graph node (evaluate-only), so the loop above
+    # cannot see them and they used to appear in NEITHER this table nor the noise-floor
+    # section. Labeled ``kind: "control"`` so the UI can show them as controls rather than
+    # mixing a re-measurement of the SAME capability in as an anonymous candidate row.
+    for c in controls:
+        evaluations.append({
+            "id": c["tag"], "kind": "control", "candidate": c["tag"],
+            "split": c.get("split") or "val",
+            "reward": c.get("reward"), "stderr": c.get("stderr"),
+            "n_tasks": c.get("n") or 0,
+            "trials": _trials_for(run_dir, str(c["tag"]), c.get("split") or "val") or 1,
+            "cost_usd": float(c.get("cost_usd") or 0.0),
+            "seconds": float(c.get("seconds") or 0.0),
+            "tokens": int(c.get("tokens") or 0),
+            "cost_source": c.get("cost_source") or {},
         })
 
     # test (the sealed test eval, from final.json)
@@ -527,7 +1689,402 @@ def reduce_run(run_dir) -> dict:
             "cost_usd": float(test_obj.get("cost_usd") or 0.0),
             "seconds": float(test_obj.get("seconds") or 0.0),
             "tokens": int(test_obj.get("tokens") or 0),
+            "cost_source": test_obj.get("cost_source") or {},
         })
+
+    # --- gate decisions (accept / reject / INDECISIVE, with Δ̄, SE, n) -----
+    # Regex-parsing the reason string is the FALLBACK, not the source: it was the prior sole
+    # source and is fragile because it depends on the prose matching the deterministic gate's
+    # own wording. Any structured ``gate_*`` field the algorithm recorded (agent-optimize's
+    # commit.py reads them back from round.py's persisted table, which in turn takes them from
+    # gate_check.py's own JSON) overrides it below.
+    gate_decisions: list[dict] = []
+    for n in sorted((x for x in nodes.values() if x["id"] != "seed"),
+                    key=lambda x: x.get("iteration") or 0):
+        reason = str(n.get("reason") or "")
+        verdict = ("accept" if n["status"] == "accepted"
+                   else "indecisive" if n["status"] == "indecisive"
+                   else "provisional" if n["status"] == "provisional"
+                   else "reject" if n["status"] == "rejected" else "no measurement")
+        # Agent-authored notes write "delta -0.0167 vs cand_3, threshold 0.0276" where the
+        # deterministic gate writes "Δ̄ = -0.0167"; matching only the symbol left three real
+        # rejections in run_finalrun5 with an all-"—" row whose numbers were right there in
+        # the prose. Both spellings, with or without the ``=``.
+        m_delta = re.search(r"(?:Δ̄?|\bdelta)\s*=?\s*([+-]?\d*\.?\d+)", reason)
+        # The bar `0.2·SE=0.0062` comes FIRST in the reason and also matches `SE=`, so an
+        # unanchored search put the bar's value in the SE column — the gate then appeared
+        # to have compared Δ̄ against five times its own standard error. Skip the `k·SE`
+        # form and take the standalone `SE=` that follows it.
+        m_se = re.search(r"(?<!·)\bSE\s*=\s*(\d*\.?\d+)", reason)
+        m_n = re.search(r"\bn\s*=\s*(\d+)", reason)
+        m_bar = re.search(r"([\d.]+)·SE\s*=\s*(\d*\.?\d+)", reason)
+        m_thr = re.search(r"\bthreshold\s*=?\s*(\d*\.?\d+)", reason)
+        m_res = re.search(r"resolvable effect size 2·SE\s*=\s*([\d.]+)", reason)
+        # A number the algorithm RECORDED beats the same number scraped out of prose. Agent
+        # mode writes free text, so every regex above missed and the whole numeric half of
+        # this record came back null (run 32971129203); the deterministic loops record no
+        # structured fields, so they still take the regex path exactly as before.
+        row = {
+            "iteration": n.get("iteration"),
+            "candidate": n["id"],
+            "verdict": verdict,
+            "val": n.get("val"),
+            "parent": n.get("parent"),
+            "parent_val": n.get("parent_val"),
+            "delta": float(m_delta.group(1)) if m_delta else None,
+            "stderr": float(m_se.group(1)) if m_se else None,
+            "n": int(m_n.group(1)) if m_n else None,
+            "k_se": float(m_bar.group(1)) if m_bar else None,
+            "threshold": (float(m_bar.group(2)) if m_bar else
+                          float(m_thr.group(1)) if m_thr else None),
+            "resolvable_effect_size": float(m_res.group(1)) if m_res else None,
+            "reason": _sanitize_text(reason, 600),
+        }
+        for _field, _key in (("delta", "gate_delta"), ("stderr", "gate_stderr"),
+                             ("n", "gate_n"), ("k_se", "gate_k_se"),
+                             ("threshold", "gate_threshold"),
+                             ("resolvable_effect_size", "gate_resolvable_effect_size")):
+            if n.get(_key) is not None:
+                row[_field] = n.get(_key)
+        # Which reference the gate actually used, and the drift-free second opinion when the
+        # round measured one. Without these a reader cannot tell that a rejection was
+        # reference-dependent — the finding run 32971129203 turned on.
+        for _key in ("gate_mode", "control_relative_verdict", "control_relative_delta",
+                     "evidence_bar", "gate_verdict", "overrode_gate", "reject_basis",
+                     "verdict_stable"):
+            if n.get(_key) is not None:
+                row[_key] = n.get(_key)
+        gate_decisions.append(row)
+
+    # --- cost ledger: every dollar, attributed to the thing that spent it -----
+    # Rows are built from the events that actually recorded a spend (intake, each
+    # ``evaluate``, each optimizer call on a step) and reconciled against the run's
+    # authoritative Spent total. A row whose cost was never recorded carries
+    # ``usd: None`` (shown as "—"), and whatever the rows cannot account for is
+    # published as ``unattributed_usd`` rather than quietly dropped.
+    ledger: list[dict] = []
+    # Intake is ALWAYS a row. A run whose intake genuinely cost nothing shows $0.0000
+    # (a recorded measurement); a run with no spend accounting at all shows "—". The
+    # one thing it must never do is be absent, which is what made intake cost invisible.
+    ledger.append({
+        "phase": "intake", "kind": "intake", "label": "Intake + scaffold",
+        "candidate": None, "split": None,
+        "usd": (intake["usd"] if (sp is not None or intake_ev is not None) else None),
+        "seconds": intake["seconds"], "tokens": intake["tokens"],
+        "note": intake.get("output_summary") or "",
+    })
+    opt_error_ids = {_step_candidate(e) for e in events if e.get("kind") == "optimizer_error"}
+    for ev in events:
+        kind = ev.get("kind")
+        if kind == "evaluate":
+            tag, split = ev.get("tag") or "?", ev.get("split") or "?"
+            is_base = tag == "seed" and split == "val"
+            note = (f"reward {ev['reward']:.3f}" if isinstance(ev.get("reward"), (int, float))
+                    else "")
+            # A $0 next to real tokens reads as broken unless the adapter's own
+            # attribution (Rollout.metadata["cost_source"]) is surfaced alongside it —
+            # e.g. an unmetered RITS/proxy target model prices every call at 0.0.
+            cs_counts = ev.get("cost_source_counts") or {}
+            unpriced = cs_counts.get("unpriced", 0) + cs_counts.get("partial_messages", 0)
+            if unpriced and not (ev.get("cost_usd") or 0.0):
+                note = (f"{note + ' — ' if note else ''}unpriced: the target model's "
+                        f"provider returned no per-message cost for {unpriced} rollout(s) "
+                        f"({int(ev.get('tokens') or 0):,} tokens recorded instead)")
+            ledger.append({
+                "phase": _phase_for(ev), "split": split,
+                "kind": "baseline_eval" if is_base else ("test_eval" if split == "test"
+                                                         else "candidate_eval"),
+                "label": ("Baseline eval — seed on val" if is_base else
+                          f"Sealed test eval — {tag}" if split == "test" else
+                          f"Eval {tag} on {split}"),
+                "candidate": tag,
+                "usd": ev.get("cost_usd"), "seconds": ev.get("seconds") or 0.0,
+                "tokens": int(ev.get("tokens") or 0),
+                "note": note,
+            })
+        elif kind in _STEP_KINDS:
+            cid = _step_candidate(ev)
+            if not cid:
+                continue
+            usd = ev.get("opt_cost_usd")
+            if usd is None:
+                usd = ev.get("optimizer_cost_usd")
+            truncated = cid in opt_error_ids
+            ledger.append({
+                "phase": "optimize", "kind": "optimizer_call", "split": None,
+                "label": f"Optimizer call → {cid}" + (" (exited non-zero)" if truncated else ""),
+                "candidate": cid,
+                "usd": (float(usd) if usd is not None else None),
+                "seconds": ev.get("optimizer_seconds") or 0.0,
+                "tokens": int(ev.get("opt_tokens") or ev.get("optimizer_tokens") or 0),
+                "note": ("the optimizer process exited non-zero (commonly its own budget "
+                         "cap) — the spend below is real and was still charged"
+                         if truncated else ""),
+            })
+    # --- reconcile the rows against Spent, PER ROLE ---------------------------
+    # A run whose proposer spend lives only in state.json's Spent (agent mode: older commit.py
+    # revisions never put opt_cost_usd on the decision event) attributed $0 of it, so the KPI
+    # strip showed the SAME dollar figure as both "cost" and "unattributed" — 100% unattributed —
+    # while the wall-clock KPI put every second in the runner bucket. Two contradictory readings
+    # of one run. Book the Spent-recorded remainder to the ROLE that actually spent it as an
+    # explicit reconciliation row: the money now lands in the same bucket the seconds do, and
+    # "unattributed" means what it says (spend no role can explain) instead of "spend no event
+    # happened to carry".
+    _ROLE_FOR_KIND = {"intake": "intake", "optimizer_call": "optimizer"}
+    by_role = {"runner": 0.0, "optimizer": 0.0, "intake": 0.0}
+    for r in ledger:
+        if r["usd"] is not None:
+            by_role[_ROLE_FOR_KIND.get(r["kind"], "runner")] += float(r["usd"])
+    for _role, _spent, _secs, _tok, _label in (
+            ("optimizer", opt_usd, opt_secs, opt_tokens,
+             "Optimizer spend recorded in state.json but carried by no event"),
+            ("runner", runner_usd, run_secs, tokens - opt_tokens - int(intake_tokens or 0),
+             "Runner spend recorded in state.json but carried by no event")):
+        gap = round(float(_spent or 0.0) - by_role[_role], 6)
+        if abs(gap) > 5e-5:
+            ledger.append({
+                "phase": "optimize" if _role == "optimizer" else "evaluate",
+                "kind": _role + "_reconciliation", "split": None,
+                "label": _label, "candidate": None, "usd": gap,
+                # Seconds/tokens are NOT re-added here — the per-role rows above already
+                # carry them, and double-counting time to reconcile money would trade one
+                # inconsistency for another.
+                "seconds": 0.0, "tokens": 0,
+                "note": (f"the run's Spent accumulator books ${_spent:.4f} to the {_role}; "
+                         f"{_secs:.0f}s and {max(0, int(_tok or 0)):,} tokens are attributed to "
+                         f"the same role, so the dollars and the time now agree"),
+            })
+    attributed = sum(r["usd"] for r in ledger if r["usd"] is not None)
+    total_usd = round(opt_usd + runner_usd + intake_usd, 6)
+    metered = _spend_metered(total_usd, _paid_calls(sp, evaluations))
+    cost_ledger = {
+        "rows": ledger,
+        "attributed_usd": round(attributed, 6),
+        "total_usd": total_usd,
+        # Positive => the run's Spent total exceeds what the events attribute (spend
+        # recorded without a corresponding event). Negative is possible too and is
+        # equally worth seeing. Never hidden, never rounded to zero.
+        "unattributed_usd": round(total_usd - attributed, 4),
+        "rows_missing_cost": sum(1 for r in ledger if r["usd"] is None),
+        "metered": metered,
+    }
+
+    # --- splits: is there a real holdout at all? -------------------------
+    split_ev = next((e for e in events if e.get("kind") == "splits"), None)
+    splits_info = None
+    if split_ev is not None:
+        tr, va, te = (split_ev.get("train"), split_ev.get("val"), split_ev.get("test"))
+        n = lambda x: (len(x) if isinstance(x, (list, tuple)) else  # noqa: E731
+                       (int(x) if isinstance(x, int) else None))
+        n_tr, n_va, n_te = n(tr), n(va), n(te)
+        same = (isinstance(tr, list) and isinstance(va, list) and isinstance(te, list)
+                and set(map(str, tr)) == set(map(str, va)) == set(map(str, te)))
+        splits_info = {
+            "train": n_tr, "val": n_va, "test": n_te, "seed": split_ev.get("seed"),
+            # A run where train==val==test has NO holdout: its "test" number is not a
+            # generalization estimate and the UI must say so rather than presenting it
+            # as a sealed result.
+            "no_holdout": bool(same),
+            "warning": next((_sanitize_text(e.get("msg") or "", 300) for e in events
+                             if e.get("kind") == "splits_warning"), ""),
+        }
+
+    # --- activity log: every event, sanitized, phase-tagged --------------
+    # "we don't see any logs and what is happening (not just high level stage)".
+    log_rows: list[dict] = []
+    for i, ev in enumerate(events):
+        detail = {k: v for k, v in ev.items() if k not in _LOG_DROP_FIELDS}
+        full = ev.get("error_full") or ev.get("error")
+        log_rows.append({
+            "seq": i,
+            "t": (float(ev["t"]) if isinstance(ev.get("t"), (int, float)) else None),
+            "kind": str(ev.get("kind") or "event"),
+            "phase": _phase_for(ev),
+            "candidate": _step_candidate(ev) or ev.get("tag"),
+            "detail": {k: (_sanitize_text(v, 1200) if isinstance(v, str) else v)
+                       for k, v in detail.items()},
+            # stderr / diagnosis prose gets its own field so the UI can render it as a
+            # block rather than a key/value pair.
+            "text": (_sanitize_text(full, 6000) if full else
+                     (_sanitize_text(ev.get("reason"), 800) if ev.get("reason") else "")),
+        })
+
+    # --- per-algorithm extras (present only when the run emitted the signal) ---
+    algo_extra: dict = {}
+    mb = [e for e in events if e.get("kind") == "minibatch"]
+    if mb:
+        # gepa's minibatch event names the subset ``ids`` and the count ``fired`` — it
+        # never writes ``tasks``/``n_tasks``, so the panel printed "n tasks —" and an
+        # empty task list for every row while the event recorded both.
+        algo_extra["minibatch"] = [{
+            "candidate": _step_candidate(e) or e.get("tag"),
+            "reward": e.get("reward"),
+            "n_tasks": (e.get("n_tasks") or e.get("n") or e.get("fired")
+                        or len(e.get("ids") or []) or None),
+            "tasks": [str(x) for x in (e.get("tasks") or e.get("ids") or [])][:64],
+            "t": e.get("t"),
+        } for e in mb]
+    gepa_ev = [e for e in events if str(e.get("kind") or "").startswith("gepa_")]
+    if gepa_ev:
+        algo_extra["gepa"] = [{"kind": e.get("kind"), "t": e.get("t"),
+                               "candidate": _step_candidate(e),
+                               "detail": {k: v for k, v in e.items()
+                                          if k not in _LOG_DROP_FIELDS}} for e in gepa_ev]
+    sk_ev = [e for e in events if str(e.get("kind") or "").startswith("skillopt_")]
+    if sk_ev:
+        algo_extra["skillopt"] = [{"kind": e.get("kind"), "t": e.get("t"),
+                                   "epoch": e.get("epoch"), "lr": e.get("lr"),
+                                   "candidate": _step_candidate(e),
+                                   "detail": {k: v for k, v in e.items()
+                                              if k not in _LOG_DROP_FIELDS}} for e in sk_ev]
+    epochs = sorted({e["epoch"] for e in events if isinstance(e.get("epoch"), int)})
+    if epochs:
+        algo_extra["epochs"] = epochs
+    focus_vals = [e.get("focus") for e in events if e.get("focus")]
+    if focus_vals:
+        algo_extra["focus"] = [str(x) for x in focus_vals]
+    # agent-optimize's tiered cheap screens: a paired subset eval that decides whether a
+    # candidate is worth a full val run. The event carries the decision; the matching
+    # ``screens/<tag>.json`` carries WHICH tasks were in the subset and which the edit
+    # fixed/regressed, which is the whole reason to look at a screen at all. Both were
+    # written to the run dir and neither was ever read.
+    screen_files = {}
+    sdir = _safe_subpath(root, "screens")
+    if sdir is not None and sdir.is_dir():
+        for f in sorted(sdir.glob("*.json")):
+            d = _read_json(f)
+            if d:
+                screen_files[str(d.get("screen_tag") or f.stem)] = d
+    screens = []
+    for e in events:
+        if e.get("kind") != "screen":
+            continue
+        tag = str(e.get("tag") or "")
+        d = screen_files.get(tag) or next(
+            (v for k, v in screen_files.items() if str(v.get("tag")) == tag), {})
+        sub = d.get("subset") or {}
+        paired = d.get("paired") or {}
+        # Fall back to screen.py's OWN naming convention (``<tag>__screen<tier>``), never
+        # to the bare candidate tag: a screen node's id must stay distinct from its
+        # candidate's, or a candidate that was screened THEN went to full val collides
+        # with its own screen in anything keyed by this id (the Tasks matrix column list,
+        # the graph). This only fires when no ``screens/<x>.json`` matched (``d`` empty).
+        screen_tag = str(d.get("screen_tag") or f"{tag}__screen{e.get('tier') or ''}")
+        # The screen's own rollouts (rollouts/val/<task>__<screen_tag>__t*.json) are the
+        # candidate's ACTUAL per-task reward on the subset it ran — the same canonical
+        # rollout->per-task reconstruction a full-val node uses, so a screen shows up in
+        # the Tasks matrix identically to any other scored node instead of being
+        # invisible there.
+        per_task, per_task_fb = _per_task_from_rollouts(run_dir, screen_tag, "val")
+        # Per-task delta vs the screen's own reference candidate (``current``), straight
+        # from ``paired.deltas`` — the number the screen actually decided on.
+        delta_ids = [str(x) for x in (paired.get("ids") or [])]
+        delta_vals = paired.get("deltas") or []
+        delta_by_task = {tid: v for tid, v in zip(delta_ids, delta_vals) if isinstance(v, (int, float))}
+        screens.append({
+            "candidate": tag, "screen_tag": screen_tag,
+            "tier": e.get("tier"), "decision": e.get("decision"),
+            "inconclusive": bool(e.get("inconclusive")),
+            "mean_delta": e.get("mean_delta"), "se": e.get("se"), "n": e.get("n"),
+            "threshold": d.get("threshold"),
+            "net_rollouts": e.get("net_rollouts"),
+            "ids": [str(x) for x in (e.get("ids") or sub.get("ids") or [])],
+            "holdout": [str(x) for x in (sub.get("holdout") or [])],
+            "informative": [str(x) for x in (sub.get("informative") or [])],
+            "fixed": [str(x) for x in (paired.get("fixed") or [])],
+            "regressed": [str(x) for x in (paired.get("regressed") or [])],
+            "pool_n": sub.get("pool_n"),
+            "rationale": e.get("rationale") or sub.get("rationale"),
+            "t": e.get("t"),
+            "reference": d.get("current"),
+            "per_task": per_task,
+            "feedback": per_task_fb,
+            "delta_by_task": delta_by_task,
+        })
+    if screens:
+        algo_extra["screens"] = screens
+
+    # Compliance instrumentation (issue #401): whether screen.py ran on a candidate
+    # BEFORE its full-val eval this round — round.py logs one of these per candidate per
+    # round.py invocation. Surfaced as its own distinct dashboard entry so a real run's
+    # screen-then-full-val discipline (or the lack of it) is visible, not just inferable
+    # from SKILL.md prose.
+    compliance = [{"candidate": e.get("tag"), "iteration": e.get("iteration"),
+                   "screened_before_fullval": bool(e.get("screened_before_fullval")),
+                   "t": e.get("t")}
+                  for e in events if e.get("kind") == "agent_optimize_compliance"]
+    if compliance:
+        algo_extra["compliance"] = compliance
+
+    evograph = _read_evograph(root)
+    if evograph:
+        algo_extra["evograph"] = evograph
+    narrative = _read_narrative(root, best_id)
+    config = _read_config(root)
+    host_session = _read_host_session(root)
+    par = [e for e in events if e.get("kind") == "parallel"]
+    if par:
+        algo_extra["parallel"] = [{k: v for k, v in e.items()
+                                   if k not in _LOG_DROP_FIELDS} for e in par]
+
+    # --- capabilities: which panels this run has real data for -----------
+    # The UI is algorithm-agnostic: it renders the generic panels always and asks this
+    # map before mounting an extra one. An absent signal means the panel is omitted —
+    # never rendered empty, never faked.
+    capabilities = {
+        "per_task": (any(n.get("per_task") for n in nodes.values())
+                     or any(s.get("per_task") for s in screens)),
+        "lineage": len(nodes) > 1,
+        "gate": bool(gate_decisions),
+        "cost": bool(ledger),
+        "log": bool(log_rows),
+        "trajectories": _exists_in(root, "rollouts"),
+        "diffs": _exists_in(root, "candidates"),
+        "minibatch": "minibatch" in algo_extra,
+        "gepa": "gepa" in algo_extra,
+        "skillopt": "skillopt" in algo_extra,
+        "epochs": "epochs" in algo_extra,
+        "focus": "focus" in algo_extra,
+        "evograph": "evograph" in algo_extra,
+        "screens": "screens" in algo_extra,
+        "compliance": "compliance" in algo_extra,
+        "parallel": "parallel" in algo_extra,
+        "narrative": bool(narrative),
+        "config": bool(config),
+        "host_transcript": bool(host_session),
+        "controls": bool(controls),
+        "screened": any(n.get("screened") is not None for n in nodes.values()),
+        "context_warnings": any(n.get("context_warning") for n in nodes.values()),
+        # A free-form (agent-driven) run has no deterministic step loop: candidates
+        # arrive from an agent's own decisions, so iteration numbers are not a schedule.
+        "freeform": algorithm in ("evograph", "agent-optimize"),
+        # dashboard.html regenerated BY THE OPTIMIZER mid-run (``cap-evolve dashboard
+        # --export``, see agent-optimize's SKILL.md) -- a self-contained snapshot of its
+        # own reasoning so far, distinct from this live view and from the report phase's
+        # end-of-run copy.
+        "process_html": (root / "dashboard.html").is_file(),
+    }
+
+    now = _now()
+    heartbeat = _read_json(_safe_subpath(root, "host/heartbeat.json")) or None
+    status, status_reason = _derive_status(
+        events=events, now=now, budget=(run_dir.budget if sp is not None else None),
+        spent=sp, agent_mode=(_orchestration_mode(root) == "agent"),
+        has_candidates=len(nodes) > 1, has_baseline=baseline_val is not None,
+        heartbeat=heartbeat)
+    ts = [float(e["t"]) for e in events if isinstance(e.get("t"), (int, float))]
+
+    # Elapsed wall time. For a finished run that is first event → last event. For a run
+    # that is STILL RUNNING the last event is not the end, so measuring to it reports
+    # "0s elapsed" for a job nine minutes into its baseline — a number that invites the
+    # reader to conclude nothing is happening. A live run is therefore measured to now,
+    # and ``elapsed_open`` tells the renderer the interval has no end yet so it can
+    # label it that way instead of implying a final duration.
+    elapsed_open = status == "running" and bool(ts)
+    if elapsed_open:
+        elapsed_seconds = round(now - min(ts), 1)
+    else:
+        elapsed_seconds = round(max(ts) - min(ts), 1) if len(ts) > 1 else None
 
     delta_pct = None
     if baseline_val not in (None, 0) and best_val is not None:
@@ -537,7 +2094,34 @@ def reduce_run(run_dir) -> dict:
 
     summary = {
         "run_id": root.name,
+        "algorithm": algorithm,
+        # Where the identity came from: a distinguishing event kind, the run dir's own
+        # evograph wiki, or the project spec. None ⇒ the UI shows "not recorded".
+        "algorithm_source": algorithm_source,
+        "capabilities": capabilities,
+        "status": status,
+        "status_reason": status_reason,
+        "started_t": (min(ts) if ts else None),
+        "last_event_t": (max(ts) if ts else None),
+        # Real elapsed wall time: first event → last event for a finished run, first
+        # event → now while the run is still live (see elapsed_open). Distinct from
+        # wall_clock_seconds, which is the SUM of measured optimizer+runner+intake time
+        # and therefore excludes idle/queueing gaps.
+        "elapsed_seconds": elapsed_seconds,
+        # True ⇒ elapsed_seconds is still growing; render it as "so far", not a total.
+        "elapsed_open": elapsed_open,
+        "event_count": len(events),
+        "splits": splits_info,
+        "gate_decisions": gate_decisions,
+        "controls": controls,
+        "cost_ledger": cost_ledger,
+        "log": log_rows,
+        "algo_extra": algo_extra,
         "baseline_val": baseline_val,
+        # The seed's own measured uncertainty. It was already in baseline.json and in the
+        # evaluations table, but not on the summary, so the KPI card claimed "no stderr
+        # recorded" beside a table that showed one.
+        "baseline_stderr": base_val_obj.get("stderr"),
         "best_val": best_val,
         "best_id": best_id,
         "delta_abs": (round(best_val - baseline_val, 4)
@@ -546,7 +2130,29 @@ def reduce_run(run_dir) -> dict:
         "test_reward": test_reward,
         "test_stderr": test.get("stderr"),
         "test_pass_k": test.get("pass_k"),
+        # The sealed test only means something NEXT TO the seed's test score: a run whose
+        # best candidate is the seed has test_delta 0 by construction, and a run that
+        # improved val but not test is the failure this project exists to catch. Both
+        # numbers were already in final.json and neither reached the UI, so the headline
+        # tile could not say whether the shipped edit was actually better.
+        "test_baseline_reward": final.get("test_baseline", {}).get("reward")
+                                if isinstance(final.get("test_baseline"), dict)
+                                else final.get("test_baseline_reward"),
+        "test_delta": final.get("test_delta"),
         "test_sealed": sealed,
+        # The full bookend `finalize` now writes into final.json (seed/best × train/val/
+        # test): surfaced here as a couple of scalars rather than the raw nested shape,
+        # matching how test_reward/test_baseline_reward are already flattened above.
+        # `train` is a dict when measured, or a {"status": "..."} note when skipped
+        # (empty split / identical to val) — only the measured case has a "reward".
+        "train_reward": ((final.get("best") or {}).get("train") or {}).get("reward"),
+        "train_baseline_reward": ((final.get("seed") or {}).get("train") or {}).get("reward"),
+        "train_delta": (round(((final.get("best") or {}).get("train") or {}).get("reward")
+                              - ((final.get("seed") or {}).get("train") or {}).get("reward"), 6)
+                        if isinstance(((final.get("best") or {}).get("train") or {}).get("reward"), (int, float))
+                        and isinstance(((final.get("seed") or {}).get("train") or {}).get("reward"), (int, float))
+                        else None),
+        "train_equals_val": final.get("train_equals_val"),
         "counts": counts,
         "frontier": frontier,
         "tasks": tasks,
@@ -556,7 +2162,9 @@ def reduce_run(run_dir) -> dict:
         "intake_seconds": round(intake_secs, 1),
         "cost": {"optimizer_usd": round(opt_usd, 4), "runner_usd": round(runner_usd, 4),
                  "intake_usd": round(intake_usd, 4),
-                 "total_usd": round(opt_usd + runner_usd + intake_usd, 4)},
+                 "total_usd": round(opt_usd + runner_usd + intake_usd, 4),
+                 "metered": _spend_metered(opt_usd + runner_usd + intake_usd,
+                                           _paid_calls(sp, evaluations))},
         "tokens": tokens,
         "tokens_by_role": {"runner": tokens - opt_tokens - int(intake_tokens),
                            "optimizer": opt_tokens, "intake": int(intake_tokens)},
@@ -570,7 +2178,26 @@ def reduce_run(run_dir) -> dict:
         "gate_warnings": gate_warnings,
         "diagnoses": diagnoses,
         "git_log": _git_log(root),
+        "narrative": narrative,
+        "config": config,
+        "host_session": host_session,
     }
+
+    # Copy over the fields only graph.jsonl carries (cluster_ids / screened subset task
+    # ids / micro_tests) -- a courtesy enrichment of the events-reconstructed nodes above,
+    # not a second source of truth (graph.py's own docstring). Missing/empty on runs that
+    # predate #446 or never wrote a node for this id.
+    for gnode in graph_mod.read_nodes(run_dir):
+        nid = gnode.get("id")
+        n = nodes.get(nid)
+        if not n:
+            continue
+        if gnode.get("cluster_ids"):
+            n["cluster_ids"] = gnode["cluster_ids"]
+        if gnode.get("subset"):
+            n["subset"] = gnode["subset"]
+        if gnode.get("micro_tests"):
+            n["micro_tests"] = gnode["micro_tests"]
 
     graph = {"nodes": list(nodes.values()), "root": "seed", "best_id": best_id}
     return redact({"graph": graph, "summary": summary})
@@ -585,7 +2212,8 @@ def reduce_run(run_dir) -> dict:
 # shows only the real change. (The big read-context dirs trajectories/ and guidance/
 # are already excluded from the snapshot itself; see harness._SNAPSHOT_IGNORE.)
 _DIFF_SKIP = {"INSTRUCTIONS.md", "MEMORY.md", "STATE.md",
-              "LEDGER.md", "JOURNAL.md", "PROCESS.md", "RUNMAP.md"}
+              "LEDGER.md", "JOURNAL.md", "PROCESS.md", "RUNMAP.md",
+              "INSIGHTS.md", "META_INSIGHTS.md", "FRAMEWORK_IMPROVEMENTS.md"}
 
 
 def _read_dir_files(d: Path) -> dict[str, str]:
@@ -617,8 +2245,9 @@ def build_diffs(run_dir, graph: dict) -> dict:
         nid, parent = n["id"], n.get("parent")
         if not parent:
             continue
-        cdir, pdir = cand_root / nid, cand_root / parent
-        if not cdir.exists() or not pdir.exists():
+        # nid/parent are candidate ids read out of the event log, not names we chose.
+        cdir, pdir = _safe_subpath(cand_root, nid), _safe_subpath(cand_root, parent)
+        if cdir is None or pdir is None or not cdir.exists() or not pdir.exists():
             continue
         cf, pf = _read_dir_files(cdir), _read_dir_files(pdir)
         file_diffs = []
@@ -662,9 +2291,13 @@ def write_dashboard(run_dir) -> Path:
     """Reduce + render + write ``dashboard.html`` next to the run state."""
     reduced = reduce_run(run_dir)
     html_text = render_html(reduced, run_dir)
-    out = Path(run_dir.root) / "dashboard.html"
+    out = _safe_subpath(run_dir.root, "dashboard.html")
+    if out is None:  # only reachable if dashboard.html is a symlink out of the run dir
+        raise ValueError(f"dashboard.html escapes the run dir: {run_dir.root}")
     out.write_text(html_text, encoding="utf-8")
-    return out
+    # Write through the proven path, but hand back the caller's own (possibly relative)
+    # spelling of it: `cap-evolve run` prints this in its JSON and compares runs by it.
+    return Path(run_dir.root) / "dashboard.html"
 
 
 # ---------------------------------------------------------------------------
@@ -809,18 +2442,22 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>cap-evolve · run dashboard</title>
 <style>
-:root{--bg:#07090d;--card:#0d1117;--card2:#141b24;--line:#1e2733;--text:#e6edf3;
---muted:#8b98a9;--accent:#3b82f6;--champion:#f59e0b;--ok:#22c55e;--bad:#ef4444;--warn:#d29922;--radius:12px}
+:root{--bg:#08090e;--card:#0e1017;--card2:#161923;--card3:#1e222e;--line:#232936;--text:#e9edf5;
+--muted:#949cad;--muted2:#b6bdcb;--accent:#7c5cff;--champion:#f0b429;--ok:#35c88a;--bad:#f2565a;
+--warn:#f0b429;--idk:#4aa8ff;--fail:#c05fd8;--radius:12px}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
 .num{font-variant-numeric:tabular-nums}
-header{position:sticky;top:0;z-index:5;background:rgba(14,17,22,.88);backdrop-filter:blur(8px);
+header{position:sticky;top:0;z-index:5;background:rgba(14,16,23,.9);backdrop-filter:blur(8px);
 border-bottom:1px solid var(--line);padding:14px 28px;display:flex;align-items:baseline;gap:16px}
 header h1{font-size:17px;margin:0;font-weight:700;letter-spacing:-.02em}
 header .meta{color:var(--muted);font-size:12px}
 main{max-width:1180px;margin:0 auto;padding:26px;display:flex;flex-direction:column;gap:26px}
 section{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px}
 section h2{font-size:13px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:0 0 14px}
+/* The page header is position:sticky, so jumping to an anchor scrolled the target heading
+   underneath it. scroll-margin-top parks the landing point below the header instead. */
+section,section h2,section h3{scroll-margin-top:74px}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:12px}
 .kpi{background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
 .kpi .l{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
@@ -849,7 +2486,23 @@ th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;le
 td.r,th.r{text-align:right}
 .badge{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11px;font-weight:600}
 .b-accepted{background:#1f3a23;color:var(--ok)} .b-rejected{background:#3a2f12;color:var(--warn)}
-.b-failed{background:#3a1c1c;color:var(--bad)} .b-seed{background:#22303a;color:var(--accent)}
+.b-failed{background:#31173a;color:var(--fail)} .b-seed{background:#22262f;color:var(--muted2)}
+.b-indecisive{background:#152a3f;color:var(--idk)}
+.pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--card2);
+border-radius:999px;padding:3px 10px;font-size:12px;font-weight:600}
+.banner{display:flex;gap:10px;border:1px solid var(--line);border-left:3px solid var(--warn);
+background:var(--card2);border-radius:0 10px 10px 0;padding:10px 14px;font-size:12.5px;line-height:1.6;color:var(--muted2)}
+.banner.info{border-left-color:var(--accent)} .banner.bad{border-left-color:var(--bad)}
+input[type=search],input[type=text]{background:var(--card2);color:var(--text);border:1px solid var(--line);
+border-radius:8px;padding:6px 10px;font:inherit}
+.logrow{display:grid;grid-template-columns:64px 74px 130px 1fr;gap:8px;align-items:baseline;
+padding:3px 6px;border-radius:6px;font-size:12px;cursor:pointer}
+.logrow:hover{background:var(--card2)} .logrow .k{font-family:ui-monospace,Menlo,monospace;font-weight:600}
+.logdet{background:var(--card2);border:1px solid var(--line);border-radius:8px;margin:2px 0 8px 70px;
+padding:8px 10px;font:12px/1.55 ui-monospace,Menlo,monospace;color:var(--muted2);white-space:pre-wrap;overflow:auto;max-height:320px}
+.eyebrow{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.bar{height:5px;border-radius:5px;background:var(--card3);overflow:hidden;max-width:360px}
+.bar>i{display:block;height:100%;border-radius:5px}
 .hide{display:none!important}
 .row{display:flex;gap:18px;flex-wrap:wrap}
 .col{flex:1;min-width:280px}
@@ -861,19 +2514,27 @@ border-radius:8px;padding:10px;overflow:auto;max-height:420px;white-space:pre}
 .diff .file{color:var(--text);font-weight:700;margin:8px 0 2px}
 .ann{border-left:3px solid var(--warn);padding:6px 12px;margin:8px 0;background:var(--card2);border-radius:0 8px 8px 0}
 .ann.diag{border-left-color:var(--accent)}
+.narrative-box{background:var(--card2);border:1px solid var(--line);border-radius:8px;
+padding:12px 14px;overflow:auto;max-height:480px}
+.md h2,.md h3,.md h4{margin:14px 0 6px;color:var(--text)}
+.md h2:first-child,.md h3:first-child,.md h4:first-child{margin-top:0}
+.md p{margin:6px 0}
+.md ul{margin:6px 0;padding-left:20px}
+.md blockquote{margin:8px 0;padding:4px 10px;border-left:3px solid var(--accent);
+background:var(--card);color:var(--muted)}
 .ann .who{color:var(--muted);font-size:11px}
 .heat rect{cursor:pointer} .heat text{fill:var(--muted);font-size:10px}
 code{background:var(--card2);padding:1px 5px;border-radius:5px;font-size:12px}
 .muted{color:var(--muted)}
 </style></head><body>
 <header><svg class="logo" width="26" height="26" viewBox="0 0 48 48" aria-label="cap-evolve">
-<path d="M4 40 L16 34 L26 24 L36 14 L44 8" fill="none" stroke="#f59e0b" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="44" cy="8" r="2.6" fill="#f59e0b"/>
+<path d="M4 40 L16 34 L26 24 L36 14 L44 8" fill="none" stroke="#7c5cff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="44" cy="8" r="2.6" fill="#7c5cff"/>
 <g fill="#e6edf3"><ellipse cx="22" cy="33" rx="13" ry="8.5"/><ellipse cx="34" cy="28" rx="7.5" ry="6.5"/>
 <ellipse cx="40.5" cy="29.5" rx="3.2" ry="2.6"/><circle cx="31" cy="22" r="1.8"/><circle cx="36" cy="22" r="1.8"/>
 <rect x="14" y="38" width="2.8" height="6" rx="1.4"/><rect x="26" y="38" width="2.8" height="6" rx="1.4"/></g>
 <circle cx="34" cy="26.5" r="1" fill="#07090d"/></svg>
-<h1>cap<span style="color:#f59e0b">·</span>evolve</h1><span class="meta" id="hdr"></span>
+<h1>cap<span style="color:#7c5cff">·</span>evolve</h1><span class="meta" id="hdr"></span>
 <span class="tag">watch capability evolve</span></header>
 <main id="main"></main>
 <div class="tip" id="tip"></div>
@@ -886,14 +2547,51 @@ const $ = (t,a={},...k)=>{const e=document.createElement(t);for(const[p,v]of Obj
   for(const c of k)if(c!=null)e.append(c);return e;};
 const NS='http://www.w3.org/2000/svg';
 const svg=(t,a={})=>{const e=document.createElementNS(NS,t);for(const[p,v]of Object.entries(a))e.setAttribute(p,v);return e;};
+/* SVG text node WITH content. `el.append(node)` returns undefined, so the old
+   `el.append(svg('text',...)).textContent = x` threw a TypeError on the very first axis
+   label — which aborted the whole inline script and silently dropped every panel below
+   the fitness chart (heatmap, lineage, cost, evaluations, candidates). */
+const txt=(el,a,content)=>{const n=svg('text',a);n.textContent=content==null?'':String(content);el.append(n);return n;};
 const fmt=v=>v==null?'—':(+v).toFixed(3);
+function escN(t){return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+// A tiny, deliberately non-general markdown renderer: headings, bullet lines,
+// blockquotes, bold, everything else is a paragraph. Good enough for the structured
+// templates the narrative files are seeded from (_JOURNAL_SEED etc.) and for a
+// PROJECT.md — not a general markdown engine, so it never needs a dependency. Shared
+// by the Process narrative and Config tabs so there is exactly one renderer.
+function mdToHtml(text){
+  const lines=escN(text).split('\n');
+  let html='',inList=false;
+  const closeList=()=>{if(inList){html+='</ul>';inList=false;}};
+  lines.forEach(line=>{
+    const bold=line.replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');
+    let m;
+    if((m=bold.match(/^(#{1,4})\s+(.*)$/))){closeList();
+      html+=`<h${Math.min(4,m[1].length)+1}>${m[2]}</h${Math.min(4,m[1].length)+1}>`;}
+    else if(/^\s*[-*]\s+/.test(bold)){if(!inList){html+='<ul>';inList=true;}
+      html+='<li>'+bold.replace(/^\s*[-*]\s+/,'')+'</li>';}
+    else if(/^>\s?/.test(bold)){closeList();
+      html+='<blockquote>'+bold.replace(/^>\s?/,'')+'</blockquote>';}
+    else if(/^<!--/.test(bold.trim())){/* skip HTML-comment markers */}
+    else if(!bold.trim()){closeList();}
+    else{closeList();html+='<p>'+bold+'</p>';}
+  });
+  closeList();
+  return html;
+}
 const main=document.getElementById('main'), tip=document.getElementById('tip');
+const STATUS_META={running:['running','var(--accent)'],awaiting_agent:['awaiting agent','var(--idk)'],
+  completed:['completed','var(--ok)'],budget_exhausted:['budget exhausted','var(--warn)'],
+  stalled:['stalled','var(--warn)'],interrupted:['interrupted','var(--fail)'],failed:['failed','var(--bad)']};
 document.getElementById('hdr').textContent =
-  `${S.run_id} · ${S.counts.total} candidates · ${S.test_sealed?'test sealed':'no holdout yet'}`;
+  `${S.run_id} · ${S.algorithm||'algorithm not recorded'} · ${S.counts.total-1} candidates · ` +
+  `${S.test_sealed?'test sealed':'test not sealed'}`;
 function showTip(e,txt){tip.textContent=txt;tip.style.display='block';
   tip.style.left=Math.min(e.clientX+14,innerWidth-330)+'px';tip.style.top=(e.clientY+14)+'px';}
 function hideTip(){tip.style.display='none';}
 function sec(title){const s=$('section');s.append($('h2',{text:title}));main.append(s);return s;}
+function dsecs(v){v=Math.max(0,Math.round(v||0));if(v<60)return v+'s';
+  const m=Math.floor(v/60);if(m<60)return m+'m '+(v%60)+'s';return Math.floor(m/60)+'h '+(m%60)+'m';}
 
 /* ---------- 1. KPI strip ---------- */
 (function(){
@@ -907,28 +2605,59 @@ function sec(title){const s=$('section');s.append($('h2',{text:title}));main.app
     kp('best val',fmt(S.best_val),'champ',S.best_id),
     kp('baseline',fmt(S.baseline_val)),
     kp('Δ vs baseline',dpct,(S.delta_abs>0?'ok':'')),
-    kp('held-out test',fmt(S.test_reward),'',S.test_sealed?'sealed once':'not finalized'),
-    kp('candidates',c.total,'',`${c.accepted}✓ ${c.rejected}✗ ${c.failed}⚠`),
-    kp('frontier',S.frontier),
+    kp('held-out test',fmt(S.test_reward),'',
+       // The raw sealed score alone is not the result — the DELTA against the seed's own test
+       // score is, and both were already in final.json. A run can lift val and lose test.
+       (S.test_delta!=null||S.test_baseline_reward!=null)
+         ?((S.test_delta!=null?(S.test_delta>0?'+':'')+S.test_delta.toFixed(3)+' vs seed ':'')+
+           (S.test_baseline_reward!=null?fmt(S.test_baseline_reward):'')+
+           (S.test_sealed?' · sealed once':''))
+         :(S.test_sealed?'sealed once':'not finalized')),
+    kp('candidates',c.total-(c.seed||0),'',
+       `${c.accepted} accept · ${c.rejected} reject · ${c.indecisive||0} indecisive · ${c.failed} no-measure`),
+    kp('frontier',S.frontier,'','gated leaves with no accepted child'),
     kp('wall clock',`${S.wall_clock_seconds}s`,'',`opt ${S.optimizer_seconds}s · run ${S.runner_seconds}s`),
     kp('cost',`$${cost.total_usd.toFixed(4)}`,'',`opt $${cost.optimizer_usd.toFixed(4)} · run $${cost.runner_usd.toFixed(4)}`),
-    kp('tokens',S.tokens.toLocaleString())
+    // Token count without its split reads as implausible next to the dollar figure (a real run:
+    // 206M tokens for $4.80). The split explains it: nearly all of them are RUNNER tokens on a
+    // self-hosted endpoint that bills $0, and the dollars are the optimizer's.
+    kp('tokens',S.tokens.toLocaleString(),'',S.tokens_by_role?
+       `run ${S.tokens_by_role.runner.toLocaleString()} · opt ${S.tokens_by_role.optimizer.toLocaleString()}`:''),
+    kp('unattributed $',
+       S.cost_ledger?`$${S.cost_ledger.unattributed_usd.toFixed(4)}`:'—',
+       (S.cost_ledger&&Math.abs(S.cost_ledger.unattributed_usd)>0.0005?'champ':''),
+       'recorded spend the events cannot explain'),
+    kp('events',S.event_count!=null?S.event_count:'—','','every line in events.jsonl')
   );
   s.append(g);
 })();
 
-/* ---------- 1b. Narrative summary ---------- */
+/* ---------- 1b. Run status + split honesty ---------- */
 (function(){
-  const c=S.counts, parts=[];
-  if(S.baseline_val!=null&&S.best_val!=null){
-    const d=((S.best_val-S.baseline_val)*100).toFixed(1);
-    parts.push(`Starting from a ${(S.baseline_val*100).toFixed(1)}% baseline, the search reached `+
-      `${(S.best_val*100).toFixed(1)}% (+${d} points)`);
+  const s=sec('Run status');
+  const meta=STATUS_META[S.status]||['unknown','var(--muted)'];
+  const head=$('div',{style:'display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:10px'});
+  const pill=$('span',{class:'pill',style:`color:${meta[1]};border-color:${meta[1]}66`});
+  pill.append($('span',{style:`width:8px;height:8px;border-radius:50%;background:${meta[1]}`}),
+              $('span',{text:meta[0]}));
+  head.append(pill);
+  if(S.algorithm)head.append($('span',{class:'pill',style:'color:var(--accent);border-color:#7c5cff66',
+    text:S.algorithm+(S.algorithm_source?' · from '+S.algorithm_source:'')}));
+  head.append($('span',{class:'pill',text:S.test_sealed?'test sealed':'test not sealed'}));
+  if(S.elapsed_seconds!=null)head.append($('span',{class:'muted num',text:dsecs(S.elapsed_seconds)+(S.elapsed_open?' elapsed so far':' elapsed')}));
+  s.append(head);
+  if(S.status_reason)s.append($('p',{class:'muted',style:'margin:0 0 10px',text:S.status_reason}));
+  const sp=S.splits;
+  if(sp&&sp.no_holdout){
+    s.append($('div',{class:'banner',html:'<b>No holdout.</b> train, val and test hold the same tasks, so the '+
+      '&ldquo;test&rdquo; number is NOT a generalization estimate &mdash; the optimizer saw those tasks. '+
+      'Read it as a sanity check only.'}));
   }
-  parts.push(`after ${c.accepted+c.rejected} iterations (${c.accepted} accepted, ${c.rejected} rejected)`);
-  if(S.test_reward!=null)parts.push(`The best candidate scored ${(S.test_reward*100).toFixed(1)}% on the sealed test set`);
-  if(!parts.length)return;
-  const s=sec('Narrative'); s.append($('p',{class:'muted',text:parts.join('. ')+'.'}));
+  if(sp&&sp.warning)s.append($('div',{class:'banner',text:sp.warning}));
+  if(sp)s.append($('p',{class:'muted num',style:'margin:10px 0 0',
+    text:`splits · train ${sp.train??'—'} · val ${sp.val??'—'} · test ${sp.test??'—'}`+
+         (sp.seed!=null?` · seed ${sp.seed}`:'')+
+         '   —   val decides selection; test is scored exactly once and never optimized against.'}));
 })();
 
 /* ---------- 1c. Phases timeline ---------- */
@@ -952,7 +2681,7 @@ function sec(title){const s=$('section');s.append($('h2',{text:title}));main.app
   s.append(g);
 })();
 
-/* ---------- 1d. What not to try (deduped dead-ends) ---------- */
+/* ---------- 1d. Rejected edits, deduplicated by reason ---------- */
 (function(){
   const norm=r=>(r||'rejected').replace(/-?\d+\.\d+/g,'N').replace(/-?\d+/g,'N').trim();
   const map=new Map();
@@ -961,7 +2690,7 @@ function sec(title){const s=$('section');s.append($('h2',{text:title}));main.app
     cur.count++; if(cur.ex.length<3)cur.ex.push(n.id); map.set(k,cur);}
   const ends=[...map.values()].sort((a,b)=>b.count-a.count);
   if(!ends.length)return;
-  const s=sec('What not to try — dead ends');
+  const s=sec('Rejected edits, grouped by the gate reason');
   for(const d of ends){const e=$('div',{class:'dead'});
     if(d.count>1)e.append($('span',{class:'x',text:'×'+d.count}));
     e.append($('div',{class:'muted',text:d.ex.join(', ')}),$('div',{text:d.reason}));
@@ -981,35 +2710,40 @@ function sec(title){const s=$('section');s.append($('h2',{text:title}));main.app
   const Y=v=>H-m.b-(v-vmin)/((vmax-vmin)||1)*(H-m.t-m.b);
   const el=svg('svg',{viewBox:`0 0 ${W} ${H}`,width:W,height:H});
   for(let g2=0;g2<=4;g2++){const v=vmin+(vmax-vmin)*g2/4;
-    el.append(svg('line',{x1:m.l,x2:W-m.r,y1:Y(v),y2:Y(v),stroke:'#2b333d','stroke-width':1}));
-    el.append(svg('text',{x:6,y:Y(v)+4,fill:'#8b949e','font-size':10,'text-content':''})).textContent=v.toFixed(2);}
+    el.append(svg('line',{x1:m.l,x2:W-m.r,y1:Y(v),y2:Y(v),stroke:'var(--line)','stroke-width':1}));
+    txt(el,{x:6,y:Y(v)+4,fill:'var(--muted)','font-size':10},v.toFixed(2));}
   // stair polyline of running best
   let d='';let prevY=null;
   pts.forEach((p,i)=>{const x=X(p.iteration),y=Y(p.best_so_far);
     if(i===0)d=`M${x},${y}`;else d+=` L${x},${prevY} L${x},${y}`;prevY=y;});
-  el.append(svg('path',{d,fill:'none',stroke:'#3fb950','stroke-width':2}));
+  el.append(svg('path',{d,fill:'none',stroke:'var(--ok)','stroke-width':2}));
   // record-holder rings + per-iter scatter
   let rec=-1;
   pts.forEach(p=>{
-    if(p.val!=null){const col=p.status==='accepted'?'#3fb950':p.status==='failed'?'#f85149':'#d29922';
-      const c=svg('circle',{cx:X(p.iteration),cy:Y(p.val),r:4,fill:col,'fill-opacity':.85,stroke:'#0e1116'});
+    if(p.val!=null){const col=p.status==='accepted'?'var(--ok)':p.status==='failed'?'var(--bad)':'var(--warn)';
+      const c=svg('circle',{cx:X(p.iteration),cy:Y(p.val),r:4,fill:col,'fill-opacity':.85,stroke:'var(--bg)'});
       const dpar=p.parent_val!=null?(p.val-p.parent_val).toFixed(3):'—';
       c.addEventListener('mousemove',e=>showTip(e,`${p.id}\n${p.status}  val=${fmt(p.val)}\nΔ parent=${dpar}\niter ${p.iteration}`));
       c.addEventListener('mouseleave',hideTip);el.append(c);}
     if(p.best_so_far>rec){rec=p.best_so_far;
-      el.append(svg('circle',{cx:X(p.iteration),cy:Y(p.best_so_far),r:7,fill:'none',stroke:'#4493f8','stroke-width':1.5}));}
+      el.append(svg('circle',{cx:X(p.iteration),cy:Y(p.best_so_far),r:7,fill:'none',stroke:'var(--accent)','stroke-width':1.5}));}
   });
   // champion star + label
   const champ=pts.reduce((a,b)=>(b.best_so_far>=a.best_so_far?b:a),pts[0]);
   const cx=X(champ.iteration),cy=Y(champ.best_so_far);
-  el.append(svg('path',{d:starPath(cx,cy-12,7,3),fill:'#f0d040',stroke:'#0e1116'}));
-  el.append(svg('text',{x:cx+10,y:cy-8,fill:'#e6edf3','font-size':12})).textContent=fmt(champ.best_so_far);
+  el.append(svg('path',{d:starPath(cx,cy-12,7,3),fill:'var(--champion)',stroke:'var(--bg)'}));
+  // The champion is usually the RIGHTMOST point, where a left-anchored label runs off the plot
+  // and gets clipped by the viewBox. Flip the anchor to the left of the star when there is not
+  // room to its right.
+  const tight=cx>W-m.r-46;
+  txt(el,{x:tight?cx-10:cx+10,y:cy-8,fill:'var(--text)','font-size':12,
+          'text-anchor':tight?'end':'start'},fmt(champ.best_so_far));
   s.append(el);
   s.append($('div',{class:'legend',html:
-    '<span><i style="background:#3fb950"></i>running best / accept</span>'+
-    '<span><i style="background:#d29922"></i>rejected</span>'+
-    '<span><i style="background:#f85149"></i>failed</span>'+
-    '<span><i style="background:#4493f8;border-radius:50%"></i>record-holder ring</span>'}));
+    '<span><i style="background:var(--ok)"></i>running best / accept</span>'+
+    '<span><i style="background:var(--warn)"></i>rejected</span>'+
+    '<span><i style="background:var(--bad)"></i>failed</span>'+
+    '<span><i style="background:var(--accent);border-radius:50%"></i>record-holder ring</span>'}));
   function starPath(cx,cy,R,r){let p='';for(let i=0;i<10;i++){const ang=Math.PI/5*i-Math.PI/2;
     const rad=i%2?r:R;p+=(i?'L':'M')+(cx+rad*Math.cos(ang))+','+(cy+rad*Math.sin(ang));}return p+'Z';}
 })();
@@ -1026,12 +2760,12 @@ function sec(title){const s=$('section');s.append($('h2',{text:title}));main.app
   const cw=Math.max(10,Math.min(26,Math.floor(1000/iters.length))),ch=16,labW=120;
   const W=labW+iters.length*cw+10,H=rows.length*ch+24;
   const el=svg('svg',{viewBox:`0 0 ${W} ${H}`,width:W,height:H,class:'heat'});
-  iters.forEach((it,j)=>{el.append(svg('text',{x:labW+j*cw+cw/2,y:12,'text-anchor':'middle'})).textContent=it.iteration;});
+  iters.forEach((it,j)=>txt(el,{x:labW+j*cw+cw/2,y:12,'text-anchor':'middle'},it.iteration));
   rows.forEach((t,i)=>{
-    el.append(svg('text',{x:labW-6,y:24+i*ch+11,'text-anchor':'end'})).textContent=t.length>16?t.slice(0,15)+'…':t;
+    txt(el,{x:labW-6,y:24+i*ch+11,'text-anchor':'end'},t.length>16?t.slice(0,15)+'…':t);
     iters.forEach((it,j)=>{
       const v=it.per_task[t];
-      const col=v==null?'#21262d':v>=0.999?'#2ea043':v<=0.001?'#7d2622':'#9e6a1a';
+      const col=v==null?'var(--card3)':v>=0.999?'var(--ok)':v<=0.001?'var(--bad)':'var(--warn)';
       const rect=svg('rect',{x:labW+j*cw,y:24+i*ch,width:cw-1.5,height:ch-1.5,rx:2,fill:col});
       const fb=(it.feedback&&it.feedback[t])||'';
       rect.addEventListener('mousemove',e=>showTip(e,`${t} @ iter ${it.iteration} (${it.id})\nreward=${v==null?'—':v.toFixed(3)}\n${fb.slice(0,180)}`));
@@ -1041,8 +2775,8 @@ function sec(title){const s=$('section');s.append($('h2',{text:title}));main.app
   });
   s.append(el);
   s.append($('div',{class:'legend',html:
-    '<span><i style="background:#2ea043"></i>pass</span><span><i style="background:#7d2622"></i>fail</span>'+
-    '<span><i style="background:#9e6a1a"></i>partial</span><span><i style="background:#21262d"></i>not run</span>'+
+    '<span><i style="background:var(--ok)"></i>pass</span><span><i style="background:var(--bad)"></i>fail</span>'+
+    '<span><i style="background:var(--warn)"></i>partial</span><span><i style="background:var(--card3)"></i>not run</span>'+
     '<span class="muted">rows sorted worst-first · hover a cell for feedback</span>'}));
 })();
 
@@ -1100,113 +2834,23 @@ function sec(title){const s=$('section');s.append($('h2',{text:title}));main.app
     const parents=[n.parent,...(n.merge_of||[])].filter(x=>x&&pos[x]);
     parents.forEach(pp=>{const a=pos[pp];const onSpine=spine.has(n.id)&&spine.has(pp);
       el.append(svg('path',{d:`M${a.x+14},${a.y} C${(a.x+p.x)/2},${a.y} ${(a.x+p.x)/2},${p.y} ${p.x-14},${p.y}`,
-        fill:'none',stroke:onSpine?'#f0d040':'#3a434d','stroke-width':onSpine?2.5:1.2}));});
+        fill:'none',stroke:onSpine?'var(--champion)':'var(--line)','stroke-width':onSpine?2.5:1.2}));});
   });
   nodes.forEach(n=>{const p=pos[n.id];if(!p)return;
-    const col=n.status==='accepted'?'#3fb950':n.status==='rejected'?'#d29922':n.status==='failed'?'#f85149':'#4493f8';
+    const col=n.status==='accepted'?'var(--ok)':n.status==='rejected'?'var(--warn)':n.status==='failed'?'var(--bad)':'var(--accent)';
     const c=svg('circle',{cx:p.x,cy:p.y,r:n.id===S.best_id?9:6,fill:col,
-      stroke:spine.has(n.id)?'#f0d040':'#0e1116','stroke-width':spine.has(n.id)?2:1});
+      stroke:spine.has(n.id)?'var(--champion)':'var(--bg)','stroke-width':spine.has(n.id)?2:1});
     c.addEventListener('mousemove',e=>showTip(e,`${n.id}\n${n.status}  val=${fmt(n.val)}\n${n.reason||''}`));
     c.addEventListener('mouseleave',hideTip); el.append(c);
-    el.append(svg('text',{x:p.x+12,y:p.y+4,fill:'#8b949e','font-size':10})).textContent=n.id;
+    // A node with outgoing edges (the seed, above all) has a connector leaving at exactly
+    // y=p.y, so a label on the baseline right of the node is drawn UNDER that line and reads
+    // as struck through. Lift those labels clear of the connector.
+    const outgoing=(n.children||[]).some(c2=>pos[c2]);
+    txt(el,{x:p.x+12,y:outgoing?p.y-8:p.y+4,fill:'var(--muted)','font-size':10},n.id);
   });
   s.append(el);
-  s.append($('div',{class:'legend',html:'<span><i style="background:#f0d040"></i>best lineage spine</span>'+
+  s.append($('div',{class:'legend',html:'<span><i style="background:var(--champion)"></i>best lineage spine</span>'+
     '<span class="muted">merges shown as multi-parent edges</span>'}));
-})();
-
-/* ---------- 6. Cost / tokens / latency ---------- */
-(function(){
-  const pts=G.nodes.filter(n=>n.iteration).sort((a,b)=>a.iteration-b.iteration);
-  if(!pts.length)return;
-  const s=sec('Cost · tokens · latency (optimizer vs runner)');
-  const W=1080,H=240,m={l:46,r:16,t:14,b:28},n=pts.length;
-  const bw=Math.max(6,Math.min(40,(W-m.l-m.r)/n-6));
-  const maxSec=Math.max(...pts.map(p=>(p.optimizer_seconds||0)+(p.runner_seconds||0)),0.001);
-  const el=svg('svg',{viewBox:`0 0 ${W} ${H}`,width:W,height:H});
-  // stacked bars: optimizer (blue) + runner (green) seconds; cumulative cost line
-  let cum=0; const costMax=Math.max(S.cost.total_usd,0.0001);
-  pts.forEach((p,i)=>{const x=m.l+i*((W-m.l-m.r)/n)+3;
-    const os=(p.optimizer_seconds||0)/maxSec*(H-m.t-m.b);
-    const rs=(p.runner_seconds||0)/maxSec*(H-m.t-m.b);
-    el.append(svg('rect',{x,y:H-m.b-rs,width:bw,height:rs,fill:'#3fb950'})).addEventListener('mousemove',()=>{});
-    el.append(svg('rect',{x,y:H-m.b-rs-os,width:bw,height:os,fill:'#4493f8'}));
-    const bar=svg('rect',{x,y:m.t,width:bw,height:H-m.t-m.b,fill:'transparent'});
-    bar.addEventListener('mousemove',e=>showTip(e,`${p.id} · iter ${p.iteration}\nopt ${(p.optimizer_seconds||0).toFixed(2)}s · run ${(p.runner_seconds||0).toFixed(2)}s\n$${(p.cost_usd||0).toFixed(4)} · ${p.tokens||0} tok`));
-    bar.addEventListener('mouseleave',hideTip); el.append(bar);
-  });
-  // cumulative cost line (right axis, normalized)
-  let d='';pts.forEach((p,i)=>{cum+=(p.cost_usd||0);const x=m.l+i*((W-m.l-m.r)/n)+3+bw/2;
-    const y=H-m.b-(cum/costMax)*(H-m.t-m.b);d+=(i?' L':'M')+x+','+y;});
-  if(S.cost.total_usd>0)el.append(svg('path',{d,fill:'none',stroke:'#f0d040','stroke-width':1.8,'stroke-dasharray':'4 3'}));
-  s.append(el);
-  s.append($('div',{class:'legend',html:'<span><i style="background:#4493f8"></i>optimizer s</span>'+
-    '<span><i style="background:#3fb950"></i>runner s</span>'+
-    (S.cost.total_usd>0?'<span><i style="background:#f0d040"></i>cumulative $</span>':'')}));
-})();
-
-/* ---------- 6b. cumulative cost vs best score ---------- */
-(function(){
-  if(S.cost.total_usd<=0)return;
-  const pts=G.nodes.filter(n=>n.iteration&&n.best_so_far!=null).sort((a,b)=>a.iteration-b.iteration);
-  if(pts.length<2)return;
-  const s=sec('Cost vs best score'); const W=1080,H=220,m={l:46,r:16,t:14,b:28};
-  let cum=0;const xy=pts.map(p=>{cum+=(p.cost_usd||0);return [cum,p.best_so_far];});
-  const xmax=Math.max(...xy.map(p=>p[0]))||1,ymin=Math.min(...xy.map(p=>p[1]),0),ymax=Math.max(...xy.map(p=>p[1]),1);
-  const X=v=>m.l+v/xmax*(W-m.l-m.r),Y=v=>H-m.b-(v-ymin)/((ymax-ymin)||1)*(H-m.t-m.b);
-  const el=svg('svg',{viewBox:`0 0 ${W} ${H}`,width:W,height:H});
-  let d='';xy.forEach((p,i)=>d+=(i?' L':'M')+X(p[0])+','+Y(p[1]));
-  el.append(svg('path',{d,fill:'none',stroke:'#4493f8','stroke-width':2}));
-  el.append(svg('text',{x:W-m.r,y:H-8,fill:'#8b949e','font-size':10,'text-anchor':'end'})).textContent=`$${xmax.toFixed(4)} total`;
-  s.append(el);
-})();
-
-/* ---------- 6c. Cost & time per iteration (optimizer vs runner) + intake ---------- */
-(function(){
-  const rows=S.per_iteration||[];
-  const intake=S.intake||{usd:0,seconds:0,tokens:0};
-  const s=sec('Cost & time per iteration');
-  // intake row — always shown, even at $0, so it's clear intake spent nothing.
-  const dsec=v=>{v=Math.max(0,Math.round(v||0));if(v<60)return v+'s';
-    const m=Math.floor(v/60);if(m<60)return m+'m '+(v%60)+'s';return Math.floor(m/60)+'h '+(m%60)+'m';};
-  const intakeRow=$('div',{class:'phase',style:'margin-bottom:12px'});
-  const esc=t=>String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;');
-  let intakeHtml='<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'+
-    'background:var(--accent);margin-right:6px;vertical-align:-1px"></span>'+
-    '<b>Intake</b> &nbsp; cost <b>$'+(intake.usd||0).toFixed(4)+'</b>'+
-    (intake.usd===0?' <span class="muted">(spent $0)</span>':'')+
-    ' &nbsp; time <b>'+dsec(intake.seconds)+'</b> &nbsp; <span class="muted">'+
-    (intake.tokens||0).toLocaleString()+' tok</span>';
-  if(intake.output_summary)intakeHtml+='<div class="muted" style="margin-top:6px">'+esc(intake.output_summary)+'</div>';
-  if((intake.implemented||[]).length)intakeHtml+='<div style="margin-top:6px"><span class="muted">implemented:</span> '+
-    intake.implemented.map(x=>'<code>'+esc(x)+'</code>').join(' ')+'</div>';
-  intakeRow.innerHTML=intakeHtml;
-  s.append(intakeRow);
-  if(!rows.length){s.append($('p',{class:'muted',text:'No iterations recorded yet.'}));return;}
-  const optMax=Math.max(1e-6,...rows.map(r=>r.optimizer_seconds||0));
-  const runMax=Math.max(1e-6,...rows.map(r=>r.runner_seconds||0));
-  const t=$('table');
-  t.append($('tr',{},$('th',{text:'iter'}),$('th',{text:'candidate'}),
-    $('th',{class:'r',text:'opt $'}),$('th',{html:'<span style="color:var(--accent)">opt time</span>'}),
-    $('th',{class:'r',text:'run $'}),$('th',{html:'<span style="color:var(--ok)">run time</span>'})));
-  const bar=(secv,max,col)=>{const frac=max>0?Math.min(1,secv/max):0;
-    const wrap=$('div',{style:'display:flex;align-items:center;gap:8px'});
-    const track=$('div',{style:'height:6px;width:64px;border-radius:6px;overflow:hidden;background:var(--card2)'});
-    track.append($('div',{style:`height:100%;border-radius:6px;width:${frac*100}%;background:${col}`}));
-    wrap.append(track,$('span',{class:'muted num',text:dsec(secv)}));return wrap;};
-  rows.forEach(r=>{
-    t.append($('tr',{},
-      $('td',{class:'num muted',text:r.iteration}),
-      $('td',{},$('code',{text:r.candidate})),
-      $('td',{class:'r num',text:r.optimizer_usd!=null?'$'+(+r.optimizer_usd).toFixed(4):'—'}),
-      $('td',{},bar(r.optimizer_seconds||0,optMax,'#4493f8')),
-      $('td',{class:'r num',text:r.runner_usd!=null?'$'+(+r.runner_usd).toFixed(4):'—'}),
-      $('td',{},bar(r.runner_seconds||0,runMax,'#3fb950'))));
-  });
-  s.append(t);
-  s.append($('div',{class:'legend',html:'<span><i style="background:#4493f8"></i>optimizer time</span>'+
-    '<span><i style="background:#3fb950"></i>runner time</span>'+
-    '<span class="muted">$ shown when available (runner cost is often $0/null) · time always</span>'}));
 })();
 
 /* ---------- 6d. Evaluations (split-oriented, distinct from per-iteration) ---------- */
@@ -1215,15 +2859,15 @@ function sec(title){const s=$('section');s.append($('h2',{text:title}));main.app
   if(!evals.length)return;
   const s=sec('Evaluations');
   s.append($('p',{class:'muted',text:'Each scoring of a candidate on a split — '+
-    'baseline (seed on val), every full val eval, and the sealed test eval. '+
-    'Distinct from the optimizer-step view above.'}));
+    'baseline (seed on val), every full val eval, each null-control replicate, and the '+
+    'sealed test eval. Distinct from the optimizer-step view above.'}));
   const t=$('table');
   t.append($('tr',{},$('th',{text:'kind'}),$('th',{text:'candidate'}),$('th',{text:'split'}),
     $('th',{class:'r',text:'reward ± stderr'}),$('th',{class:'r',text:'runner $'}),
     $('th',{class:'r',text:'time'}),$('th',{class:'r',text:'tokens'}),$('th',{class:'r',text:'tasks × trials'})));
   const dsec=v=>{v=Math.max(0,Math.round(v||0));if(v<60)return v+'s';
     const m=Math.floor(v/60);if(m<60)return m+'m '+(v%60)+'s';return Math.floor(m/60)+'h '+(m%60)+'m';};
-  const kindBadge={baseline:'b-seed',candidate:'b-accepted',test:'b-failed'};
+  const kindBadge={baseline:'b-seed',candidate:'b-accepted',test:'b-failed',control:'b-indecisive'};
   evals.forEach(e=>{
     const re=e.reward==null?'—':fmt(e.reward)+(e.stderr!=null?' ± '+(+e.stderr).toFixed(3):'');
     t.append($('tr',{},
@@ -1234,36 +2878,491 @@ function sec(title){const s=$('section');s.append($('h2',{text:title}));main.app
       $('td',{class:'r num',text:e.cost_usd?'$'+(+e.cost_usd).toFixed(4):'—'}),
       $('td',{class:'r num',text:dsec(e.seconds)}),
       $('td',{class:'r num',text:(e.tokens||0).toLocaleString()}),
-      $('td',{class:'r num',text:(e.n_tasks||0)+' × '+(e.trials||1)})));
+      $('td',{class:'r num',text:e.n_tasks?e.n_tasks+' × '+(e.trials||1):'—'})));
   });
   s.append(t);
 })();
 
-/* ---------- 7. Annotations / diagnoses stream ---------- */
+/* ---------- 6d2. Per-iteration timing — optimizer vs runner seconds per step ---------- */
 (function(){
-  const W=S.gate_warnings||[], D=S.diagnoses||[];
-  if(!W.length&&!D.length)return;
-  const s=sec('Annotations & diagnoses');
-  W.forEach(w=>{const a=$('div',{class:'ann'});a.append($('div',{class:'who',text:'gate · '+(w.mode||'')}),
-    $('div',{text:w.reason||''}));s.append(a);});
-  D.forEach(d=>{const a=$('div',{class:'ann diag'});a.append($('div',{class:'who',text:(d.kind||'diagnose')+(d.candidate?' · '+d.candidate:'')}),
-    $('div',{text:(d.text||'').slice(0,400)}));s.append(a);});
+  const PI=S.per_iteration||[]; if(!PI.length)return;
+  const s=sec('Per-iteration timing');
+  s.append($('p',{class:'muted',text:
+    'Wall time spent on each optimizer step, split into the optimizer call and the runner '+
+    '(target-agent) eval that produced its score. A step with no cost recorded still has a '+
+    'real time — time is always shown, cost only when the run reported it.'}));
+  const maxSec=Math.max(1e-9,...PI.map(r=>(r.optimizer_seconds||0)+(r.runner_seconds||0)));
+  const t=$('table');
+  t.append($('tr',{},$('th',{text:'iter'}),$('th',{text:'candidate'}),$('th',{text:'status'}),
+    $('th',{class:'r',text:'optimizer time'}),$('th',{class:'r',text:'runner time'}),
+    $('th',{class:'r',text:'optimizer $'}),$('th',{class:'r',text:'runner $'}),$('th',{text:'time'})));
+  const STBADGE={accepted:'b-accepted',rejected:'b-rejected',failed:'b-failed',
+    indecisive:'b-indecisive',provisional:'b-indecisive'};
+  PI.forEach(r=>{
+    const total=(r.optimizer_seconds||0)+(r.runner_seconds||0);
+    const bar=$('div',{class:'bar'});
+    if(r.optimizer_seconds)bar.append($('i',{style:`width:${(r.optimizer_seconds/maxSec*100).toFixed(1)}%;background:var(--champion)`}));
+    if(r.runner_seconds)bar.append($('i',{style:`width:${(r.runner_seconds/maxSec*100).toFixed(1)}%;background:var(--accent)`}));
+    t.append($('tr',{},
+      $('td',{class:'num muted',text:r.iteration??'—'}),
+      $('td',{},$('code',{text:r.candidate})),
+      $('td',{},$('span',{class:'badge '+(STBADGE[r.status]||'b-seed'),text:r.status})),
+      $('td',{class:'r num',text:dsecs(r.optimizer_seconds)}),
+      $('td',{class:'r num',text:dsecs(r.runner_seconds)}),
+      $('td',{class:'r num muted',text:r.optimizer_usd==null?'—':'$'+(+r.optimizer_usd).toFixed(4)}),
+      $('td',{class:'r num muted',text:r.runner_usd==null?'—':'$'+(+r.runner_usd).toFixed(4)}),
+      $('td',{},bar)));
+  });
+  s.append(t);
+  s.append($('div',{class:'legend',html:'<span><i style="background:var(--champion)"></i>optimizer</span>'+
+    '<span><i style="background:var(--accent)"></i>runner</span>'}));
+})();
+
+/* ---------- 6e. Cost ledger — every dollar, attributed ---------- */
+(function(){
+  const L=S.cost_ledger; if(!L||!L.rows.length)return;
+  const s=sec('Cost ledger — where every dollar went');
+  const head=$('div',{style:'display:flex;flex-wrap:wrap;gap:22px;margin-bottom:12px'});
+  const stat=(l,v,cls='')=>{const d=$('div');d.append($('div',{class:'eyebrow',text:l}),
+    $('div',{class:'num '+cls,style:'font-weight:700;margin-top:2px',text:v}));return d;};
+  const off=Math.abs(L.unattributed_usd)>0.0005;
+  head.append(stat('total recorded','$'+L.total_usd.toFixed(4),''),
+              stat('attributed to events','$'+L.attributed_usd.toFixed(4)),
+              stat('unattributed','$'+L.unattributed_usd.toFixed(4),off?'':'muted'),
+              stat('rows with no cost recorded',String(L.rows_missing_cost)));
+  s.append(head);
+  if(off)s.append($('div',{class:'banner',text:
+    '$'+Math.abs(L.unattributed_usd).toFixed(4)+' of recorded spend is not accounted for by the rows '+
+    'below. That happens when a phase records into the run spend accounting without emitting a '+
+    'cost-bearing event (agent-mode commits are the common case). Shown rather than hidden.'}));
+  const KC={intake:'var(--muted2)',baseline_eval:'var(--accent)',candidate_eval:'var(--ok)',
+            optimizer_call:'var(--champion)',test_eval:'var(--idk)'};
+  const PH={intake:'Intake',baseline:'Baseline',optimize:'Optimize',finalize:'Finalize (sealed test)'};
+  const maxRow=Math.max(1e-9,...L.rows.map(r=>r.usd||0));
+  for(const ph of ['intake','baseline','optimize','finalize']){
+    const rows=L.rows.filter(r=>r.phase===ph); if(!rows.length)continue;
+    const sum=rows.reduce((a,r)=>a+(r.usd||0),0), miss=rows.filter(r=>r.usd==null).length;
+    s.append($('h2',{style:'margin:16px 0 6px;text-transform:none;letter-spacing:0;font-size:13px;color:var(--text)',
+      text:`${PH[ph]} — $${sum.toFixed(4)}`+(miss?`  (+${miss} unrecorded)`:'')}));
+    const t2=$('table');
+    rows.forEach(r=>{
+      const label=$('td');
+      const line=$('div',{style:'display:flex;align-items:center;gap:8px'});
+      line.append($('span',{style:`width:9px;height:9px;border-radius:2px;flex:none;background:${KC[r.kind]||'var(--muted)'}`}),
+                  $('span',{text:r.label}));
+      label.append(line);
+      if(r.note)label.append($('div',{class:'muted',style:'font-size:11px;margin-left:17px',text:r.note}));
+      const bar=$('div',{class:'bar',style:'margin:5px 0 0 17px'});
+      bar.append($('i',{style:`width:${((r.usd||0)/maxRow*100).toFixed(1)}%;background:${KC[r.kind]||'var(--muted)'}`}));
+      label.append(bar);
+      t2.append($('tr',{},label,
+        $('td',{class:'r num',text:r.usd==null?'—':'$'+(+r.usd).toFixed(4)}),
+        $('td',{class:'r num muted',text:dsecs(r.seconds)}),
+        $('td',{class:'r num muted',text:r.tokens?(+r.tokens).toLocaleString():'—'})));
+    });
+    s.append(t2);
+  }
+  s.append($('div',{class:'legend',html:'<span class="muted">a &ldquo;—&rdquo; is a cost that was never '+
+    'recorded; it is never rendered as $0</span>'}));
+})();
+
+/* ---------- 6f. Gate decisions — Δ̄ with its SE and n ---------- */
+(function(){
+  const D=S.gate_decisions||[]; if(!D.length)return;
+  const s=sec('Gate decisions');
+  const idk=D.filter(d=>d.verdict==='indecisive');
+  if(idk.length)s.append($('div',{class:'banner',html:'<b>'+idk.length+' step(s) indecisive.</b> The gate '+
+    'REFUSED to judge — too little of the split ran, or the candidate edited a protected file. That is '+
+    'missing data, not a bad edit: these are excluded from the running best and from the stall counter.'}));
+  const t2=$('table');
+  t2.append($('tr',{},$('th',{text:'iter'}),$('th',{text:'candidate'}),$('th',{text:'verdict'}),
+    $('th',{class:'r',text:'val'}),$('th',{class:'r',text:'parent val'}),$('th',{class:'r',text:'Δ̄'}),
+    $('th',{class:'r',text:'SE'}),$('th',{class:'r',text:'n'}),$('th',{class:'r',text:'bar (k·SE)'}),
+    $('th',{class:'r',text:'resolvable ±'})));
+  const BADGE={accept:'b-accepted',reject:'b-rejected',indecisive:'b-indecisive',provisional:'b-indecisive'};
+  const n4=v=>v==null?'—':(+v).toFixed(4);
+  D.forEach(d=>{
+    t2.append($('tr',{},
+      $('td',{class:'num muted',text:d.iteration??'—'}),
+      $('td',{},$('code',{text:d.candidate})),
+      $('td',{},$('span',{class:'badge '+(BADGE[d.verdict]||'b-failed'),text:d.verdict})),
+      $('td',{class:'r num',text:fmt(d.val)}),
+      $('td',{class:'r num muted',text:fmt(d.parent_val)}),
+      $('td',{class:'r num',style:d.delta==null?'':('color:'+(d.delta>0?'var(--ok)':d.delta<0?'var(--bad)':'var(--muted)')),
+              text:d.delta==null?'—':(d.delta>0?'+':'')+d.delta.toFixed(4)}),
+      $('td',{class:'r num muted',text:d.stderr==null?'—':'±'+d.stderr.toFixed(4)}),
+      $('td',{class:'r num muted',text:d.n??'—'}),
+      $('td',{class:'r num muted',text:n4(d.threshold)+(d.k_se!=null?'  k='+d.k_se:'')}),
+      $('td',{class:'r num muted',text:d.resolvable_effect_size==null?'—':'±'+(+d.resolvable_effect_size).toFixed(4)})));
+  });
+  s.append(t2);
+  D.forEach(d=>s.append($('div',{class:'ann',style:'margin:6px 0'},
+    $('div',{class:'who',text:d.candidate}),$('div',{text:d.reason}))));
+})();
+
+/* ---------- 6g. Noise-floor check — null-control replicates ---------- */
+(function(){
+  const C=S.controls||[]; if(!C.length)return;
+  const s=sec('Noise-floor check (null-control replicates)');
+  const rewards=C.map(c=>c.reward).filter(x=>x!=null);
+  const spread=rewards.length>1?(Math.max(...rewards)-Math.min(...rewards)):null;
+  s.append($('p',{class:'muted',style:'margin:0 0 12px',text:
+    C.length+' control replicate(s) evaluated this run — byte-identical re-measurements '+
+    'run to bound run-to-run noise, never gated/committed as candidates.'+
+    (spread!=null?' Spread between replicates: '+spread.toFixed(4)+' — the empirical noise floor.':'')}));
+  const t=$('table');
+  t.append($('tr',{},$('th',{text:'tag'}),$('th',{class:'r',text:'reward ± stderr'}),
+    $('th',{class:'r',text:'n'}),$('th',{class:'r',text:'iter'})));
+  C.forEach(c=>t.append($('tr',{},
+    $('td',{},$('code',{text:c.tag||'—'})),
+    $('td',{class:'r num',text:c.reward==null?'—':fmt(c.reward)+(c.stderr!=null?' ± '+(+c.stderr).toFixed(4):'')}),
+    $('td',{class:'r num muted',text:c.n??'—'}),
+    $('td',{class:'r num muted',text:c.iteration??'—'}))));
+  s.append(t);
+})();
+
+/* ---------- 9. Activity log — every event, filterable ---------- */
+(function(){
+  const LOG=S.log||[]; if(!LOG.length)return;
+  const s=sec('Activity log — every event this run recorded');
+  const bar=$('div',{class:'row',style:'margin-bottom:10px;align-items:center'});
+  const q=$('input',{type:'search',placeholder:'search kind, candidate, message…',style:'flex:1;min-width:180px'});
+  const phase=$('select'); ['all','intake','baseline','optimize','finalize'].forEach(p2=>
+    phase.append($('option',{value:p2,text:p2})));
+  const kind=$('select');
+  ['all',...[...new Set(LOG.map(r=>r.kind))].sort()].forEach(k=>kind.append($('option',{value:k,text:k})));
+  const count=$('span',{class:'muted num'});
+  bar.append(q,$('span',{class:'muted',text:'phase'}),phase,$('span',{class:'muted',text:'kind'}),kind,count);
+  s.append(bar);
+  const list=$('div'); s.append(list);
+  const TONE={optimizer_error:'var(--bad)',tamper_detected:'var(--bad)',step_indecisive:'var(--idk)',
+    accept:'var(--ok)',finalize:'var(--ok)',reject:'var(--bad)',evaluate:'var(--accent)',
+    minibatch:'var(--accent)',gate_warning:'var(--warn)',budget_warning:'var(--warn)',
+    splits_warning:'var(--warn)'};
+  const clock=t2=>t2==null?'--:--:--':new Date(t2*1000).toLocaleTimeString([], {hour12:false});
+  function gist(r){
+    const d=r.detail||{}, b=[];
+    if(d.split)b.push('split='+d.split);
+    if(typeof d.reward==='number')b.push('reward='+d.reward.toFixed(3));
+    if(typeof d.val==='number')b.push('val='+d.val.toFixed(3));
+    if(typeof d.cost_usd==='number')b.push('$'+d.cost_usd.toFixed(4));
+    if(typeof d.opt_cost_usd==='number')b.push('opt $'+d.opt_cost_usd.toFixed(4));
+    if(d.accept!==undefined)b.push(d.accept?'ACCEPT':'reject');
+    return b.length?b.join('  '):(r.text||Object.keys(d).join(', '));
+  }
+  const open=new Set();
+  function render(){
+    const needle=q.value.trim().toLowerCase();
+    const rows=LOG.filter(r=>{
+      if(phase.value!=='all'&&r.phase!==phase.value)return false;
+      if(kind.value!=='all'&&r.kind!==kind.value)return false;
+      if(!needle)return true;
+      return (r.kind+' '+(r.candidate||'')+' '+(r.text||'')+' '+JSON.stringify(r.detail||{}))
+        .toLowerCase().includes(needle);
+    });
+    count.textContent=rows.length+'/'+LOG.length;
+    list.innerHTML='';
+    if(!rows.length){list.append($('p',{class:'muted',text:'No event matches this filter.'}));return;}
+    rows.forEach(r=>{
+      const row=$('div',{class:'logrow'});
+      row.append($('span',{class:'muted num',text:clock(r.t)}),
+        $('span',{class:'muted',style:'font-size:10px;text-transform:uppercase;letter-spacing:.05em',text:r.phase}),
+        $('span',{class:'k',style:'color:'+(TONE[r.kind]||'var(--muted2)'),
+                  text:r.kind+(r.candidate?' '+r.candidate:'')}),
+        $('span',{class:'muted2',style:'color:var(--muted2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap',
+                  text:gist(r)}));
+      list.append(row);
+      const det=$('div',{class:'logdet'});
+      // textContent only: this text is model/subprocess-authored and must never be parsed as markup.
+      det.textContent=(r.text?r.text+'\n\n':'')+
+        Object.entries(r.detail||{}).map(([k,v])=>k+' = '+(typeof v==='object'&&v!==null?JSON.stringify(v):String(v))).join('\n');
+      det.style.display=open.has(r.seq)?'block':'none';
+      list.append(det);
+      row.addEventListener('click',()=>{
+        if(open.has(r.seq)){open.delete(r.seq);det.style.display='none';}
+        else{open.add(r.seq);det.style.display='block';}
+      });
+    });
+  }
+  q.addEventListener('input',render);phase.addEventListener('change',render);
+  kind.addEventListener('change',render);render();
+})();
+
+/* ---------- 10. evograph weakness graph (replaces the embedded viewer) ---------- */
+(function(){
+  const EG=(S.algo_extra||{}).evograph; if(!EG)return;
+  const s=sec('Weakness graph — evograph');
+  const rounds=(EG.rounds||[]).filter(r=>r.split!=='test');
+  const final=(EG.rounds||[]).find(r=>r.split==='test');
+  const prim=r=>r.primary_metric?r.metrics[r.primary_metric]:null;
+  if(rounds.length){
+    const max=Math.max(1e-9,...rounds.map(r=>prim(r)||0),(final?prim(final):0)||0);
+    const wrap=$('div',{style:'display:flex;align-items:flex-end;gap:14px;margin-bottom:12px'});
+    const col=(label,v,color,note)=>{const d=$('div',{style:'display:flex;flex-direction:column;align-items:center;gap:5px;flex:1'});
+      d.append($('span',{class:'num',style:'font-weight:700;font-size:12px',text:v==null?'—':(v*100).toFixed(1)+'%'}),
+        $('div',{style:`width:100%;max-width:64px;height:${Math.max(4,(v||0)/max*110)}px;border-radius:4px 4px 0 0;background:${color}`}),
+        $('span',{class:'eyebrow',text:label}),$('span',{class:'muted num',style:'font-size:10px',text:note||''}));
+      return d;};
+    rounds.forEach(r=>wrap.append(col('round '+r.round,prim(r),'var(--accent)',
+      (r.num_tasks??'—')+' tasks'+(r.completed_at==null?' · running':''))));
+    if(final)wrap.append(col('sealed test',prim(final),'var(--ok)',
+      final.cost_usd!=null?'$'+(+final.cost_usd).toFixed(4):''));
+    s.append(wrap);
+    s.append($('p',{class:'muted',style:'margin:0 0 12px',text:
+      'The sealed test sits apart from the rounds on purpose — it is scored once, on data no round touched.'}));
+  }
+  (EG.weaknesses||[]).forEach(w=>{
+    const box=$('div',{class:'dead',style:'border-left-color:var(--accent)'});
+    const head=$('div',{style:'display:flex;flex-wrap:wrap;gap:8px;align-items:center'});
+    head.append($('code',{text:w.slug}),$('span',{class:'badge b-seed',text:String(w.status||'unknown')}));
+    (w.tags||[]).forEach(tg=>head.append($('span',{class:'muted',style:'font-size:11px',text:tg})));
+    head.append($('span',{class:'muted num',style:'margin-left:auto;font-size:11px',
+      text:(w.num_solutions||0)+' solution(s)'}));
+    box.append(head);
+    const bits=['discovered round '+(w.discovered_in_round??'—')];
+    if(w.solved_in_round!=null)bits.push('solved round '+w.solved_in_round);
+    if((w.affected_tasks||[]).length)bits.push('affects '+w.affected_tasks.join(', '));
+    if((w.related||[]).length)bits.push('related → '+w.related.join(', '));
+    box.append($('div',{class:'muted num',style:'font-size:11px;margin-top:4px',text:bits.join('  ·  ')}));
+    s.append(box);
+  });
+})();
+
+/* ---------- 10b. process narrative — optimizer-authored, self-contained ---------- */
+(function(){
+  const NAR=S.narrative; if(!NAR||!(NAR.files||[]).length)return;
+  const s=sec('Process narrative');
+  // List what this run ACTUALLY has, not the full catalogue of narrative files that could
+  // exist — the fixed list implied four missing documents on a run that wrote one.
+  const names=(NAR.files||[]).map(f=>f.name||f.title).filter(Boolean);
+  s.append($('p',{class:'muted',style:'margin:0 0 12px',text:
+    'Written by the optimizer as it worked'+(names.length?' ('+names.join(' / ')+')':'')+
+    ' — rendered here as-is, for a human reader.'}));
+  (NAR.files||[]).forEach(f=>{
+    const box=$('div',{class:'narrative-box',style:'margin-bottom:14px'});
+    box.append($('h3',{style:'margin:0 0 8px',text:f.title}));
+    // The file is still byte-for-byte the seed instructional template — no real entry
+    // was ever appended. Flagged rather than rendered as if it were populated narrative.
+    if(f.template_only)box.append($('div',{class:'banner',style:'margin-bottom:10px',
+      text:'⚠ template only — no real entries yet'}));
+    box.append($('div',{class:'md',html:mdToHtml(f.text)}));
+    s.append(box);
+  });
+})();
+
+/* ---------- 10c. Config — the full run configuration ---------- */
+(function(){
+  // An absent config reduces to `{}`, which is TRUTHY in JS — guard on the field the
+  // header text needs, or a run with no project dir renders an empty Config section
+  // claiming to have read "straight off undefined".
+  const CFG=S.config; if(!CFG||!CFG.project_dir)return;
+  const s=sec('Config — run configuration');
+  s.append($('p',{class:'muted',style:'margin:0 0 12px',text:
+    'Every input the intake phase produced or the user set, read straight off '+
+    CFG.project_dir+' — the parsed capevolve.yaml spec, PROJECT.md, and every other '+
+    'project artifact (adapters/, seed_capability/, split files, ...).'}));
+  if(CFG.spec_missing)s.append($('div',{class:'banner',style:'margin:0 0 12px',
+    text:'No capevolve.yaml found in this project dir, so there is no parsed spec to show. '+
+         'Everything else the project contains is listed below.'}));
+  const h3=(t)=>$('h2',{style:'margin:16px 0 6px;text-transform:none;letter-spacing:0;'+
+    'font-size:13px;color:var(--text)',text:t});
+  (CFG.spec_groups||[]).forEach(g=>{
+    s.append(h3(g.group));
+    const t=$('table');
+    g.items.forEach(it=>{
+      const v=it.value;
+      const vt=v==null?'—':(typeof v==='object'?JSON.stringify(v):String(v));
+      t.append($('tr',{},$('td',{},$('code',{text:it.key})),
+        $('td',{class:'muted',style:'white-space:pre-wrap',text:vt})));
+    });
+    s.append(t);
+  });
+  if(CFG.project_md){
+    s.append(h3('PROJECT.md'));
+    s.append($('div',{class:'narrative-box md',html:mdToHtml(CFG.project_md)}));
+  }
+  const files=CFG.files||[];
+  if(files.length){
+    s.append(h3('Other project files ('+files.length+')'));
+    const bySize=v=>v<1024?v+' B':v<1048576?(v/1024).toFixed(1)+' KB':(v/1048576).toFixed(1)+' MB';
+    const groups=new Map();
+    files.forEach(f=>{
+      const top=f.path.includes('/')?f.path.split('/')[0]:'.';
+      if(!groups.has(top))groups.set(top,[]);
+      groups.get(top).push(f);
+    });
+    [...groups.keys()].sort().forEach(top=>{
+      const det=$('details',{style:'margin:4px 0'});
+      det.append($('summary',{style:'cursor:pointer;font-weight:600',
+        text:top+' ('+groups.get(top).length+')'}));
+      groups.get(top).forEach(f=>{
+        const fdet=$('details',{style:'margin:2px 0 2px 16px'});
+        fdet.append($('summary',{style:'cursor:pointer;color:var(--muted2);font-size:12px',
+          text:f.path+'  ·  '+bySize(f.size)+
+               (f.binary?' · binary':f.truncated?' · truncated preview':'')}));
+        if(f.binary){
+          fdet.append($('p',{class:'muted',style:'margin:4px 0',text:'binary file — not previewed'}));
+        }else if(f.preview==null){
+          fdet.append($('p',{class:'muted',style:'margin:4px 0',
+            text:'too large to preview — '+bySize(f.size)}));
+        }else if(f.preview===''){
+          fdet.append($('p',{class:'muted',style:'margin:4px 0',text:'empty file'}));
+        }else{
+          fdet.append($('div',{class:'diff',style:'max-height:260px',text:f.preview}));
+        }
+        det.append(fdet);
+      });
+      s.append(det);
+    });
+  }
+})();
+
+/* ---------- 10d. Host session — the optimizer's own turn-by-turn record (#432) ---------- */
+(function(){
+  const HS=S.host_session; if(!HS)return;
+  const s=sec('Host session — optimizer transcript');
+  s.append($('p',{class:'muted',style:'margin:0 0 12px',text:
+    'For an agent-driven run, this is the ONLY full record of what the optimizer actually did — '+
+    'every tool call, bash command, file edit and reasoning turn between the coarse accept/reject '+
+    'events above.'}));
+  const h3t=(t)=>$('h2',{style:'margin:16px 0 6px;text-transform:none;letter-spacing:0;font-size:13px;color:var(--text)',text:t});
+  if(HS.driver_prompt){
+    s.append(h3t('Driver prompt'));
+    s.append($('div',{class:'narrative-box md',style:'margin-bottom:14px',html:mdToHtml(HS.driver_prompt)}));
+  }
+  if(HS.transcript_too_large){
+    s.append($('div',{class:'banner',text:
+      'transcript.jsonl is '+(HS.transcript_bytes/1e6).toFixed(1)+' MB — too large to parse into '+
+      'this dashboard. Read it directly at '+HS.transcript_path}));
+    return;
+  }
+  const turns=HS.transcript_turns||[];
+  if(!turns.length)return;
+  s.append(h3t('Turns ('+turns.length+(HS.transcript_truncated?' of '+HS.transcript_total_lines+', truncated':'')+')'));
+  const list=$('div'); s.append(list);
+  turns.forEach(tn=>{
+    const row=$('div',{class:'logrow',style:'grid-template-columns:100px 90px 1fr'});
+    const clock=tn.t?new Date(tn.t).toLocaleTimeString([],{hour12:false}):'--:--:--';
+    const gist=tn.text.split('\n')[0].slice(0,140);
+    row.append($('span',{class:'muted num',text:clock}),
+      $('span',{class:'k',style:'color:var(--accent)',text:tn.role}),
+      $('span',{class:'muted2',style:'color:var(--muted2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap',
+                text:gist}));
+    list.append(row);
+    const det=$('div',{class:'logdet'});
+    det.textContent=tn.text; // model-authored — never parsed as markup
+    det.style.display='none';
+    list.append(det);
+    row.addEventListener('click',()=>{det.style.display=det.style.display==='block'?'none':'block';});
+  });
+  if(HS.transcript_truncated)s.append($('p',{class:'muted',style:'margin-top:8px',text:
+    'Showing the first '+turns.length+' of '+HS.transcript_total_lines+' turns — full record at '+
+    HS.transcript_path}));
+})();
+
+/* ---------- 10e. agent-optimize internals — screens/compliance/minibatch/gepa/skillopt/parallel (#433) ---------- */
+(function(){
+  const C=S.capabilities||{}, AE=S.algo_extra||{};
+  if(!(C.screens||C.compliance||C.minibatch||C.gepa||C.skillopt||C.parallel))return;
+  const s=sec('agent-optimize internals');
+  s.append($('p',{class:'muted',style:'margin:0 0 12px',text:
+    "Signals the algorithm computed about its own process — which subset of tasks a cheap screen "+
+    "evaluated, whether the discipline of screening before a full-val eval was actually followed, "+
+    "and any minibatch/gepa/skillopt/parallel bookkeeping this run recorded."}));
+  const h3=(t)=>$('h2',{style:'margin:16px 0 6px;text-transform:none;letter-spacing:0;font-size:13px;color:var(--text)',text:t});
+
+  if(C.compliance){
+    s.append(h3('Screen-before-full-val compliance'));
+    const t=$('table');
+    t.append($('tr',{},$('th',{text:'candidate'}),$('th',{class:'r',text:'iteration'}),$('th',{text:'screened before full-val'})));
+    (AE.compliance||[]).forEach(r=>t.append($('tr',{},
+      $('td',{},$('code',{text:r.candidate})),
+      $('td',{class:'r num',text:r.iteration}),
+      $('td',{},$('span',{class:'badge '+(r.screened_before_fullval?'b-accepted':'b-rejected'),
+        text:r.screened_before_fullval?'✓ yes':'✗ no'})))));
+    s.append(t);
+  }
+
+  if(C.screens){
+    s.append(h3('Screens — cheap subset evals'));
+    (AE.screens||[]).forEach(sc=>{
+      const box=$('div',{class:'dead',style:'border-left-color:var(--accent)'});
+      const head=$('div',{style:'display:flex;flex-wrap:wrap;gap:8px;align-items:center'});
+      head.append($('code',{text:sc.candidate}),
+        $('span',{class:'badge '+(sc.decision==='pass'?'b-accepted':sc.decision==='fail'?'b-rejected':'b-indecisive'),
+          text:String(sc.decision||'—')+(sc.inconclusive?' (inconclusive)':'')}));
+      if(sc.tier!=null)head.append($('span',{class:'muted',style:'font-size:11px',text:'tier '+sc.tier}));
+      box.append(head);
+      const bits=[];
+      if((sc.ids||[]).length)bits.push('subset ('+sc.ids.length+'): '+sc.ids.join(', '));
+      if((sc.fixed||[]).length)bits.push('fixed: '+sc.fixed.join(', '));
+      if((sc.regressed||[]).length)bits.push('regressed: '+sc.regressed.join(', '));
+      if(sc.mean_delta!=null)bits.push('Δ='+(+sc.mean_delta).toFixed(3)+(sc.se!=null?' ± '+(+sc.se).toFixed(3):''));
+      if(sc.threshold!=null)bits.push('threshold='+sc.threshold);
+      box.append($('div',{class:'muted num',style:'font-size:11px;margin-top:4px',text:bits.join('  ·  ')}));
+      if(sc.rationale)box.append($('div',{class:'muted',style:'font-size:11px;margin-top:4px',text:'why this subset: '+sc.rationale}));
+      s.append(box);
+    });
+  }
+
+  [['minibatch','Minibatch'],['gepa','GEPA'],['skillopt','SkillOpt'],['parallel','Parallel']].forEach(([key,label])=>{
+    if(!C[key])return;
+    s.append(h3(label));
+    const rows=AE[key]||[];
+    const t=$('table');
+    if(key==='minibatch'){
+      t.append($('tr',{},$('th',{text:'candidate'}),$('th',{class:'r',text:'reward'}),
+        $('th',{class:'r',text:'n tasks'}),$('th',{text:'tasks'})));
+      rows.forEach(r=>t.append($('tr',{},
+        $('td',{},$('code',{text:r.candidate||'—'})),
+        $('td',{class:'r num',text:fmt(r.reward)}),
+        $('td',{class:'r num',text:r.n_tasks==null?'—':r.n_tasks}),
+        $('td',{class:'muted',text:(r.tasks||[]).join(', ').slice(0,120)}))));
+    }else{
+      t.append($('tr',{},$('th',{text:'kind'}),$('th',{text:'candidate'}),$('th',{text:'detail'})));
+      rows.forEach(r=>t.append($('tr',{},
+        $('td',{},$('code',{text:r.kind||'—'})),
+        $('td',{},r.candidate||'—'),
+        $('td',{class:'muted',style:'font-size:11px',text:JSON.stringify(r.detail||{}).slice(0,200)}))));
+    }
+    s.append(t);
+  });
 })();
 
 /* ---------- 8. Candidate leaderboard + git log ---------- */
 (function(){
   const s=sec('Candidates'); const t=$('table');
-  t.append($('tr',{},$('th',{text:'id'}),$('th',{text:'status'}),$('th',{class:'r',text:'val'}),
-    $('th',{class:'r',text:'Δ parent'}),$('th',{class:'r',text:'iter'}),$('th',{text:'reason'})));
+  // "screened" (did this candidate pay for a cheap screen before full-val?) only shown
+  // when SOME node has a recorded signal — never rendered as a column of bare "—".
+  const showScreened=!!(S.capabilities&&S.capabilities.screened);
+  // agent-optimize's cheap screen is OPTIONAL. In a run that never attempted one, every
+  // candidate carried a warning-orange "✗ not screened" badge, which reads as a compliance
+  // violation when nothing was violated. The badge is only a flag when SOME candidate in the
+  // run did screen and this one skipped it; otherwise the column shows "—", the way the seed
+  // row already correctly did.
+  const anyScreened=G.nodes.some(n=>n.screened===true);
+  const byId=Object.fromEntries(G.nodes.map(n=>[n.id,n]));
+  const hdr=[$('th',{text:'id'}),$('th',{text:'status'}),$('th',{class:'r',text:'val'}),
+    $('th',{class:'r',text:'Δ parent'}),$('th',{class:'r',text:'iter'})];
+  if(showScreened)hdr.push($('th',{text:'screened'}));
+  hdr.push($('th',{text:'reason'}));
+  t.append($('tr',{},...hdr));
   G.nodes.slice().sort((a,b)=>(b.val||-1)-(a.val||-1)).forEach(n=>{
-    const dlt=n.parent_val!=null&&n.val!=null?(n.val-n.parent_val):null;
-    t.append($('tr',{},
+    // parent_val is only recorded when the algorithm's round table carried it; when it did
+    // not, the parent's OWN val is sitting right there in the same graph, so fall back to it
+    // rather than printing "—" for a delta both halves of which are known.
+    const pv=n.parent_val!=null?n.parent_val:(n.parent&&byId[n.parent]?byId[n.parent].val:null);
+    const dlt=pv!=null&&n.val!=null?(n.val-pv):null;
+    const cells=[
       $('td',{},n.id===S.best_id?'★ '+n.id:n.id),
       $('td',{},$('span',{class:'badge b-'+n.status,text:n.status})),
       $('td',{class:'r num',text:fmt(n.val)}),
       $('td',{class:'r num',text:dlt==null?'—':(dlt>0?'+':'')+dlt.toFixed(3)}),
-      $('td',{class:'r num',text:n.iteration}),
-      $('td',{class:'muted',text:(n.reason||'').slice(0,80)})));
+      $('td',{class:'r num',text:n.iteration})];
+    if(showScreened)cells.push($('td',{},(n.screened==null||(!n.screened&&!anyScreened))?'—':
+      $('span',{class:'badge '+(n.screened?'b-accepted':'b-rejected'),text:n.screened?'✓ screened':'✗ not screened'})));
+    cells.push($('td',{class:'muted',text:(n.reason||'').slice(0,80)}));
+    t.append($('tr',{},...cells));
   });
   s.append(t);
   if(S.git_log&&S.git_log.length){

@@ -5,17 +5,34 @@ manifest) and runs their ``scripts/run.py`` in the order a ``capevolve.yaml`` sp
 declares, threading the run dir between them. The honesty guarantees live in
 ``cap_evolve`` (splits/gate/seal); ``cap-evolve`` just orchestrates.
 
+Human surface: :mod:`cap_evolve.branding` owns the brand headline, the no-args home
+screen, the command catalog (one summary + copy-paste examples per command) and the
+algorithm chooser; :mod:`cap_evolve.diffview` owns ``cap-evolve diff``. Both are pure
+render functions, so every screen is testable without a terminal. All human chrome goes
+to **stderr** — stdout stays the machine-readable contract every command advertises.
+
 Subcommands:
+    cap-evolve                        branded home screen (golden path + commands)
+    cap-evolve help    [command]      full help + runnable examples for one command
+    cap-evolve init    [--algorithm N --optimizer N]  scaffold a project + spec
+    cap-evolve doctor                 readiness check: what's missing + the fix
+    cap-evolve algorithms [name]      the optimization algorithms and how to select each
+    cap-evolve diff    <cand> [--vs X|--best] [--stat|--files] [--unified N]
+                       what a candidate actually changed, from its snapshot
     cap-evolve version
     cap-evolve splits  --ids ... [--seed N] [--ratios a,b,c]
-    cap-evolve check   [project_dir]
-    cap-evolve run     --spec .capevolve/project/capevolve.yaml   (sequences phase skills)
+    cap-evolve check   [project_dir | --project DIR]
+    cap-evolve run     [--spec FILE]  (defaults to <project>/capevolve.yaml)
                        [--resume [--run-ts TS]]  resume an interrupted run in place
                        [--follow]  print live progress while the run works
     cap-evolve tail    [run_dir] [--base .capevolve]  attach to an ongoing run's
                        events.jsonl and print human-readable progress
                        (exit 0 = run finished, 2 = not a possible run dir,
                         3 = --idle-timeout elapsed with no events)
+    cap-evolve watch   [run_dir] [--base .capevolve] [--diff]  the same stream as a
+                       live full-screen view (same exit codes as tail)
+    cap-evolve replay  <run_dir>|--demo [--speed N] [--diff]  re-feed a recorded
+                       events.jsonl through the live view; --demo needs no API key
 
 ``run`` is intentionally minimal in Phase 0 and grows as phase skills land; it
 already resolves the manifest and validates the spec so the wiring is testable.
@@ -28,6 +45,7 @@ import json
 import os
 import signal
 import sys
+import textwrap
 from pathlib import Path
 
 from . import __version__
@@ -63,8 +81,32 @@ def _cmd_splits(argv):
 
 
 def _cmd_check(argv):
-    project = Path(argv[0]) if argv else Path(".capevolve/project")
-    rep = run_check(project)
+    """The hard gate. Takes the project dir positionally OR as ``--project`` (the flag
+    every other subcommand uses), because the alternative was worse than a usage error:
+    ``Path(argv[0])`` turned ``--project X`` into the literal path ``--project`` and the
+    gate reported "no adapter" for a project whose adapter was right there.
+    """
+    argv = list(argv)
+    project = None
+    while argv:
+        a = argv.pop(0)
+        if a in ("--project", "-p"):
+            if not argv:
+                print("check: --project needs a path", file=sys.stderr)
+                return 2
+            project = Path(argv.pop(0))
+        elif a.startswith("--project="):
+            project = Path(a.split("=", 1)[1])
+        elif a.startswith("-"):
+            print(f"check: unknown option {a!r}  (usage: cap-evolve check [project_dir])",
+                  file=sys.stderr)
+            return 2
+        elif project is None:
+            project = Path(a)
+        else:
+            print(f"check: unexpected extra argument {a!r}", file=sys.stderr)
+            return 2
+    rep = run_check(project or Path(".capevolve/project"))
     print(json.dumps(rep.to_dict(), indent=2))
     return 0 if rep.ok else 1
 
@@ -103,7 +145,7 @@ def _stderr_is_usable() -> bool:
 
 
 def _spawn_follower(base: Path, run_ts: str | None, seen: set[str] | None,
-                    offset: int = 0):
+                    offset: int = 0, tui_mode: bool = False, show_diff: bool = False):
     """Print live progress from ``events.jsonl`` on a daemon thread.
 
     Returns ``(stop_event, thread)`` — or ``(None, None)`` when stderr is unusable, in
@@ -134,6 +176,12 @@ def _spawn_follower(base: Path, run_ts: str | None, seen: set[str] | None,
                     stop.wait(0.5)
             if path is None:
                 return
+            if tui_mode:
+                # Same event stream, same stderr, full-screen instead of one line each.
+                from . import tui
+                tui.watch(path.parent, stream=err, color=color, show_diff=show_diff,
+                          should_stop=lambda _last: stop.is_set())
+                return
             totals: dict = {}
             for ev in eventstream.follow_events(
                     path, offset=offset, poll=0.5,
@@ -163,7 +211,9 @@ def _cmd_tail(argv):
 
     p = argparse.ArgumentParser(
         prog="cap-evolve tail",
-        description="tail a run's events.jsonl as human-readable progress lines")
+        description="tail a run's events.jsonl as human-readable progress lines",
+        epilog=_epilog("tail"),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("run_dir", nargs="?", default=None,
                    help="run dir (default: newest run_* under --base)")
     p.add_argument("--base", default=".capevolve", help="dir containing run_* dirs")
@@ -219,6 +269,102 @@ def _cmd_tail(argv):
     return 0
 
 
+def _resolve_run_dir(run_dir: str | None, base: str):
+    """(root, exit_code) — the run dir to attach to. Mirrors ``_cmd_tail``'s rules:
+    explicit path wins, else the newest ``run_*`` under ``--base``; exit 1 when the
+    base has no runs, 2 when the named path can never become a run dir."""
+    if run_dir:
+        root = Path(run_dir)
+        if not root.exists() and not root.parent.is_dir():
+            print(f"no such run dir: {root}", file=sys.stderr)
+            return None, 2
+        return root, 0
+    runs = sorted(q for q in Path(base).glob("run_*") if q.is_dir())
+    if not runs:
+        print(f"no run_* dirs under {base}", file=sys.stderr)
+        return None, 1
+    return runs[-1], 0
+
+
+def _cmd_watch(argv):
+    """Live full-screen view of a run. Same exit codes as ``tail``."""
+    import argparse
+    from . import tui
+
+    p = argparse.ArgumentParser(
+        prog="cap-evolve watch",
+        description="live full-screen view of a running or finished run",
+        epilog=_epilog("watch"),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("run_dir", nargs="?", default=None,
+                   help="run dir (default: newest run_* under --base)")
+    p.add_argument("--base", default=".capevolve", help="dir containing run_* dirs")
+    p.add_argument("--idle-timeout", type=float, default=300.0,
+                   help="give up after N seconds of silence (0 = wait forever)")
+    p.add_argument("--diff", action="store_true",
+                   help="add a panel showing what the newest accepted candidate changed")
+    p.add_argument("--no-color", action="store_true")
+    args = p.parse_args(argv)
+    if args.idle_timeout < 0:
+        p.error("--idle-timeout must be >= 0 (0 = wait forever)")
+
+    root, code = _resolve_run_dir(args.run_dir, args.base)
+    if root is None:
+        return code
+    events = root / "events.jsonl"
+    if not events.exists():
+        print(f"waiting for {events} …", file=sys.stderr, flush=True)
+    # The view goes to stderr so stdout stays the machine-readable contract.
+    color = None if not args.no_color else False
+    reason = tui.watch(root, stream=sys.stderr, color=color, show_diff=args.diff,
+                       idle_timeout=(args.idle_timeout or None))
+    if reason == "interrupt":
+        return 130
+    if reason == "idle":
+        print(f"timed out after {args.idle_timeout:g}s with no events from {events}",
+              file=sys.stderr)
+        return 3
+    return 0
+
+
+def _cmd_replay(argv):
+    """Re-feed a recorded events.jsonl through the live view."""
+    import argparse
+    from . import tui
+
+    p = argparse.ArgumentParser(
+        prog="cap-evolve replay",
+        description="replay a recorded run through the live view (no API key needed)",
+        epilog=_epilog("replay"),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("run_dir", nargs="?", default=None, help="run dir to replay")
+    p.add_argument("--demo", action="store_true",
+                   help=f"replay the bundled demo session. {tui.DEMO_BANNER}")
+    p.add_argument("--speed", type=float, default=1.0, help="playback speed multiplier")
+    p.add_argument("--max-gap", type=float, default=1.0,
+                   help="cap the sleep between events (seconds)")
+    p.add_argument("--diff", action="store_true",
+                   help="add a panel showing what the newest accepted candidate changed")
+    p.add_argument("--no-color", action="store_true")
+    args = p.parse_args(argv)
+    if args.speed <= 0:
+        p.error("--speed must be > 0")
+    if bool(args.demo) == bool(args.run_dir):
+        p.error("pass exactly one of run_dir or --demo")
+
+    src = tui.DEMO_DIR if args.demo else Path(args.run_dir)
+    if not (src / "events.jsonl").exists():
+        print(f"no events.jsonl under {src}", file=sys.stderr)
+        return 2
+    try:
+        tui.replay(src, stream=sys.stderr, color=(False if args.no_color else None),
+                   speed=args.speed, max_gap=args.max_gap, show_diff=args.diff,
+                   banner=(tui.DEMO_BANNER if args.demo else None))
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
 # Old hill-climb skill names → (skill, focus). The three byte-identical clones are
 # now one ``hill-climb`` skill parameterized by ``--focus``.
 _ALGO_FOCUS_ALIASES = {
@@ -226,6 +372,19 @@ _ALGO_FOCUS_ALIASES = {
     "cyclic": ("hill-climb", "cyclic"),
     "hardest-first": ("hill-climb", "hardest-first"),
 }
+
+#: Algorithms whose ``run.py`` accepts ``--convergence`` (the graded stall signal in
+#: ``cap_evolve.convergence``). gepa stops on its own ``gepa_stop`` and skillopt on its
+#: epoch schedule, so the spec key is inert for them — and we say so rather than drop it.
+CONVERGENCE_ALGORITHMS = frozenset({"hill-climb"})
+
+#: Algorithms whose ``run.py`` declares the optimizer-context flags (via
+#: ``harness.OptimizerContext.add_arguments``) and can therefore be handed the full
+#: read-context: capability skills, the instructions template, the benchmark repo, the
+#: optimizer name, the capability sources, and the target-reader profile. These flags used
+#: to be gated to hill-climb alone, which silently handed gepa and skillopt a strictly
+#: thinner prompt and made any cross-algorithm comparison meaningless.
+OPTIMIZER_CONTEXT_ALGORITHMS = frozenset({"hill-climb", "gepa", "skillopt"})
 
 
 def _resolve_algorithm(name: str) -> tuple[str, str | None]:
@@ -304,6 +463,46 @@ def _clip(text: str | None, *, head: int, tail: int) -> str:
     return f"{text[:head]}\n\n... [{dropped} chars omitted] ...\n\n{text[-tail:]}"
 
 
+def _resolve_spec(spec: str | None, project: str) -> tuple[Path | None, dict | None]:
+    """``(spec_path, error)`` — the spec that belongs to ``--project``.
+
+    ``--spec`` used to default to the literal ``.capevolve/project/capevolve.yaml``
+    *relative to the cwd*, so ``cap-evolve run --project OTHER`` silently optimized a
+    DIFFERENT project's spec: the run started, the baseline scored, events streamed —
+    everything looked healthy while the wrong capability was measured against the wrong
+    adapter. On a paid run that is real money spent on a meaningless result, and nothing
+    in the run dir would ever have revealed the mismatch. So:
+
+    * the default is now resolved **relative to ``--project``**;
+    * an explicit ``--spec`` that points OUTSIDE the project dir is refused, naming both
+      paths, instead of being run;
+    * the resolved path is echoed at startup and logged into the run dir
+      (``run_config``), so a finished run is self-describing.
+    """
+    proj = Path(project).resolve()
+    path = (proj / "capevolve.yaml") if not spec else Path(spec).resolve()
+    if not path.exists():
+        return None, {"step": "spec", "error": f"no spec at {path}",
+                      "project": str(proj),
+                      "fix": (f"cap-evolve init --project {project}"
+                              if not spec else
+                              f"cap-evolve run --project {project}   "
+                              "# omit --spec to use the project's own capevolve.yaml")}
+    try:
+        inside = path.is_relative_to(proj)
+    except AttributeError:  # pragma: no cover — Python < 3.9
+        inside = str(path).startswith(str(proj))
+    if not inside:
+        return None, {
+            "step": "spec",
+            "error": ("--spec is outside --project: refusing to optimize one project's "
+                      "capability against another's spec"),
+            "spec": str(path), "project": str(proj),
+            "fix": f"cap-evolve run --project {path.parent}   # or pass the project's own spec",
+        }
+    return path, None
+
+
 def _json_payload(text: str) -> dict:
     """Extract a phase subprocess's JSON payload from its captured stdout.
 
@@ -346,8 +545,13 @@ def _cmd_run(argv):
     import subprocess
     from .specfile import read_yaml
 
-    p = argparse.ArgumentParser(prog="cap-evolve run")
-    p.add_argument("--spec", default=".capevolve/project/capevolve.yaml")
+    p = argparse.ArgumentParser(prog="cap-evolve run",
+        description=_summary("run"),
+        epilog=_epilog("run"),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--spec", default=None,
+                   help="run spec (default: <project>/capevolve.yaml — resolved relative "
+                        "to --project, never to the cwd)")
     p.add_argument("--project", default=".capevolve/project")
     p.add_argument("--skills-dir", default=None)
     p.add_argument("--plan-only", action="store_true", help="print the command plan, don't execute")
@@ -369,14 +573,29 @@ def _cmd_run(argv):
     p.add_argument("--max-usd", type=float, default=None)
     p.add_argument("--max-optimizer-usd", type=float, default=None)
     p.add_argument("--stall", type=int, default=None)
+    p.add_argument("--stop-at-reward", type=float, default=None,
+                   help="stop the optimizer loop as soon as the best val reward reaches this "
+                        "(0 = off, the default); still finalizes on the sealed test split")
     p.add_argument("--optimizer-max-turns", type=int, default=None,
                    help="per-iteration cap passed to the optimizer agent CLI (e.g. claude --max-turns)")
     p.add_argument("--follow", action="store_true",
                    help="print live progress (stage/candidate/accept-reject/cost) to stderr "
                         "as the run writes events.jsonl; stdout stays the final JSON")
+    p.add_argument("--tui", action="store_true",
+                   help="like --follow, but a live full-screen view (stderr) instead of "
+                        "one line per event; stdout stays the final JSON")
+    p.add_argument("--diff", action="store_true",
+                   help="with --tui: add a panel showing what each accepted candidate "
+                        "changed (the diff comes from the candidate snapshots)")
     p.add_argument("--dashboard", choices=("auto", "report-only", "off"), default=None,
                    help="live dashboard: auto (default, launch at run start), report-only, or off")
     p.add_argument("--dashboard-port", type=int, default=None, help="dashboard server port (default 7878)")
+    p.add_argument("--agent-driver", default=None,
+                   help="agent mode only: after baseline, drive the agent-optimize loop "
+                        "unattended via skills/algorithms/agent-optimize/scripts/host.py "
+                        "instead of printing the handoff and returning. Value is the "
+                        "host agent (a row in optimizers/registry.yaml, e.g. claude-code). "
+                        "Opt-in: omit this flag to keep today's handoff-and-return behavior.")
     args = p.parse_args(argv)
 
     skills_dir = Path(args.skills_dir) if args.skills_dir else _find_skills_dir()
@@ -384,12 +603,18 @@ def _cmd_run(argv):
         print(json.dumps({"error": "skills dir not found; set CAPEVOLVE_SKILLS_DIR or --skills-dir"}))
         return 1
     skills = _resolve_skills(skills_dir)
-    spec = read_yaml(Path(args.spec).read_text())
+    spec_path, spec_err = _resolve_spec(args.spec, args.project)
+    if spec_err is not None:
+        print(json.dumps(spec_err))
+        print(f"{spec_err['error']}\n  → {spec_err['fix']}", file=sys.stderr)
+        return 1
+    spec = read_yaml(spec_path.read_text(encoding="utf-8"))
 
     # CLI budget flags override the spec (None = "not passed", leave spec value).
     for flag, key in (("max_iterations", "max_iterations"), ("max_metric_calls", "max_metric_calls"),
                       ("max_usd", "max_usd"), ("max_optimizer_usd", "max_optimizer_usd"),
-                      ("stall", "stall"), ("optimizer_max_turns", "optimizer_max_turns")):
+                      ("stall", "stall"), ("stop_at_reward", "stop_at_reward"),
+                      ("optimizer_max_turns", "optimizer_max_turns")):
         v = getattr(args, flag)
         if v is not None:
             spec[key] = v
@@ -424,10 +649,51 @@ def _cmd_run(argv):
     # (the server scans the base dir and shows the run as soon as baseline creates it).
     # Best-effort: never blocks or fails the run. (Absolute base: the subprocess
     # inherits THIS process's cwd, not workdir.)
+    # Which spec this run is actually using, echoed up front. Guarded by
+    # _stderr_is_usable(): under `2>&-` a write to "stderr" would land in stdout and
+    # break the JSON contract, and provenance is not worth corrupting the payload.
+    if _stderr_is_usable():
+        print(f"spec: {spec_path}", file=sys.stderr, flush=True)
+    dash_url = ""
     if dash_mode == "auto":
         status = dashboard_launch.maybe_launch(
             proj_abs.parent, mode=dash_mode, port=dash_port, open_browser=True)
-        print(json.dumps(status))
+        u = status.get("dashboard")
+        if isinstance(u, str) and u.startswith("http"):
+            dash_url = u
+        # stderr, not stdout: this is a URL for a human to click, and the machine-readable
+        # summary already carries it as ``dashboard_server``. On stdout it made a finished
+        # run print TWO json documents, so `cap-evolve run | jq` could not parse it.
+        if _stderr_is_usable():
+            print(json.dumps(status), file=sys.stderr, flush=True)
+    # How the candidate will be DELIVERED (spec `intervention:`). Checked here, before any
+    # step runs: for an out-of-process intervention a dead stack makes every candidate's
+    # deployment fail, and since that is correctly per-candidate infra noise, the run
+    # would not crash — it would error every rollout and finish having measured nothing.
+    from . import intervention as _intervention
+    try:
+        if args.plan_only:
+            # --plan-only prints the plan and executes nothing, so it must not preflight:
+            # preflight STARTS a provisioned-but-stopped stack, which would give an
+            # inspection flag service side effects (and fail outright when the stack is
+            # not provisioned at all). The declared VALUE is still validated — that is
+            # offline, so an unknown intervention is refused here too.
+            intervention_rec = {"intervention": _intervention.declared(spec)}
+        else:
+            intervention_rec = _intervention.preflight(spec, skills, skills_dir)
+    except RuntimeError as e:
+        # RuntimeError, not just intervention.InterventionError (a subclass of it): the intervention
+        # SKILL raises plain RuntimeError for "port held by something else" and "health
+        # check timed out". Catching only the subclass let those escape as a traceback
+        # with NO JSON on stdout, which breaks the one-document contract every caller
+        # parses — and the operator loses the diagnostic that says which service is wrong.
+        err = {"error": str(e), "step": "intervention-preflight"}
+        print(json.dumps(err))
+        print(f"intervention preflight failed: {e}", file=sys.stderr)
+        return 1
+    if not args.plan_only and _stderr_is_usable():
+        print(_intervention.describe(intervention_rec), file=sys.stderr, flush=True)
+
     cap_path = spec.get("capability_path", "seed_capability")
     ratios = f"{spec.get('split_train',0.5)},{spec.get('split_val',0.25)},{spec.get('split_test',0.25)}"
 
@@ -467,7 +733,15 @@ def _cmd_run(argv):
     py = sys.executable
 
     def run(cmd):
-        return subprocess.run(cmd, capture_output=True, text=True, cwd=str(workdir))
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(workdir))
+        # Relay a SUCCESSFUL step's stderr too. Only the failure paths below read
+        # proc.stderr, so a step that printed a real diagnostic and exited 0 (the
+        # optimizer's relayed warnings among them) was silently discarded here.
+        # Guarded by _stderr_is_usable(): under `2>&-` this would land in stdout and
+        # break the one-JSON-document contract.
+        if proc.returncode == 0 and proc.stderr and proc.stderr.strip() and _stderr_is_usable():
+            print(_clip(proc.stderr, head=0, tail=8000), file=sys.stderr, flush=True)
+        return proc
 
     # The run sequence is built from the manifest + spec (orchestrate validates the
     # needs/provides DAG); it now includes intake + the check gate before baseline.
@@ -475,14 +749,16 @@ def _cmd_run(argv):
     # coding agent, so the plan reflects only what this process actually runs.
     if orchestration_mode == "agent":
         sequence = ["intake", "implement-and-check", "baseline",
-                    "<handoff: agent drives the loop, then `cap-evolve finalize`>"]
+                    "<handoff: agent drives the loop, then runs the finalize phase script>"]
     else:
         sequence = ["intake", "implement-and-check", "baseline", algorithm_name, "finalize", "report"]
 
     if args.plan_only:
-        print(json.dumps({"skills_dir": str(skills_dir), "workdir": str(workdir), "spec": spec,
+        print(json.dumps({"skills_dir": str(skills_dir), "workdir": str(workdir),
+                          "spec_path": str(spec_path), "spec": spec,
                           "optimizer": optimizer_name, "optimizer_cmd": opt_cmd,
                           "algorithm": algorithm_name, "focus": algorithm_focus,
+                          "intervention": intervention_rec,
                           "target_model": spec.get("target_model", ""),
                           "orchestration_mode": orchestration_mode,
                           "gate_mode": spec.get("gate_mode", "auto (paired)"),
@@ -522,14 +798,16 @@ def _cmd_run(argv):
     # the very first events (splits/baseline) are seen. `seen` freezes the pre-existing
     # run dirs so an unpinned --run-ts follower attaches to this run, not the last one.
     follow_stop = follow_thread = None
-    if args.follow:
+    if args.follow or args.tui:
         base_abs = proj_abs.parent
         seen = {p.name for p in base_abs.glob("run_*") if p.is_dir()} if not resume_ts else None
         # On --resume, skip the prior log (10k old events are not "live progress"):
         # start at the current end of file, the way `cap-evolve tail` does.
         prior = base_abs / f"run_{resume_ts}" / "events.jsonl" if resume_ts else None
         off = prior.stat().st_size if prior and prior.exists() else 0
-        follow_stop, follow_thread = _spawn_follower(base_abs, resume_ts, seen, off)
+        follow_stop, follow_thread = _spawn_follower(base_abs, resume_ts, seen, off,
+                                                     tui_mode=args.tui,
+                                                     show_diff=args.diff)
 
     def done(code: int) -> int:
         """Drain + stop the follower thread, then return ``code``. Used at every exit."""
@@ -546,7 +824,8 @@ def _cmd_run(argv):
                 "--max-metric-calls", str(spec.get("max_metric_calls", 0)),
                 "--max-usd", str(spec.get("max_usd", 0.0)),
                 "--max-optimizer-usd", str(spec.get("max_optimizer_usd", 0.0)),
-                "--spec", str(args.spec)]
+                "--stop-at-reward", str(spec.get("stop_at_reward", 0.0)),
+                "--spec", str(spec_path)]
     if spec.get("split_ids_file"):
         base_cmd += ["--split-ids", str(spec["split_ids_file"])]
     # reuse_baseline: copy a prior run's split/baseline/seed/val-rollouts and skip the
@@ -563,11 +842,25 @@ def _cmd_run(argv):
         return 1
     run_dir = _json_payload(proc.stdout)["run_dir"]
 
+    # Make the run self-describing: which spec/project/algorithm produced it. Without
+    # this, a run started against the wrong spec leaves no artifact that says so.
+    try:
+        _RunDir.open(workdir / run_dir).log_event(
+            "run_config", spec=str(spec_path), project=str(proj_abs),
+            algorithm=algorithm_name, optimizer=str(optimizer_name),
+            orchestration_mode=orchestration_mode,
+            # How the candidate was DELIVERED. Two runs of one capability can differ only in
+            # this, so a run dir that omits it cannot say which number is which.
+            intervention=str(intervention_rec.get("intervention") or _intervention.DIRECT))
+    except Exception:  # noqa: BLE001 — provenance is best-effort, never fatal
+        pass
+
     # Resume: explicit budget flags EXTEND the reopened run (e.g. bump max_iterations to
     # keep climbing past the original cap). Without an override the frozen budget stands.
     if args.resume:
         overrides = {k: getattr(args, k) for k in
-                     ("max_iterations", "max_metric_calls", "max_usd", "max_optimizer_usd", "stall")
+                     ("max_iterations", "max_metric_calls", "max_usd", "max_optimizer_usd", "stall",
+                      "stop_at_reward")
                      if getattr(args, k) is not None}
         if overrides:
             _RunDir.open(workdir / run_dir).update_budget(**overrides)
@@ -593,13 +886,31 @@ def _cmd_run(argv):
 
     # Agent mode: the coding agent drives the optimization loop itself (reading the
     # algorithm's "Agent-mode loop"), writing run-dir artifacts via cap-evolve
-    # primitives, and sealing with `cap-evolve finalize`. cap-evolve run does
+    # primitives, and sealing by running the finalize phase script. cap-evolve run does
     # setup+baseline, then hands off here — no algorithm subprocess, no auto-finalize.
     if orchestration_mode == "agent":
+        if args.agent_driver:
+            # Opt-in only: without --agent-driver this branch is unreachable and behavior
+            # is byte-identical to before. host.py is the existing headless driver for
+            # this exact handoff (skills/algorithms/agent-optimize/scripts/host.py) —
+            # invoked the same way its own tests invoke it (subprocess, stdout is its
+            # one JSON document), so its output becomes this command's output as-is.
+            host_script = skills_dir / "algorithms" / "agent-optimize" / "scripts" / "host.py"
+            host_cmd = [py, str(host_script), "--run-dir", str(workdir / run_dir),
+                       "--project", str(proj_abs), "--agent", args.agent_driver]
+            if spec.get("optimizer_model"):
+                host_cmd += ["--model", str(spec["optimizer_model"])]
+            if spec.get("optimizer_max_turns"):
+                host_cmd += ["--budget", str(int(spec["optimizer_max_turns"]))]
+            if spec.get("max_optimizer_usd"):
+                host_cmd += ["--usd-budget", str(float(spec["max_optimizer_usd"]))]
+            proc = subprocess.run(host_cmd, cwd=str(workdir))
+            return done(proc.returncode)
         print(json.dumps({"mode": "agent", "run_dir": run_dir, "algorithm": algorithm_name,
+                          "spec_path": str(spec_path), "dashboard": dash_url or "off",
                           "stop_condition": str(spec.get("stop_condition", "")),
-                          "next": "drive via the orchestrate Agent-mode loop; "
-                                  "seal with `cap-evolve finalize`"}))
+                          "next": "drive via the orchestrate Agent-mode loop; seal by "
+                                  "running skills/phases/finalize/scripts/run.py"}))
         return done(0)
 
     # 2) algorithm (hill-climb variants select their schedule via --focus)
@@ -617,35 +928,41 @@ def _cmd_run(argv):
     if algorithm_focus is not None:
         alg_cmd += ["--focus", algorithm_focus]
     # Surface the selected capability skills to the optimizer prompt so it knows the
-    # allowed edit space (e.g. tools → may add composite tools). hill-climb consumes
-    # --capabilities; algorithms without the flag ignore the extra arg via argparse error,
-    # so only pass it to those that accept it.
+    # allowed edit space (e.g. tools → may add composite tools). Passed to every
+    # algorithm that declares the optimizer-context flags, so each one prompts from the
+    # same read-context.
     caps = spec.get("capabilities") or []
     if isinstance(caps, str):
         caps = [c.strip() for c in caps.split(",") if c.strip()]
-    if caps and algorithm_name == "hill-climb":
+    if caps and algorithm_name in OPTIMIZER_CONTEXT_ALGORITHMS:
         alg_cmd += ["--capabilities", ",".join(str(c) for c in caps)]
     # Thread the resolved optimizer NAME so the harness can copy that optimizer's
     # features reference (parallel-subagent capabilities etc.) into each iteration's
-    # workdir. Only hill-climb accepts the flag; other algorithms ignore it.
-    if algorithm_name == "hill-climb":
+    # workdir and place the skills where that agent natively finds them.
+    if algorithm_name in OPTIMIZER_CONTEXT_ALGORITHMS:
         alg_cmd += ["--optimizer-name", str(optimizer_name)]
     # Optimizer-instructions template (intake-authored, per benchmark) + benchmark repo
     # as read-only optimizer context. Both are resolved project-relative if not absolute.
     # The instructions file defaults to the scaffolded project/optimizer/INSTRUCTIONS.md.
-    if algorithm_name == "hill-climb":
-        instr = spec.get("optimizer_instructions_file") or "optimizer/INSTRUCTIONS.md"
-        instr_p = Path(instr)
-        if not instr_p.is_absolute() and not instr_p.exists():
-            instr_p = Path(project) / instr
-        if instr_p.exists():
+    if algorithm_name in OPTIMIZER_CONTEXT_ALGORITHMS:
+        from .specfile import resolve_instructions_file, resolve_project_path
+        # ONE resolution rule, shared with implement-and-check's pipeline_selftest AND the
+        # agent-mode host: a relative spec path is PROJECT-relative. It used to be probed
+        # against the caller's cwd first, so the same key resolved to a different file
+        # depending on where `cap-evolve run` was invoked from — and on a miss the flag was
+        # silently dropped and the optimizer got the generic template instead of the
+        # capability-scoped one intake authored (#252).
+        # proj_abs, not the relative `project`: resolving against a relative project dir is
+        # still cwd-dependent, which is the bug (#252). An absolute path is also safer for
+        # the subprocess, which runs with cwd=workdir.
+        instr_p, instr_exists, instr_warning = resolve_instructions_file(spec, proj_abs)
+        if instr_exists:
             alg_cmd += ["--instructions-file", str(instr_p)]
+        elif instr_warning and _stderr_is_usable():
+            print(f"warning: {instr_warning}", file=sys.stderr, flush=True)
         repo = spec.get("runner_repo_path")
         if repo:
-            repo_p = Path(str(repo))
-            if not repo_p.is_absolute() and not repo_p.exists():
-                repo_p = Path(project) / str(repo)
-            alg_cmd += ["--bench-repo", str(repo_p)]
+            alg_cmd += ["--bench-repo", str(resolve_project_path(proj_abs, str(repo)))]
         # Supporting source files (data models / types the tools import) copied verbatim
         # into the optimizer's ./guidance/sources/ so it can write correct code. Resolved
         # project-relative by the harness; we pass them through as given.
@@ -664,6 +981,29 @@ def _cmd_run(argv):
             if not tpf_p.is_absolute() and not tpf_p.exists():
                 tpf_p = Path(project) / str(tpf)
             alg_cmd += ["--target-profile-file", str(tpf_p)]
+        # Cross-iteration memory scheme (md-files default, or wiki). Selectable per
+        # #400/#404 instead of hardcoded LEDGER/JOURNAL in every run.
+        if spec.get("memory_skill"):
+            alg_cmd += ["--memory-skill", str(spec["memory_skill"])]
+    # Protected-path seal + graded convergence signal. Both are OPT-IN: absent keys
+    # add no flags at all, so an existing spec runs byte-identically.
+    if algorithm_name in ("hill-climb", "skillopt", "gepa"):
+        pp = spec.get("protected_paths") or []
+        if isinstance(pp, str):
+            pp = [p.strip() for p in pp.split(",") if p.strip()]
+        if pp:
+            alg_cmd += ["--protected-paths", ",".join(str(p) for p in pp)]
+    if spec.get("convergence"):
+        if algorithm_name in CONVERGENCE_ALGORITHMS:
+            alg_cmd += ["--convergence"]
+        else:
+            # Say so. Silently dropping the key reads as "convergence is on" for the
+            # whole run; gepa and skillopt stop on their own signals (gepa_stop, the
+            # epoch schedule) and have no --convergence to forward it to.
+            print(f"warn: spec sets convergence: true, but {algorithm_name} does not "
+                  f"support the graded convergence signal (only "
+                  f"{', '.join(sorted(CONVERGENCE_ALGORITHMS))}). Ignoring it; "
+                  f"{algorithm_name} uses its own stop condition.", file=sys.stderr)
     # gepa treats metric-calls as its PRIMARY budget; forward it explicitly (hill-climb
     # has no such flag and enforces the same cap via run_dir.budget_exhausted()).
     if algorithm_name == "gepa" and spec.get("max_metric_calls"):
@@ -685,6 +1025,12 @@ def _cmd_run(argv):
     # 3) finalize  4) report
     last = proc.stdout
     report_extra = ["--dashboard-mode", dash_mode, "--dashboard-port", str(dash_port)]
+    # The server this run ALREADY started. Without this the report phase calls
+    # maybe_launch() again, _free_port() steps past the port our own server holds, and
+    # every run leaks a second dashboard process on a second port — then reports that
+    # second URL, contradicting the one printed at the top.
+    if dash_url:
+        report_extra += ["--dashboard-url", dash_url]
     # Resume seal guard: if a prior finalize already burned the test seal, re-running
     # finalize would raise TestSealError. Skip it and just regenerate the report so the
     # honest test number stays scored exactly once.
@@ -715,11 +1061,26 @@ def _cmd_dashboard(argv):
     import argparse
     from . import dashboard_launch
 
-    p = argparse.ArgumentParser(prog="cap-evolve dashboard")
+    p = argparse.ArgumentParser(prog="cap-evolve dashboard",
+        description=_summary("dashboard"),
+        epilog=_epilog("dashboard"),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--base", default=".capevolve", help="dir containing run_* dirs")
     p.add_argument("--port", type=int, default=dashboard_launch.DEFAULT_PORT)
     p.add_argument("--no-open", action="store_true", help="don't open a browser")
+    p.add_argument("--export", metavar="RUN_DIR",
+                    help="write a self-contained dashboard.html for one run dir and exit "
+                         "(no server) -- the same artifact the report phase renders, so an "
+                         "optimizer agent can regenerate it mid-run as a process/reasoning "
+                         "artifact")
     args = p.parse_args(argv)
+
+    if args.export:
+        from . import dashboard
+        from .rundir import RunDir
+        out = dashboard.write_dashboard(RunDir.open(Path(args.export)))
+        print(json.dumps({"dashboard_html": str(out)}))
+        return 0
 
     status = dashboard_launch.maybe_launch(
         args.base, mode="auto", port=args.port, open_browser=not args.no_open
@@ -801,13 +1162,35 @@ def _estimate_core(spec: dict, project: Path, price_in: float | None = None,
     val = _val_size(spec, project)
     trials = int(spec.get("num_trials", 1) or 1)
     iters = int(spec.get("max_iterations", 10) or 10)
+    opt_model = spec.get("optimizer_model")
+    run_model = spec.get("runner_model") or spec.get("model")
+
+    # agent mode: the driving agent owns the loop under a free-text `stop_condition`.
+    # `max_iterations`/`stall` are informational-only ceilings there, not a fixed round
+    # count, so pricing this as iters x val x trials would silently price a free-form run
+    # as a fixed N-iteration deterministic one.
+    if str(spec.get("orchestration_mode") or "deterministic") == "agent":
+        metric_calls_per_round = (val * trials) if val is not None else None
+        cap = int(spec.get("max_metric_calls", 0) or 0)
+        if metric_calls_per_round is not None and cap:
+            metric_calls_per_round = min(metric_calls_per_round, cap)
+        return {
+            "spec_summary": {"val_tasks": val, "num_trials": trials, "max_iterations": iters,
+                             "optimizer_model": opt_model, "runner_model": run_model},
+            "calls": {"metric_calls_per_round": metric_calls_per_round, "optimizer_calls": None},
+            "budget": {k: spec.get(k) for k in ("max_usd", "max_optimizer_usd", "max_metric_calls")},
+            "dominant_cost_knob": "stop_condition (agent mode: rounds are not fixed by max_iterations)",
+            "note": ("orchestration_mode is 'agent': cost is driven by stop_condition and the "
+                     "driving agent's own judgement, not a fixed iteration count, so "
+                     "optimizer_calls cannot be priced up front — use "
+                     "`spend.py --run-dir <R>` for a live number mid-run."),
+        }
+
     metric_calls = (val * trials * iters) if val is not None else None
     cap = int(spec.get("max_metric_calls", 0) or 0)
     if metric_calls is not None and cap:
         metric_calls = min(metric_calls, cap)
     opt_calls = iters
-    opt_model = spec.get("optimizer_model")
-    run_model = spec.get("runner_model") or spec.get("model")
 
     out: dict = {
         "spec_summary": {"val_tasks": val, "num_trials": trials, "max_iterations": iters,
@@ -872,18 +1255,534 @@ def _cmd_estimate(argv):
     import argparse
     from .specfile import read_yaml
 
-    p = argparse.ArgumentParser(prog="cap-evolve estimate")
-    p.add_argument("--spec", default=".capevolve/project/capevolve.yaml")
+    p = argparse.ArgumentParser(prog="cap-evolve estimate",
+        description=_summary("estimate"),
+        epilog=_epilog("estimate"),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--spec", default=None,
+                   help="run spec (default: <project>/capevolve.yaml)")
     p.add_argument("--project", default=".capevolve/project")
     p.add_argument("--price-in", type=float, default=None, help="optimizer/runner input $/MTok")
     p.add_argument("--price-out", type=float, default=None, help="optimizer/runner output $/MTok")
     args = p.parse_args(argv)
-    spec = read_yaml(Path(args.spec).read_text())
-    print(json.dumps(_estimate_core(spec, Path(args.project), args.price_in, args.price_out), indent=2))
+    spec_path, spec_err = _resolve_spec(args.spec, args.project)
+    if spec_err is not None:
+        print(json.dumps(spec_err, indent=2))
+        print(f"{spec_err['error']}\n  → {spec_err['fix']}", file=sys.stderr)
+        return 1
+    spec = read_yaml(spec_path.read_text(encoding="utf-8"))
+    out = _estimate_core(spec, Path(args.project), args.price_in, args.price_out)
+    out["spec_path"] = str(spec_path)
+    print(json.dumps(out, indent=2))
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Human surface: home screen, help, algorithms, doctor, init, diff
+# ---------------------------------------------------------------------------
+
+def _screen(lines, *, stream=None) -> None:
+    """Print a rendered screen to STDERR — human chrome never touches stdout."""
+    print("\n".join(lines), file=(stream or sys.stderr), flush=True)
+
+
+def _size(stream=None) -> int:
+    from .dashboard import _term_width
+    return _term_width(100)
+
+
+def _rows(default: int = 24) -> int:
+    """Terminal height, for screens that must FIT rather than scroll. The home screen
+    overshooting by a row scrolls the capybara and the golden path off the top."""
+    import shutil
+    try:
+        return max(4, shutil.get_terminal_size((80, default)).lines)
+    except OSError:
+        return default
+
+
+def _wants_color(stream=None, argv=()) -> bool:
+    """TTY + ``NO_COLOR`` decision, with an explicit ``--no-color`` override."""
+    from . import eventstream
+    if "--no-color" in tuple(argv):
+        return False
+    return eventstream.use_color(stream or sys.stderr)
+
+
+def _cmd_home(argv) -> int:
+    from . import branding
+    _screen(branding.home(_size(), color=_wants_color(argv=argv), version=__version__,
+                          rows=_rows()))
+    return 0
+
+
+def _cmd_help(argv) -> int:
+    from . import branding
+    name = next((a for a in argv if not a.startswith("-")), None)
+    if name is None and not argv:
+        return _cmd_home(argv)
+    _screen(branding.help_for(name, _size(), color=_wants_color(argv=argv)))
+    return 0
+
+
+def _cmd_algorithms(argv) -> int:
+    from . import branding
+    if "--json" in argv:
+        print(json.dumps(branding.ALGORITHMS, indent=2))
+        return 0
+    name = next((a for a in argv if not a.startswith("-")), None)
+    _screen(branding.algorithms_screen(name, _size(), color=_wants_color(argv=argv)))
+    return 0
+
+
+#: doctor verdicts, worst-first. ``fail`` blocks a run; ``warn`` never does.
+_MARK = {"ok": ("ok  ", "\033[32m"), "warn": ("warn", "\033[33m"),
+         "fail": ("FAIL", "\033[31m"), "skip": ("--  ", "\033[90m")}
+
+
+def _optimizer_row(name: str, skills_dir: Path | None) -> dict:
+    """The registry row for an optimizer name, or ``{}``. Never raises."""
+    if not skills_dir:
+        return {}
+    reg = Path(skills_dir) / "optimizers" / "registry.yaml"
+    if not reg.exists():
+        return {}
+    try:
+        from .specfile import read_yaml
+        row = (read_yaml(reg.read_text(encoding="utf-8")) or {}).get(name)
+    except Exception:  # noqa: BLE001 — doctor must never crash on a bad registry
+        return {}
+    return row if isinstance(row, dict) else {}
+
+
+def _doctor_checks(project: Path) -> list[dict]:
+    """``[{name, status, detail, fix}]`` — every precondition a run needs.
+
+    Each row names what is missing AND the exact command that fixes it, because a
+    readiness check that only says "not ready" makes the user guess.
+    """
+    import shutil as _shutil
+    from .specfile import read_yaml
+
+    project = Path(project)
+    rows: list[dict] = []
+
+    def add(name, status, detail, fix=""):
+        rows.append({"name": name, "status": status, "detail": detail, "fix": fix})
+
+    spec_path = project / "capevolve.yaml"
+    if not spec_path.exists():
+        add("spec", "fail", f"no {spec_path}", f"cap-evolve init --project {project}")
+        return rows
+    try:
+        spec = read_yaml(spec_path.read_text(encoding="utf-8")) or {}
+    except Exception as e:  # noqa: BLE001
+        add("spec", "fail", f"{spec_path} is unreadable: {e!r}",
+            f"fix the YAML, then: cap-evolve doctor --project {project}")
+        return rows
+    add("spec", "ok", str(spec_path))
+
+    algo = str(spec.get("algorithm_skill") or "")
+    mode = str(spec.get("orchestration_mode") or "deterministic")
+    from . import branding
+    meta = branding.ALGORITHMS.get(algo)
+    if meta is None:
+        add("algorithm", "fail", f"unknown algorithm_skill: {algo or '(unset)'}",
+            "cap-evolve algorithms")
+    elif meta["mode"] == "agent" and mode != "agent":
+        add("algorithm", "fail",
+            f"{algo} is agent-driven but orchestration_mode is {mode!r}",
+            f"set orchestration_mode: agent in {spec_path}")
+    elif meta.get("deprecated"):
+        add("algorithm", "warn",
+            f"{algo} ({mode}) is DEPRECATED — {meta['deprecated']}",
+            f"set algorithm_skill in {spec_path}")
+    else:
+        add("algorithm", "ok", f"{algo} ({mode})")
+
+    # An inert spec key is worse than a missing one: the reader believes it is on.
+    if spec.get("convergence") and _resolve_algorithm(algo)[0] not in CONVERGENCE_ALGORITHMS:
+        add("convergence", "warn",
+            f"convergence: true is ignored by {algo} (its own stop condition applies)",
+            f"remove the key, or set algorithm_skill to one of "
+            f"{', '.join(sorted(CONVERGENCE_ALGORITHMS))}")
+
+    adapter = project / "adapters" / "adapter.py"
+    if not adapter.exists():
+        add("adapter", "fail", f"no {adapter}",
+            f"cap-evolve init --project {project}  (then implement the 4 methods)")
+    else:
+        rep = run_check(project)
+        if rep.ok:
+            add("adapter", "ok", "contract holds (tasks stable, scorer deterministic)")
+        else:
+            add("adapter", "fail", "; ".join(rep.problems)[:400] or "check failed",
+                f"cap-evolve check {project}")
+
+    cap = str(spec.get("capability_path") or "seed_capability")
+    workdir = project.resolve().parent.parent
+    cap_p = Path(cap) if Path(cap).is_absolute() else workdir / cap
+    if cap_p.is_dir() and any(cap_p.iterdir()):
+        add("capability", "ok", f"{cap} ({len(list(cap_p.rglob('*')))} files)")
+    elif cap_p.is_dir():
+        add("capability", "fail", f"{cap_p} is empty — nothing to optimize",
+            f"put the artifact to optimize in {cap_p}")
+    else:
+        add("capability", "fail", f"no capability dir at {cap_p}",
+            f"mkdir -p {cap_p} and put the artifact to optimize there")
+
+    skills_dir = _find_skills_dir()
+    if skills_dir is None:
+        add("skills", "fail", "no skills dir found",
+            "bash install.sh   # or set CAPEVOLVE_SKILLS_DIR")
+    elif not (skills_dir / "_registry" / "manifest.json").exists():
+        add("skills", "fail", f"{skills_dir} has no _registry/manifest.json",
+            "python3 skills/_registry/build_manifest.py")
+    else:
+        add("skills", "ok", str(skills_dir))
+
+    opt = str(spec.get("optimizer_skill") or "")
+    row = _optimizer_row(opt, skills_dir)
+    # Distinguish "the registry has no such name" from "there is no registry" — they have
+    # OPPOSITE fixes, and conflating them tells the user to edit a spec that is already correct.
+    reg_path = (Path(skills_dir) / "optimizers" / "registry.yaml") if skills_dir else None
+    reg_missing = reg_path is None or not reg_path.exists()
+    if opt == "mock":
+        add("optimizer", "ok", "mock (deterministic, zero-API)")
+    elif reg_missing:
+        where = str(reg_path) if reg_path else "(no skills dir)"
+        add("optimizer", "warn",
+            f"cannot verify {opt or '(unset)'}: no optimizer registry at {where}",
+            "bash install.sh   # or set CAPEVOLVE_SKILLS_DIR to a tree that has "
+            "optimizers/registry.yaml")
+    elif not row:
+        add("optimizer", "warn", f"{opt or '(unset)'} is not in optimizers/registry.yaml",
+            "cap-evolve algorithms   # then pick a registered optimizer_skill")
+    else:
+        tmpl = str(row.get("command_template") or "")
+        argv0 = next((t for t in tmpl.split() if not t.startswith("{")), "")
+        binary = Path(argv0).name
+        if binary and binary not in ("python3", "python") and not _shutil.which(binary):
+            add("optimizer", "fail", f"{opt}: `{binary}` is not on PATH",
+                str(row.get("install_url") or f"install {binary}"))
+        else:
+            add("optimizer", "ok", f"{opt} ({binary or 'in-process'})")
+        keys = [k.strip() for k in str(row.get("env_keys") or "").split(",") if k.strip()]
+        # In agent mode the coding agent IS the optimizer and no optimizer process is spawned, so
+        # its credentials are irrelevant. Warning about them there sends the user to configure a
+        # key that will never be read, and a readiness check that cries wolf gets skimmed.
+        if str(spec.get("orchestration_mode") or "").strip() == "agent":
+            add("credentials", "ok",
+                "not required: orchestration_mode agent (the driving agent is the optimizer)")
+            keys = []
+        if keys:
+            present = [k for k in keys if os.environ.get(k)]
+            if present:
+                add("credentials", "ok", f"{', '.join(present)} set")
+            else:
+                add("credentials", "warn",
+                    f"none of {', '.join(keys)} is set — {row.get('auth_notes') or ''}".strip(),
+                    f"export {keys[0]}=…   # or use the CLI's own login")
+
+    ids_file = str(spec.get("split_ids_file") or "")
+    if ids_file:
+        p = Path(ids_file)
+        if not p.exists() and (project / ids_file).exists():
+            p = project / ids_file
+        if p.exists():
+            add("splits", "ok", f"pinned by {p}")
+        else:
+            add("splits", "fail", f"split_ids_file {ids_file} not found",
+                f"write {ids_file} as {{\"train\":[…],\"val\":[…],\"test\":[…]}}, "
+                "or clear split_ids_file to use ratios")
+    else:
+        r = (spec.get("split_train"), spec.get("split_val"), spec.get("split_test"))
+        add("splits", "ok", f"ratios {r[0]}/{r[1]}/{r[2]} seed {spec.get('split_seed')}")
+
+    it = int(spec.get("max_iterations") or 0)
+    if it <= 0 and not (spec.get("max_metric_calls") or spec.get("max_usd")):
+        add("budget", "warn", "no cap set (max_iterations/max_metric_calls/max_usd all 0)",
+            "cap-evolve estimate   # then set a cap you are willing to spend")
+    else:
+        add("budget", "ok", f"max_iterations {it}, max_usd {spec.get('max_usd') or 0}, "
+                            f"stall {spec.get('stall') or 0}")
+    return rows
+
+
+def _cmd_doctor(argv) -> int:
+    """Readiness check. Exit 0 when nothing FAILs, 1 otherwise."""
+    import argparse
+    from . import branding
+
+    p = argparse.ArgumentParser(
+        prog="cap-evolve doctor", description=branding.COMMANDS["doctor"]["summary"],
+        epilog=_epilog("doctor"), formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--project", default=".capevolve/project")
+    p.add_argument("--json", action="store_true", help="machine-readable rows on stdout")
+    p.add_argument("--no-color", action="store_true")
+    args = p.parse_args(argv)
+
+    rows = _doctor_checks(Path(args.project))
+    if args.json:
+        print(json.dumps({"ok": not any(r["status"] == "fail" for r in rows),
+                          "checks": rows}, indent=2))
+        return 0 if not any(r["status"] == "fail" for r in rows) else 1
+
+    color = _wants_color(argv=argv)
+    width = _size()
+    out = branding.banner(width, color=color, lines=("", "readiness check",))
+    out.append("")
+    # Wrap to the terminal, with a hanging indent under the detail column. A doctor row
+    # carries absolute paths and full shell commands, so unwrapped it hard-wraps at column
+    # 0 mid-word and destroys the alignment that makes the table readable -- on the one
+    # surface whose whole job is to be followed literally.
+    def _rows(text: str, first: str, cont: str, code: str | None) -> list[str]:
+        avail = max(20, width - len(cont))
+        parts = textwrap.wrap(text, avail, break_long_words=False,
+                              break_on_hyphens=False) or [""]
+        wrapped = []
+        for i, part in enumerate(parts):
+            body = f"{code}{part}\033[0m" if (color and code) else part
+            wrapped.append((first if i == 0 else cont) + body)
+        return wrapped
+
+    for r in rows:
+        label, code = _MARK.get(r["status"], _MARK["skip"])
+        mark = f"{code}{label}\033[0m" if color else label
+        head = f"  {mark}  {r['name'].ljust(12)}"
+        out += _rows(str(r["detail"]), head, " " * 20, None)
+        if r["fix"]:
+            out += _rows(str(r["fix"]), f"{'':20}→ ", " " * 22, "\033[36m")
+    fails = [r for r in rows if r["status"] == "fail"]
+    out.append("")
+    if fails:
+        out.append(f"  {len(fails)} blocking problem(s). Fix the arrows above, then "
+                   "re-run `cap-evolve doctor`.")
+    else:
+        warns = sum(1 for r in rows if r["status"] == "warn")
+        out.append(f"  ready to run{f' ({warns} warning(s))' if warns else ''}  →  "
+                   "cap-evolve estimate   then   cap-evolve run --tui")
+    _screen(out)
+    return 1 if fails else 0
+
+
+def _cmd_init(argv) -> int:
+    """Scaffold ``.capevolve/project`` from ``templates/project`` and write the spec.
+
+    Deliberately NOT a re-implementation of the ``intake`` skill: that one interviews
+    you about the capability and implements the adapter. This writes the files that
+    interview needs to exist, and patches the handful of spec keys that decide the run.
+    """
+    import argparse
+    import shutil as _shutil
+    from . import branding
+
+    p = argparse.ArgumentParser(
+        prog="cap-evolve init", description=branding.COMMANDS["init"]["summary"],
+        epilog=_epilog("init"), formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--project", default=".capevolve/project")
+    p.add_argument("--algorithm", default=None, choices=sorted(branding.ALGORITHMS))
+    p.add_argument("--optimizer", default=None, help="optimizer name (mock for zero-API)")
+    p.add_argument("--capability-path", default=None, help="dir holding the artifact to optimize")
+    p.add_argument("--yes", "-y", action="store_true", help="accept defaults, ask nothing")
+    p.add_argument("--force", action="store_true", help="overwrite an existing spec")
+    p.add_argument("--no-color", action="store_true")
+    args = p.parse_args(argv)
+
+    here = Path(__file__).resolve()
+    template = next((q / "templates" / "project" for q in here.parents
+                     if (q / "templates" / "project").is_dir()), None)
+    project = Path(args.project)
+    spec_path = project / "capevolve.yaml"
+    color = _wants_color(argv=argv)
+    out = branding.banner(_size(), color=color, lines=("", "new project",))
+    _screen(out + [""])
+
+    if spec_path.exists() and not args.force:
+        _screen([f"  {spec_path} already exists — nothing written.",
+                 "  → cap-evolve doctor        check it over",
+                 "  → cap-evolve init --force  start from the template again"])
+        return 1
+    if template is None:
+        _screen(["  could not find templates/project next to this install.",
+                 "  → clone the repo, or copy templates/project/ by hand"])
+        return 1
+
+    def ask(prompt: str, default: str, choices=()) -> str:
+        if args.yes or not sys.stdin.isatty():
+            return default
+        hint = f" [{'/'.join(choices)}]" if choices else ""
+        try:
+            got = input(f"  {prompt}{hint} ({default}): ").strip()
+        except EOFError:
+            return default
+        if got and choices and got not in choices:
+            print(f"  not one of {', '.join(choices)} — keeping {default}", file=sys.stderr)
+            return default
+        return got or default
+
+    offered = tuple(n for n, m in branding.ALGORITHMS.items() if not m.get("deprecated"))
+    algorithm = args.algorithm or ask("algorithm", "hill-climb", offered)
+    optimizer = args.optimizer or ask("optimizer (mock = zero-API)", "mock")
+    cap_path = args.capability_path or ask("capability dir (the artifact to optimize)",
+                                           "seed_capability")
+
+    project.mkdir(parents=True, exist_ok=True)
+    for item in sorted(template.iterdir()):
+        dst = project / item.name
+        if dst.exists() and not args.force:
+            continue
+        if item.is_dir():
+            _shutil.copytree(item, dst, dirs_exist_ok=True)
+        else:
+            _shutil.copy2(item, dst)
+
+    mode = branding.ALGORITHMS[algorithm]["mode"] if algorithm in branding.ALGORITHMS \
+        else "deterministic"
+    text = spec_path.read_text(encoding="utf-8")
+    for key, value in (("algorithm_skill", algorithm), ("optimizer_skill", optimizer),
+                       ("capability_path", cap_path), ("orchestration_mode", mode)):
+        text = _set_spec_key(text, key, value)
+    spec_path.write_text(text, encoding="utf-8")
+
+    workdir = project.resolve().parent.parent
+    cap_dir = Path(cap_path) if Path(cap_path).is_absolute() else workdir / cap_path
+    cap_dir.mkdir(parents=True, exist_ok=True)
+
+    lines = [f"  wrote {spec_path}",
+             f"        algorithm_skill: {algorithm} ({mode})",
+             f"        optimizer_skill: {optimizer}",
+             f"        capability_path: {cap_path}",
+             f"  ready {cap_dir}/  (put the artifact to optimize here)", "",
+             "  next", f"    1  edit {project / 'adapters' / 'adapter.py'}  "
+                       "(4 methods: tasks, run, score, materialize)",
+             "    2  cap-evolve doctor", "    3  cap-evolve run --tui"]
+    _screen(lines)
+    return 0
+
+
+def _set_spec_key(text: str, key: str, value: str) -> str:
+    """Replace ``key: …`` in a spec, preserving its trailing ``# comment``.
+
+    Line-oriented on purpose: the spec is a hand-commented template and a YAML
+    round-trip would throw every comment away. Appends the key if it is absent.
+    """
+    out, done = [], False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if not done and stripped.startswith(f"{key}:") and not stripped.startswith("#"):
+            indent = line[: len(line) - len(stripped)]
+            comment = ""
+            body = stripped[len(key) + 1:]
+            if "#" in body:
+                comment = "  " + body[body.index("#"):]
+            out.append(f"{indent}{key}: {value}{comment}")
+            done = True
+        else:
+            out.append(line)
+    if not done:
+        out.append(f"{key}: {value}")
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
+def _cmd_diff(argv) -> int:
+    """Show what a candidate actually changed, from its committed snapshot."""
+    import argparse
+    from . import branding, diffview
+
+    p = argparse.ArgumentParser(
+        prog="cap-evolve diff", description=branding.COMMANDS["diff"]["summary"],
+        epilog=_epilog("diff"), formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("candidate", nargs="?", default=None,
+                   help="candidate id (e.g. cand_0003); omit with --best")
+    p.add_argument("--vs", default=None, metavar="OTHER",
+                   help="compare against OTHER instead of the candidate's parent")
+    p.add_argument("--best", action="store_true", help="seed → the winning candidate")
+    p.add_argument("--run-dir", default=None, help="run dir (default: newest under --base)")
+    p.add_argument("--base", default=".capevolve", help="dir containing run_* dirs")
+    p.add_argument("--stat", action="store_true", help="per-file counts only")
+    p.add_argument("--files", action="store_true", help="changed paths only")
+    p.add_argument("--unified", type=int, default=None, metavar="N",
+                   help="force unified diff with N context lines (default 3, auto layout)")
+    p.add_argument("--side-by-side", action="store_true", help="force two columns")
+    p.add_argument("--max-lines", type=int, default=400, help="truncate after N lines")
+    p.add_argument("--color", action="store_true", help="force ANSI even when piped")
+    p.add_argument("--no-color", action="store_true")
+    args = p.parse_args(argv)
+
+    root, code = _resolve_run_dir(args.run_dir, args.base)
+    if root is None:
+        return code
+    if not args.best and not args.candidate:
+        cands = sorted(q.name for q in (root / "candidates").glob("*") if q.is_dir())
+        print("name a candidate, or pass --best", file=sys.stderr)
+        if cands:
+            print(f"  candidates in {root}: {' '.join(cands)}", file=sys.stderr)
+        print("  → cap-evolve diff --best", file=sys.stderr)
+        return 2
+    try:
+        a_id, b_id, how = diffview.resolve_pair(root, args.candidate, vs=args.vs,
+                                                best=args.best)
+    except LookupError as e:
+        print(str(e), file=sys.stderr)
+        print("  → cap-evolve diff <candidate>   (see `cap-evolve help diff`)",
+              file=sys.stderr)
+        return 2
+
+    a_dir, b_dir = root / "candidates" / a_id, root / "candidates" / b_id
+    missing = [str(d) for d in (a_dir, b_dir) if not d.is_dir()]
+    if missing:
+        print(f"no snapshot for: {', '.join(missing)}", file=sys.stderr)
+        print("  a run only has snapshots when `store` kept them "
+              "(synthetic/demo logs have none)", file=sys.stderr)
+        print(f"  → cap-evolve watch {root}   to see what this run did record",
+              file=sys.stderr)
+        return 2
+
+    a, b = diffview.read_tree(a_dir), diffview.read_tree(b_dir)
+    color = True if args.color else _wants_color(sys.stdout, argv)
+    width = _size()
+    head = [f"{how}   {diffview.summary_line(a, b)}", ""]
+    if args.stat:
+        body = diffview.render_stat(a, b, width=width, color=color)
+    elif args.files:
+        body = diffview.render_files(a, b, color=color)
+    else:
+        body = diffview.render(
+            a, b, width=width, color=color,
+            context=(3 if args.unified is None else max(0, args.unified)),
+            side_by_side=(True if args.side_by_side
+                          else (False if args.unified is not None else None)),
+            max_lines=max(1, args.max_lines), labels=(a_id, b_id))
+    # The diff itself is the OUTPUT of this command (redirectable), so it goes to stdout;
+    # only the "which two snapshots" header is chrome.
+    _screen(head)
+    print("\n".join(body), flush=True)
+    return 0
+
+
+def _summary(name: str) -> str:
+    """The one-line description for a subcommand, from the one catalog."""
+    from . import branding
+    return str((branding.COMMANDS.get(name) or {}).get("summary") or "")
+
+
+def _epilog(name: str) -> str:
+    """``examples:`` block for a subcommand's ``--help``, from the one catalog."""
+    from . import branding
+    meta = branding.COMMANDS.get(name) or {}
+    ex = meta.get("examples") or []
+    if not ex:
+        return ""
+    return "examples:\n" + "\n".join(f"  {e}" for e in ex)
+
+
 COMMANDS = {
+    "help": _cmd_help,
+    "init": _cmd_init,
+    "doctor": _cmd_doctor,
+    "algorithms": _cmd_algorithms,
+    "diff": _cmd_diff,
     "version": _cmd_version,
     "splits": _cmd_splits,
     "check": _cmd_check,
@@ -891,19 +1790,31 @@ COMMANDS = {
     "estimate": _cmd_estimate,
     "dashboard": _cmd_dashboard,
     "tail": _cmd_tail,
+    "watch": _cmd_watch,
+    "replay": _cmd_replay,
 }
+
+
+#: Commands with no argparse of their own — ``--help`` is served from the catalog so
+#: EVERY command answers ``--help`` with the same shape.
+_NO_ARGPARSE = ("version", "check", "splits", "help", "algorithms")
 
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] in ("-h", "--help"):
-        print("usage: cap-evolve {version|splits|check|run|estimate|dashboard|tail} [args]",
-              file=sys.stderr)
-        return 0 if argv else 2
+    if not argv:
+        return _cmd_home(argv)          # branded home screen, not a one-line usage
+    if argv[0] in ("-h", "--help", "help"):
+        return _cmd_help(argv[1:])
+    if argv[0] in ("-V", "--version"):
+        return _cmd_version(argv[1:])
     fn = COMMANDS.get(argv[0])
     if fn is None:
-        print(f"unknown command: {argv[0]}", file=sys.stderr)
+        from . import branding
+        _screen(branding.help_for(argv[0], _size(), color=_wants_color(argv=argv)))
         return 2
+    if argv[0] in _NO_ARGPARSE and any(a in ("-h", "--help") for a in argv[1:]):
+        return _cmd_help([argv[0]])
     return fn(argv[1:])
 
 

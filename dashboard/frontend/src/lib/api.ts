@@ -11,7 +11,6 @@ import type {
   CandidateDiff,
   CandidateFile,
   CompareResult,
-  CustomView,
   FileResult,
   GitCommit,
   GitDiffResult,
@@ -116,9 +115,6 @@ export const api = {
   memory: (id: string, signal?: AbortSignal) =>
     getJSON<MemoryResult>(`/api/runs/${encodeURIComponent(id)}/memory`, signal),
 
-  customView: (id: string, signal?: AbortSignal) =>
-    getJSON<CustomView>(`/api/runs/${encodeURIComponent(id)}/custom-view`, signal),
-
   candidateFiles: (id: string, cid: string, signal?: AbortSignal) =>
     getJSON<CandidateFile[]>(
       `/api/runs/${encodeURIComponent(id)}/candidate/${encodeURIComponent(cid)}/files`,
@@ -150,4 +146,8 @@ export const api = {
     ),
 
   streamURL: (id: string) => `/api/runs/${encodeURIComponent(id)}/stream`,
+
+  /** The optimizer's own self-rendered dashboard.html, served raw (not through the
+   *  size-capped /file route) so it renders as a real document in an iframe. */
+  processHtmlURL: (id: string) => `/api/runs/${encodeURIComponent(id)}/process-html`,
 }

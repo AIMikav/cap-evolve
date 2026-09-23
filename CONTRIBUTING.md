@@ -29,6 +29,10 @@ See [docs/EXTENDING.md](docs/EXTENDING.md) for the token vocabulary and wiring.
   into a skill. Gate on val, seal test, report variance.
 - **Skills stay host-agnostic.** `scripts/run.py` must print a single JSON object
   to stdout (the contract), and must not depend on a specific agent host.
+- **Subprocess streams: stdout is captured and parsed, stderr is RELAYED** — on the
+  zero-exit path too. A step that exits 0 after explaining a problem must not look
+  like a step that had nothing to say. (Optimizer stderr is additionally persisted to
+  `work/<cand>.optimizer.stderr` and logged as an `optimizer_stderr` event.)
 - **Zero runtime deps in core.** Optional features go behind extras.
 - Add a test for any core change (`core/tests/`). Run `python -m compileall core skills`.
 
@@ -42,6 +46,11 @@ them off as clean CI runs.
 
 ## Quality bar for skills
 - SKILL.md body under ~500 lines (it is the primary doc); references one level deep with a TOC if long, and only when filled.
+- Check it yourself with `python skills/_registry/lint_skills.py skills` — the same
+  validator the `skill-package` capability applies to user skills, pointed at ours.
+  CI runs it as a **blocking** job and the tree is clean, so a violation it reports
+  is a regression in your change. Advisory lines (description style, a bundled
+  script with no `--self-check`) print but do not fail.
 - A real `check.py` smoke test (not just an import) that fails on stubs and on
   non-determinism.
 - Ground claims in cited papers/repos/docs.

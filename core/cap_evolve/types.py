@@ -17,6 +17,31 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+#: Files that live beside the capability in a candidate dir but are NOT the capability:
+#: optimizer scratch, memory, per-iteration focus/reflection notes. They must not perturb
+#: the content hash (cache.py), count as an editable component (gepa.py), or be shown as
+#: a capability edit (diffview.py). One list, because three copies drifted: diffview's
+#: was missing FOCUS.md/REFLECTION.md, so `cap-evolve diff` on a gepa run buried the two
+#: real changed lines under 33 lines of gepa's own bookkeeping.
+NON_CAPABILITY_FILES = frozenset({
+    "MEMORY.md", "STATE.md", "INSTRUCTIONS.md", "REJECTED.md",
+    "FOCUS.md", "REFLECTION.md",
+    # cross-iteration state files — scratch, not capability
+    "LEDGER.md", "JOURNAL.md", "PROCESS.md", "RUNMAP.md",
+    # per-agent always-on instructions files: injection appends a pointer block to them
+    "CLAUDE.md", "AGENTS.md", "GEMINI.md",
+})
+
+#: Read-context / vcs dirs that are never the edit surface. This covers everything
+#: ``harness.OptimizerContext.inject()`` writes into an iteration workdir (trajectories,
+#: guidance, and the per-agent NATIVE skills dirs): now that EVERY algorithm injects that
+#: context, an un-ignored read-context dir would bust gepa's eval cache every iteration
+#: and show up to gepa as an editable "component" to optimize.
+NON_CAPABILITY_DIRS = frozenset({
+    ".git", "__pycache__", "prior_iterations", "trajectories", "guidance",
+    ".claude", ".agents", ".gemini", ".opencode", ".bob", ".cursor",
+})
+
 
 def _clamp01(x: float) -> float:
     """Rewards live in [0, 1]; clamp defensively so a buggy scorer can't poison stats."""

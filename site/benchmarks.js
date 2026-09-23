@@ -4,7 +4,20 @@ const GH_API = "https://api.github.com/repos/skillberry-ai/cap-evolve";
 // hardcoding it here silently hides new tiers from the live panel — a `pilot` run was
 // invisible while it was executing. The bench allowlist stays explicit so unrelated jobs
 // ("plan legs", "aggregate history") never match.
-const JOB_RE = /^([a-z][a-z0-9-]*) \/ (tau2|swebench|skillsbench|spreadsheetbench)$/;
+// Any bench token, not a hardcoded list: enumerating them here silently hid the two
+// tau2-airline arms from this panel entirely.
+const JOB_RE = /^([a-z][a-z0-9-]*) \/ ([a-z][a-z0-9_-]*)$/;
+// The arms are internal leg names; the picker calls them tau2-custom + intervention.
+const BENCH_LABEL = {
+  tau2_custom_direct: "tau2-custom (direct)",
+  tau2_custom_spa: "tau2-custom (spa)",
+};
+const benchLabel = (b) => BENCH_LABEL[b] || b;
+// ?fixture — read the committed local eyeball fixture instead of the live feed (see
+// site/benchmarks.fixture.json). Local-only affordance for exercising the filter cascade
+// through many reload cycles; the default path is unchanged.
+const FEED = new URLSearchParams(location.search).has("fixture")
+  ? "benchmarks.fixture.json" : `${RAW}/benchmarks.json`;
 let RECORDS = [], sortKey = "date", sortDir = -1;
 
 const $ = (s) => document.querySelector(s);
@@ -27,20 +40,6 @@ const localZone = () => {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "local"; }
   catch { return "local"; }
 };
-
-// Populate a <select> from the values actually present in the data, preserving the current
-// selection. Hardcoded option lists silently hide whole benchmarks: `spreadsheetbench` and
-// `rh-swebench` records existed in benchmark-history but were unreachable in the UI because the
-// markup only listed tau2/swebench/skillsbench.
-function hydrateFilter(sel, values, fallbackLabel) {
-  const el = $(sel);
-  if (!el) return;
-  const prev = el.value;
-  const opts = [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
-  el.innerHTML = `<option value="">${fallbackLabel}</option>` +
-    opts.map((v) => `<option${v === prev ? " selected" : ""}>${esc(v)}</option>`).join("");
-  el.value = opts.includes(prev) ? prev : "";
-}
 
 // Wall-time seconds as minutes+seconds (e.g. 14m48s), matching metrics.py's _fmt_duration.
 const fmtDuration = (v) => {
@@ -107,11 +106,11 @@ function renderRunning(items) {
   list.innerHTML = sorted.map((it) => {
     if (!it.live) {
       return `<li><span class="badge badge-amber">queued</span>
-        <a href="${esc(it.jobUrl)}" target="_blank" rel="noopener">${esc(it.tier)} / ${esc(it.bench)}</a></li>`;
+        <a href="${esc(it.jobUrl)}" target="_blank" rel="noopener">${esc(it.tier)} / ${esc(benchLabel(it.bench))}</a></li>`;
     }
     const dataBase = encodeURIComponent(`${RAW}/live/${it.runId}__${it.tier}-${it.bench}/data`);
     return `<li><span class="badge badge-accent">live</span>
-      <a href="${esc(it.jobUrl)}" target="_blank" rel="noopener">${esc(it.tier)} / ${esc(it.bench)}</a>
+      <a href="${esc(it.jobUrl)}" target="_blank" rel="noopener">${esc(it.tier)} / ${esc(benchLabel(it.bench))}</a>
       <span class="elapsed" data-started="${esc(it.startedAt)}"></span>
       — <a href="./dashboard-ui/index.html?dataBase=${dataBase}#/runs/run_suite" target="_blank" rel="noopener">Watch live</a></li>`;
   }).join("");
@@ -128,26 +127,78 @@ function updateElapsed() {
   });
 }
 
+// Benchmark/Type/Experiment dropdowns are derived from the loaded records rather than
+// hardcoded, so a new bench or tier in the feed becomes selectable with no code change.
+// smoke/full are the two standing tiers and lead the Type list; anything ad-hoc follows
+// alphabetically.
+const TIER_FIRST = ["smoke", "full"];
+
+// dedupe + order: `first` entries (only those actually present) ahead of the rest, sorted.
+const ordered = (vals, first = []) => {
+  const set = new Set(vals);
+  return [...first.filter((v) => set.has(v)),
+          ...[...set].filter((v) => !first.includes(v)).sort()];
+};
+
+function benchOptions() {
+  return ordered(RECORDS.map((r) => r.bench).filter(Boolean));
+}
+
+// Tiers/experiments present for `bench` ("" = all benches). Derived from ALL records,
+// never from the filtered rows — the default Time window is 24h and would otherwise hide
+// almost every value.
+function tierOptions(bench) {
+  return ordered(
+    RECORDS.filter((r) => !bench || r.bench === bench).map((r) => r.tier || "smoke"),
+    TIER_FIRST,
+  );
+}
+
+function experimentOptions(bench) {
+  return ordered(
+    RECORDS.filter((r) => (!bench || r.bench === bench) && r.experiment).map((r) => r.experiment),
+  );
+}
+
+// Repopulate a <select> with a leading "all", keeping the current selection if it still
+// exists and otherwise falling back to "all" (a stale value would filter the table to zero
+// rows with no visible cause). Assigning .value never fires `input`, so this can't re-enter
+// the cascade.
+function fillSelect(sel, values) {
+  const prev = sel.value;
+  sel.innerHTML = `<option value="">all</option>` +
+    values.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
+  sel.value = values.includes(prev) ? prev : "";
+}
+
 async function load() {
   try {
     const [recs, meta] = await Promise.all([
-      fetch(`${RAW}/benchmarks.json?t=${Date.now()}`).then((r) => r.json()),
+      fetch(`${FEED}?t=${Date.now()}`).then((r) => r.json()),
       fetch(`${RAW}/meta.json?t=${Date.now()}`).then((r) => r.json()).catch(() => null),
     ]);
     RECORDS = Array.isArray(recs) ? recs : [];
-    // Derive the Benchmark and Tier choices from the records themselves, so a new benchmark or
-    // tier appears the moment it publishes a run — no markup change required.
-    hydrateFilter("#f-bench", RECORDS.map((r) => r.bench), "all");
-    hydrateFilter("#f-tier", RECORDS.map((r) => r.tier || "smoke"), "all");
     const zh = $("#date-zone");
     if (zh) zh.textContent = ` (${localZone()})`;
     if (meta && meta.updated) {
       $("#updated").textContent = `· last updated ${new Date(meta.updated).toLocaleString()}`;
     }
+    fillSelect($("#f-bench"), benchOptions());
+    refreshDependentFilters();
     render();
   } catch (e) {
     $("#error").hidden = false;
   }
+}
+
+// Rebuild Type + Experiment for the currently-selected Benchmark, and hide the Experiment
+// control entirely when no record for this bench has one (e.g. tau2/swebench today).
+function refreshDependentFilters() {
+  const bench = $("#f-bench").value;
+  fillSelect($("#f-tier"), tierOptions(bench));
+  const exps = experimentOptions(bench);
+  fillSelect($("#f-exp"), exps);
+  $("#f-exp-wrap").hidden = exps.length === 0;
 }
 
 // current time window (ms epoch), recomputed each render() from the Time filter.
@@ -165,13 +216,14 @@ function timeWindow() {
 
 function passes(r) {
   const b = $("#f-bench").value, s = $("#f-source").value, c = $("#f-conc").value;
-  const t = $("#f-tier").value;
+  const t = $("#f-tier").value, ex = $("#f-exp").value;
   const q = $("#f-q").value.toLowerCase();
   const ts = Date.parse(r.date);
   if (WIN.start != null && !(ts >= WIN.start)) return false;
   if (WIN.end != null && !(ts <= WIN.end)) return false;
   if (b && r.bench !== b) return false;
   if (t && (r.tier || "smoke") !== t) return false;
+  if (ex && r.experiment !== ex) return false;
   if (s === "pr" && r.event !== "pull_request") return false;
   if (s === "manual" && r.event === "pull_request") return false;
   if (c && r.conclusion !== c) return false;
@@ -212,14 +264,28 @@ function render() {
   for (const r of rows) {
     const tr = document.createElement("tr");
     tr.className = "run-row";
-    const reward = r.suite ? `${fmt(r.suite.reward_base)} → ${fmt(r.suite.reward_opt)}` : "—";
+    // Coverage matters as much as the number: 0.705 over 44 of 50 tasks is not the same claim
+    // as 0.705 over 50, and infra-errored tasks are excluded from the means (they are missing
+    // data, not zeros). Show n_scored/n whenever some task failed to produce a paired result.
+    const cov = r.suite && Number.isFinite(r.suite.n_scored) && r.suite.n_scored < r.suite.n
+      ? ` <span class="muted" title="${r.suite.n - r.suite.n_scored} task(s) infra-errored and are excluded from the means">(${r.suite.n_scored}/${r.suite.n})</span>`
+      : "";
+    const reward = r.suite ? `${fmt(r.suite.reward_base)} → ${fmt(r.suite.reward_opt)}${cov}` : "—";
     const evalUsd = r.suite && r.suite.eval_usd != null ? `$${fmt(r.suite.eval_usd, 4)}` : "—";
     const optUsd = r.suite ? `$${fmt(r.suite.optimizer_usd, 4)}` : "—";
     const latency = r.suite && (r.suite.eval_seconds != null || r.suite.optimizer_seconds != null)
       ? fmtDuration((r.suite.eval_seconds ?? 0) + (r.suite.optimizer_seconds ?? 0)) : "—";
-    const ui = r.has_ui
-      ? `<a href="./benchmark-ui/runs/${encodeURIComponent(r.run_id)}__${esc(r.tier || "smoke")}-${encodeURIComponent(r.bench)}/ui/index.html#/runs/run_suite" target="_blank" rel="noopener">Open UI</a>`
-      : `<span class="muted">—</span>`;
+    // `report_url` points at a rendered drill-down page on the site (level 2:
+    // a heatmap/summary; level 3, where it exists, is linked from there on) —
+    // additive alongside `has_ui`'s CapEvolve UI snapshot link, not a replacement.
+    const uiParts = [];
+    if (r.has_ui) {
+      uiParts.push(`<a href="./benchmark-ui/runs/${encodeURIComponent(r.run_id)}__${esc(r.tier || "smoke")}-${encodeURIComponent(r.bench)}/ui/index.html#/runs/run_suite" target="_blank" rel="noopener">Open UI</a>`);
+    }
+    if (r.report_url) {
+      uiParts.push(`<a href="${esc(r.report_url)}" target="_blank" rel="noopener">Report ↗</a>`);
+    }
+    const ui = uiParts.length ? uiParts.join(" · ") : `<span class="muted">—</span>`;
     // Source column: link to the PR when set, else to `summary_url` when set
     // (per-run detail page for local/manual runs). Backward compatible: records
     // without `pr` or `summary_url` render as plain text.
@@ -231,8 +297,14 @@ function render() {
     const badge = `<span class="badge ${esc(r.conclusion)}">${esc(r.conclusion)}</span>`;
     const date = esc(fmtLocal(r.date));
     const tier = esc(r.tier || "smoke");
+    // Which algorithm produced the number. Records written before the `algorithm` field
+    // existed render "—" rather than a guessed "hill-climb-all": the focus schedule was
+    // already dispatchable then, so the algorithm of an old run is genuinely unknown, and
+    // labelling it would fabricate the very provenance this column exists to establish.
+    const algo = esc(r.algorithm || "—");
     tr.innerHTML = `<td><a href="${esc(r.run_url)}">${date}</a></td>
-      <td>${src}</td><td>${esc(r.bench)}</td><td>${tier}</td><td>${r.iterations ?? "—"}</td>
+      <td>${src}</td><td>${esc(r.bench)}</td><td>${tier}</td><td>${esc(r.experiment || "—")}</td><td><code>${algo}</code></td>
+      <td>${r.iterations ?? "—"}</td>
       <td>${r.trials ?? "—"}</td>
       <td>${reward}</td><td>${evalUsd}</td><td>${optUsd}</td><td>${latency}</td>
       <td><code>${esc(r.agent_model || "—")}</code></td><td><code>${esc(r.optimizer_model || "—")}</code></td>
@@ -242,7 +314,7 @@ function render() {
     const detail = document.createElement("tr");
     detail.className = "detail-row";
     detail.hidden = true;
-    detail.innerHTML = `<td colspan="14">${taskTable(r.tasks || [])}${stepsTable(r.steps || [])}</td>`;
+    detail.innerHTML = `<td colspan="16">${taskTable(r.tasks || [])}${stepsTable(r.steps || [])}</td>`;
     tb.appendChild(detail);
 
     tr.addEventListener("click", (e) => {
@@ -283,9 +355,16 @@ document.querySelectorAll("#runs thead th").forEach((th) =>
     render();
   })
 );
-["f-time", "f-from", "f-to", "f-bench", "f-tier", "f-source", "f-conc", "f-q"].forEach((id) =>
+["f-time", "f-from", "f-to", "f-tier", "f-exp", "f-source", "f-conc", "f-q"].forEach((id) =>
   $("#" + id).addEventListener("input", render)
 );
+// One-directional cascade: Benchmark narrows the Type/Experiment options (they never
+// narrow Benchmark). Refresh them BEFORE re-rendering so the table and the dropdowns
+// agree — including when a now-impossible selection gets dropped back to "all".
+$("#f-bench").addEventListener("input", () => {
+  refreshDependentFilters();
+  render();
+});
 // reveal the custom datetime inputs only when Time = "Custom…"
 $("#f-time").addEventListener("change", () => {
   const custom = $("#f-time").value === "custom";

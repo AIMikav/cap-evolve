@@ -69,6 +69,10 @@ class SplitResult:
     cost_usd: float = 0.0
     tokens: int = 0
     seconds: float = 0.0
+    # {cost_source: count} from Rollout.metadata, e.g. {"unpriced": 12} — present only
+    # when an adapter tags it (an unmetered target model), so cost_usd==0.0 next to
+    # nonzero tokens reads as "unpriced", not "free".
+    cost_source: dict = field(default_factory=dict)
     # Honest denominator: how many of the split's tasks actually produced a
     # measurement. ``reward`` is the mean over ``n_scored`` tasks, NOT over
     # ``n_tasks`` — so a caller can tell "scored 0.08" from "0.08 because two
@@ -94,6 +98,7 @@ class SplitResult:
             "cost_usd": self.cost_usd,
             "tokens": self.tokens,
             "seconds": self.seconds,
+            "cost_source": self.cost_source,
             "n_tasks": self.n_tasks,
             "n_scored": self.n_scored,
         }
@@ -110,6 +115,7 @@ class SplitResult:
             cost_usd=float(d.get("cost_usd") or 0.0),
             tokens=int(d.get("tokens") or 0),
             seconds=float(d.get("seconds") or 0.0),
+            cost_source=dict(d.get("cost_source") or {}),
             n_tasks=int(d.get("n_tasks") or 0),
             n_scored=int(d.get("n_scored") or 0),
         )
@@ -161,6 +167,47 @@ def aggregate_scores(split: str, scores: Sequence[Score], ks: Sequence[int] = (1
         n_tasks=len(scores),
         n_scored=len(scored),
     )
+
+
+def pool_split_results(a: SplitResult, b: SplitResult, ks: Sequence[int] = (1, 2)) -> SplitResult:
+    """Pool two evaluations of the SAME unmodified candidate into one honest SplitResult.
+
+    For sequential evidence-gathering (agent-optimize's "provisional" candidates): growing
+    ``n`` on a candidate means running it again and POOLING the trials, not averaging two
+    separate verdicts — a paired significance test needs the combined per-task trial vector,
+    since averaging two means (or two SEs) understates the truth: two runs of 5 trials each
+    are one candidate measured at n=10, not two half-strength candidates.
+
+    Concatenates each shared task's ``trial_rewards`` (never just its mean) and
+    re-aggregates from scratch, so ``reward``/``stderr``/``pass_k`` on the result reflect
+    every trial actually run. A task present on only one side keeps only that side's
+    trials — nothing is discarded, nothing is invented.
+    """
+    by_task: dict[str, list[float]] = {}
+    feedback: dict[str, str] = {}
+    errored: dict[str, bool] = {}
+    errored_trials: dict[str, int] = {}
+    for res in (a, b):
+        for pt in (res.per_task or []):
+            tid = pt.get("task_id")
+            if tid is None:
+                continue
+            raw = pt.get("raw") or {}
+            trials = pt.get("trial_rewards") or []
+            by_task.setdefault(tid, []).extend(float(x) for x in trials)
+            if pt.get("feedback"):
+                feedback[tid] = pt["feedback"]
+            errored[tid] = errored.get(tid, False) or bool(raw.get("errored"))
+            errored_trials[tid] = errored_trials.get(tid, 0) + int(raw.get("errored_trials") or 0)
+    from .stats import mean, stderr
+    scores = [
+        Score(task_id=t, reward=mean(tr), feedback=feedback.get(t, ""),
+              n=len(tr), stderr=stderr(tr), trial_rewards=tr,
+              raw={"errored": errored.get(t, False), "errored_trials": errored_trials.get(t, 0),
+                   "valid_trials": len(tr), "n_trials": len(tr)})
+        for t, tr in by_task.items()
+    ]
+    return aggregate_scores(a.split or b.split, scores, ks=ks)
 
 
 # ---- parent selection over a frontier of candidates ------------------------

@@ -1,9 +1,20 @@
 """Acceptance gate — the rule that decides whether a candidate edit is kept.
 
-The default is the *significance* gate (prior agent-optimization work's ``val_improvement_significant``):
-accept only when the val improvement exceeds k standard errors, so noise does
-not get mistaken for progress. All gates compare on VAL and never on TRAIN —
-``decide`` takes an explicit ``split`` and refuses anything but ``val``.
+**The default for every real run is the ``paired`` gate.** The optimization loop
+builds the aligned per-task delta vector and selects ``paired`` unless the caller
+pinned a mode (``harness.py:1524-1526``, ``gepa.py:741-743``), and the shipped
+config says so (``templates/project/capevolve.yaml``: ``gate_mode: paired``).
+``decide``'s own ``mode=`` parameter defaults to ``significant`` only as the
+fallback for a bare caller that has no per-task data.
+
+The bar is ``Δ > k·SE``, not ``Δ > 0``, because search is a noise amplifier:
+screen enough candidates and the best-looking one is best by luck, so a ``Δ > 0``
+rule banks noise as progress and the val curve climbs while nothing improved.
+Requiring the gain to clear ``k`` standard errors of its own measurement error is
+what makes an accept mean something.
+
+All gates compare on VAL and never on TRAIN — ``decide`` takes an explicit
+``split`` and refuses anything but ``val``.
 """
 
 from __future__ import annotations
@@ -22,6 +33,13 @@ class GateDecision:
     #: caller must not treat this as a content rejection: it should not count
     #: toward the stall counter and it says nothing about the candidate's quality.
     indecisive: bool = False
+    #: The smallest true effect this verdict could have resolved, i.e. ``2 * SE`` of the
+    #: measurement that produced ``delta``. ``None`` when no SE was computable (threshold/
+    #: strict modes, or too few paired samples). Reported so the driver reads "this round can
+    #: resolve ±X" BEFORE reading the delta — four runs of null results on tau2_airline were
+    #: read as "the edits were bad" when the gate simply could not resolve anything that small
+    #: (see docs/TAU2_SUMMARY.md).
+    resolvable_effect_size: float | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -30,6 +48,7 @@ class GateDecision:
             "delta": self.delta,
             "threshold": self.threshold,
             "indecisive": self.indecisive,
+            "resolvable_effect_size": self.resolvable_effect_size,
         }
 
 
@@ -91,9 +110,8 @@ def decide(
     candidate_stderr: float = 0.0,
     current_stderr: float = 0.0,
     threshold: float = 0.0,
-    candidate_size: int | None = None,
-    current_size: int | None = None,
     paired_deltas: list | None = None,
+    paired_se_floor: float = 0.0,
     coverage: float | None = None,
     min_coverage: float = 0.6,
     run_dir=None,
@@ -111,9 +129,8 @@ def decide(
         as INDEPENDENT samples — correct only when they were not scored on the
         same tasks; less powerful than ``paired``).
       - ``threshold``:   accept iff delta > ``threshold`` (a flat margin).
-      - ``strict``:      accept iff delta > 0 (any improvement).
-      - ``simplicity_tiebreak``: like strict, but on a (near-)tie prefer the
-        smaller candidate (``candidate_size`` < ``current_size``).
+      - ``strict``:      accept iff delta > 0 (any improvement). Only safe with a
+        near-zero-variance scorer: with a noisy one it banks noise as progress.
 
     ``coverage`` is the fraction of val tasks that produced a real measurement
     (``SplitResult.coverage``). Below ``min_coverage`` the gate REFUSES TO JUDGE and
@@ -123,8 +140,17 @@ def decide(
     optimizer to go fix content that was never evaluated. Pass ``min_coverage=0.0``
     to disable the guard.
 
-    ``run_dir`` (optional) is used only to log a ``gate_warning`` event when an SE
-    collapses to 0 (so the silent degeneration to strict is auditable).
+    ``paired_se_floor`` (paired mode only, 0 = off) is a lower bound on the paired SE,
+    for when the CROSS-TASK SPREAD of ``paired_deltas`` is known to understate the real
+    uncertainty. The paired SE is estimated from how much the per-task deltas differ from
+    each other, which silently assumes each per-task delta is measured precisely. On a few
+    tasks it is not: a footprint-restricted vector of 4 real deltas whose values happen to
+    be {0, +0.1, 0, +0.1} yields SE 0.0046 and an ACCEPT, while each of those +0.1 moves is
+    one flipped rollout out of ten — moves ``harness.move_is_resolved`` refuses to call real
+    at all. Pass ``sqrt(Σ_t (par_se_t² + cand_se_t²)) / n`` (see
+    ``harness.paired_se_floor``) and the two tests stop contradicting each other. Measured
+    on run_finalrun6's cand_7 — a docstring-only edit — this is the difference between a
+    fabricated accept at SE 0.0046 and a reject at the floor's 0.0113.
     """
     if split.lower() != "val":
         raise TrainGateError(
@@ -160,6 +186,8 @@ def decide(
                 se = math.sqrt(var / n)
             else:
                 se = 0.0
+            # The cross-task spread cannot go below what per-task trial noise implies.
+            se = max(se, float(paired_se_floor or 0.0))
             if se == 0.0:
                 # Paired SE collapsed (n=1, or every task moved identically). Do not
                 # silently act strict — warn loudly, then apply the documented strict
@@ -177,8 +205,9 @@ def decide(
             return GateDecision(
                 accept=ok,
                 reason=(f"paired Δ̄={mean_d:+.4f} {'>' if ok else '<='} {k_se}·SE={bar:.4f} "
-                        f"(SE={se:.4f}, n={n})"),
+                        f"(SE={se:.4f}, n={n}, resolvable effect size 2·SE={2 * se:.4f})"),
                 delta=mean_d, threshold=bar,
+                resolvable_effect_size=round(2 * se, 6),
             )
 
     if mode == "significant":
@@ -200,10 +229,11 @@ def decide(
             accept=ok,
             reason=(
                 f"Δ={delta:+.4f} {'>' if ok else '<='} {k_se}·SE={bar:.4f} "
-                f"(SE={se:.4f})"
+                f"(SE={se:.4f}, resolvable effect size 2·SE={2 * se:.4f})"
             ),
             delta=delta,
             threshold=bar,
+            resolvable_effect_size=round(2 * se, 6),
         )
 
     if mode == "threshold":
@@ -213,19 +243,5 @@ def decide(
     if mode == "strict":
         ok = delta > 0
         return GateDecision(ok, f"Δ={delta:+.4f} {'>' if ok else '<='} 0", delta, 0.0)
-
-    if mode == "simplicity_tiebreak":
-        if delta > 0:
-            return GateDecision(True, f"Δ={delta:+.4f} > 0", delta, 0.0)
-        tie = abs(delta) <= 1e-9
-        if tie and candidate_size is not None and current_size is not None and candidate_size < current_size:
-            return GateDecision(
-                True,
-                f"tie (Δ={delta:+.4f}); accepted smaller candidate "
-                f"({candidate_size} < {current_size})",
-                delta,
-                0.0,
-            )
-        return GateDecision(False, f"Δ={delta:+.4f} <= 0 (no simpler tie)", delta, 0.0)
 
     raise ValueError(f"unknown gate mode: {mode!r}")

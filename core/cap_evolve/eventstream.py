@@ -71,10 +71,14 @@ FOLLOW_END = "_follow_end"
 BOOKKEEPING_KINDS = ("minibatch", "optimizer_context_warning", "target_profile",
                      "seed_dir_created", "splits_warning", "gepa_resume",
                      "gepa_merge_skip", "gepa_merge_local", "skillopt_slow_eval",
-                     "skillopt_slow_update")
+                     "skillopt_slow_update", "skillopt_step")
 
-# The one-iteration-finished events, each carrying the optimizer's own spend.
-_STEP_KINDS = ("step", "gepa_val_gate", "skillopt_step")
+# The one-iteration-finished event, carrying the optimizer's own spend. Exactly ONE
+# kind: every algorithm writes it via ``harness.record_iteration`` (#216/#224).
+# ``gepa_val_gate`` is no longer emitted at all, and ``skillopt_step`` is auxiliary
+# epoch detail that duplicated the same candidate's row — it is skipped in the terminal
+# via BOOKKEEPING_KINDS above (the dashboard still shows it).
+_STEP_KINDS = ("step",)
 
 
 def read_new_events(path: Path, offset: int) -> tuple[list[dict], int]:
@@ -177,6 +181,37 @@ def follow_events(
 
 
 # ---- human-readable rendering ----------------------------------------------
+
+def crop_ansi(line: str, width: int) -> str:
+    """Crop to ``width`` VISIBLE columns, counting no ANSI escape as a column.
+
+    Pre-styled text cannot be sliced plainly: the slice can cut mid-escape and (worse)
+    leave a line wider than the terminal. One wrapped line breaks the live view's inline
+    repaint arithmetic, and on the home screen it wraps the command table.
+    """
+    out, used, i = [], 0, 0
+    try:
+        width = max(0, int(width))
+    except (TypeError, ValueError):
+        return line
+    while i < len(line) and used < width:
+        ch = line[i]
+        if ch == "\x1b":
+            j = i + 1
+            if j < len(line) and line[j] == "[":
+                j += 1
+                while j < len(line) and not line[j].isalpha():
+                    j += 1
+            out.append(line[i: j + 1])
+            i = j + 1
+            continue
+        out.append(ch)
+        used += 1
+        i += 1
+    if "\x1b" in line:
+        out.append("\x1b[0m")   # close any style the crop cut off from its reset
+    return "".join(out)
+
 
 def use_color(stream) -> bool:
     """True only on a real TTY without ``NO_COLOR``. Piped/CI output stays plain.
@@ -325,10 +360,7 @@ def format_event(ev: dict, totals: dict | None = None, *,
     elif kind in _STEP_KINDS:
         ok = bool(ev.get("accept"))
         verdict = "ACCEPT" if ok else "reject"
-        where = ""
-        if kind == "skillopt_step":
-            where = f" e{ev.get('epoch')}s{ev.get('step_in_epoch')}"
-        body = (f"{verdict}{where}  {ev.get('candidate')}  val={_num(ev.get('val'))}"
+        body = (f"{verdict}  {ev.get('candidate')}  val={_num(ev.get('val'))}"
                 f" (parent {_num(ev.get('parent_val'))})")
         if ev.get("reason"):
             body += f"  — {ev['reason']}"

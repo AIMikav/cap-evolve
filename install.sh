@@ -67,9 +67,13 @@ echo "  from: $SRC"
 echo "  to:   $DEST"
 
 shopt -s nullglob
-for comp in orchestrate phases capabilities algorithms optimizers; do
-  for skill in "$SRC/$comp"/*/; do
-    [[ -d "$skill" ]] || continue
+COMPONENTS=(orchestrate phases capabilities algorithms optimizers interventions)
+for comp in "${COMPONENTS[@]}"; do
+  # A skill dir is one that HOLDS a meta.yaml — found at any depth, because a component
+  # may group its skills in sub-directories (interventions/llm-proxies/spa). A fixed
+  # */ glob would copy the GROUP dir as if it were a skill and lose the skill itself.
+  while IFS= read -r meta; do
+    skill="$(dirname "$meta")/"
     name="$(basename "$skill")"
     target="$DEST/$name"
     rm -rf "$target"
@@ -79,14 +83,63 @@ for comp in orchestrate phases capabilities algorithms optimizers; do
       cp -R "$skill" "$target"
     fi
     echo "  + $comp/$name"
+  done < <(find "$SRC/$comp" -name meta.yaml -type f 2>/dev/null | sort)
+  # Component-level plain files, not just skill dirs. `optimizers/registry.yaml` is
+  # one, and without it every install is unable to run an optimizer at all — the
+  # directory-only glob above silently dropped it. Copy the whole class, keeping the
+  # component dir so run-optimizer's parent-walk finds `optimizers/registry.yaml`.
+  for f in "$SRC/$comp"/*; do
+    [[ -f "$f" ]] || continue
+    mkdir -p "$DEST/$comp"
+    if [[ "$LINK" -eq 1 ]]; then
+      ln -sfn "$f" "$DEST/$comp/$(basename "$f")"
+    else
+      cp "$f" "$DEST/$comp/"
+    fi
+    echo "  + $comp/$(basename "$f")"
   done
 done
 
 # (Re)build the manifest for both the repo (component layout) and the installed
 # tree (flat layout). build_manifest handles either, so `cap-evolve run` works whether
 # it points at the repo skills or the installed dir.
-python3 "$SRC/_registry/build_manifest.py" "$SRC" || true
-python3 "$SRC/_registry/build_manifest.py" "$DEST" || true
+python3 "$SRC/_registry/build_manifest.py" "$SRC"
+python3 "$SRC/_registry/build_manifest.py" "$DEST"
+
+# Verify the install before claiming success. An installer that exits 0 on a broken
+# install is worse than one that fails: CI and users both believe it, and the damage
+# only surfaces later as an optimizer that quietly keeps the seed and reports 0.0.
+missing=()
+for comp in "${COMPONENTS[@]}"; do
+  # Same discovery rule as the copy loop above: a skill is a dir that HOLDS a
+  # meta.yaml, at any depth. A fixed */ glob made this verify step expect the GROUP
+  # dir (interventions/llm-proxies) to be an installed skill, so a correct install
+  # failed on a file that was never supposed to exist.
+  while IFS= read -r meta; do
+    name="$(basename "$(dirname "$meta")")"
+    [[ -f "$DEST/$name/SKILL.md" ]] || missing+=("$name/SKILL.md")
+  done < <(find "$SRC/$comp" -name meta.yaml -type f 2>/dev/null | sort)
+  for f in "$SRC/$comp"/*; do
+    [[ -f "$f" ]] || continue
+    [[ -e "$DEST/$comp/$(basename "$f")" ]] || missing+=("$comp/$(basename "$f")")
+  done
+done
+[[ -f "$DEST/_registry/manifest.json" ]] || missing+=("_registry/manifest.json")
+
+if ((${#missing[@]})); then
+  {
+    echo
+    echo "cap-evolve: INSTALL FAILED — $DEST is not usable."
+    echo "Missing from the installed tree:"
+    printf '  - %s\n' "${missing[@]}"
+    echo
+    echo "Fix it by reinstalling from a complete checkout:"
+    echo "  cd $REPO_DIR && git status --short && ./install.sh --dest $DEST"
+    echo "If it still fails, install in dev mode instead:"
+    echo "  cd $REPO_DIR && ./install.sh --link --dest $DEST"
+  } >&2
+  exit 1
+fi
 
 cat <<EOF
 

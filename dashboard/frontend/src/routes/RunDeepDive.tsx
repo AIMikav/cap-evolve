@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft } from 'lucide-react'
@@ -8,36 +8,92 @@ import { AppShell } from '../components/AppShell'
 import { Card } from '../components/ui/Card'
 import { Skeleton } from '../components/ui/Skeleton'
 import { Tabs, type TabDef } from '../components/ui/Tabs'
-import { StatusBadge } from '../components/StatusBadge'
+import { RunHeader } from '../components/RunHeader'
 import { KpiStrip } from '../components/KpiStrip'
 import { BestCurveChart } from '../components/BestCurveChart'
-import { LineageTree } from '../components/LineageTree'
+import { CandidatesPanel } from '../components/CandidatesPanel'
 import { PhasesTimeline } from '../components/PhasesTimeline'
 import { Trajectories } from '../components/Trajectories'
 import { IterationsDiff } from '../components/IterationsDiff'
-import { MemoryPanel } from '../components/MemoryPanel'
-import { Insights } from '../components/Insights'
-import { CostPanel } from '../components/CostPanel'
+import { MemoryPanel, NarrativePanel } from '../components/MemoryPanel'
+import { ConfigPanel } from '../components/ConfigPanel'
+import { BudgetPanel, PerIterationCostTime } from '../components/CostPanel'
+import { CostLedger } from '../components/CostLedger'
+import { GatePanel } from '../components/GatePanel'
+import { TaskMatrix } from '../components/TaskMatrix'
+import { LogStream } from '../components/LogStream'
+import {
+  EvographPanel,
+  GepaPanel,
+  RoundsTimeline,
+  SkillOptPanel,
+} from '../components/AlgoPanels'
 import { FileTree } from '../components/FileTree'
+import { ProcessPanel } from '../components/ProcessPanel'
 import { GitDiff } from '../components/GitDiff'
-import type { RunStatus } from '../lib/types'
+import type { RunCapabilities, RunDetail } from '../lib/types'
 
-const TABS: TabDef[] = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'cost', label: 'Cost' },
-  { id: 'phases', label: 'Phases' },
-  { id: 'lineage', label: 'Lineage' },
-  { id: 'trajectories', label: 'Trajectories' },
-  { id: 'iterations', label: 'Iterations' },
-  { id: 'git', label: 'Git diffs' },
-  { id: 'memory', label: 'Memory' },
-  { id: 'files', label: 'Files' },
-  { id: 'insights', label: 'Insights' },
-]
+/**
+ * A run whose summary predates the `capabilities` map still has the DATA — infer from it.
+ *
+ * `capabilities` is the backend's answer to "which panels does this run have real data
+ * for". An export written before that field existed answers nothing, and the UI then hid
+ * the per-task heatmap and the diff tab on a run that carries per-task scores on every
+ * node and a full git log. Absent still means omitted; this only asks the payload the
+ * same question the backend would have. Trajectories are NOT inferred — rollouts live
+ * behind a separate endpoint the UI cannot probe from here.
+ */
+function inferCapabilities(detail: RunDetail | undefined): RunCapabilities {
+  const s = detail?.summary
+  return {
+    per_task: (detail?.graph.nodes ?? []).some((n) => n.per_task && Object.keys(n.per_task).length),
+    diffs: !!s?.git_log?.length,
+  } as RunCapabilities
+}
+
+/**
+ * Tabs are built from what the run ACTUALLY RECORDED, not from which algorithm it is.
+ *
+ * The first block is true of every run — status, progress, candidates, gate decisions,
+ * per-task outcomes, cost, logs, diffs, artifacts — and renders identically for
+ * hill-climb, gepa, skillopt, evograph and agent-optimize. The second block is
+ * per-algorithm and appears only when the corresponding capability is present, so a
+ * missing signal means a missing tab, never an empty or fabricated one.
+ */
+export function buildTabs(caps: RunCapabilities | undefined, detail?: RunDetail): TabDef[] {
+  const c = caps ?? inferCapabilities(detail)
+  const tabs: TabDef[] = [
+    { id: 'overview', label: 'Overview' },
+    { id: 'candidates', label: 'Candidates' },
+    { id: 'gate', label: 'Gate' },
+  ]
+  if (c.per_task) tabs.push({ id: 'tasks', label: 'Tasks' })
+  tabs.push({ id: 'cost', label: 'Cost' })
+  tabs.push({ id: 'logs', label: 'Logs' })
+
+  // Per-algorithm additions, behind a capability check. Rounds and screens are ONE
+  // tab: a round's screen(s), full-val gate, control-relative verdict and final
+  // decision are one decision trail, not two views cross-linked by candidate id.
+  if (c.freeform || c.screens) tabs.push({ id: 'rounds', label: 'Rounds' })
+  if (c.gepa || c.minibatch) tabs.push({ id: 'gepa', label: 'GEPA' })
+  if (c.skillopt || c.epochs) tabs.push({ id: 'skillopt', label: 'SkillOpt' })
+  if (c.evograph) tabs.push({ id: 'evograph', label: 'Weakness graph' })
+  if (c.process_html) tabs.push({ id: 'process', label: 'Process' })
+
+  if (c.diffs) tabs.push({ id: 'diffs', label: 'Diffs' })
+  if (c.trajectories) tabs.push({ id: 'trajectories', label: 'Trajectories' })
+  tabs.push({ id: 'memory', label: 'Memory' })
+  if (detail?.summary.config) tabs.push({ id: 'config', label: 'Config' })
+  tabs.push({ id: 'files', label: 'Files' })
+  return tabs
+}
 
 export function RunDeepDive() {
   const { id } = useParams<{ id: string }>()
   const queryClient = useQueryClient()
+  // Shared with the Tasks tab so it can filter to whichever candidate the Candidates tab
+  // has selected, instead of always showing the full task universe.
+  const [selectedCandidate, setSelectedCandidate] = useState<string | null>(null)
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['run', id],
@@ -45,25 +101,11 @@ export function RunDeepDive() {
     enabled: !!id,
     // A live-view run whose first snapshot hasn't landed yet 404s, not fails: settle
     // into isError immediately (no retry backoff) so the friendly message below shows
-    // right away, then let refetchInterval poll every 10s until the poller's first
-    // push lands and the fetch succeeds.
+    // right away, then poll every 10s until the first push lands.
     retry: (failureCount, err) => (err instanceof LivePendingError ? false : failureCount < 3),
     refetchInterval: (query) => (query.state.error instanceof LivePendingError ? 10_000 : false),
   })
   const isLivePending = error instanceof LivePendingError
-
-  // Optional algorithm-shipped custom view (e.g. evo-graph's weakness graph),
-  // mounted as an extra iframe tab when the run declares one. Absent -> no tab.
-  const { data: customView } = useQuery({
-    queryKey: ['custom-view', id],
-    queryFn: ({ signal }) => api.customView(id!, signal),
-    enabled: !!id,
-    retry: false,
-  })
-  const customUrl = customView?.url
-  const tabs: TabDef[] = customUrl
-    ? [...TABS, { id: 'custom', label: customView?.title || 'Custom view' }]
-    : TABS
 
   // SSE: on each live event, debounce-refetch the authoritative reduced run.
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -72,38 +114,28 @@ export function RunDeepDive() {
     timer.current = setTimeout(() => {
       queryClient.invalidateQueries({ queryKey: ['run', id] })
       queryClient.invalidateQueries({ queryKey: ['runs'] })
-      // A run can declare (or update) its custom view mid-flight — refetch so the
-      // extra tab appears/updates live rather than only after a full reload.
-      queryClient.invalidateQueries({ queryKey: ['custom-view', id] })
     }, 400)
   }, [id, queryClient])
 
   const stream = useRunStream(id, onActivity)
-  const liveStatus: RunStatus =
-    stream.status === 'live' ? 'live' : stream.status === 'idle' || stream.status === 'done' ? 'done' : 'live'
+  const summary = data?.summary
+  const tabs = buildTabs(summary?.capabilities, data)
 
   return (
-    <AppShell live={stream.status === 'live'}>
-      <div className="mx-auto max-w-6xl">
-        <Link to="/" className="mb-3 inline-flex items-center gap-1.5 text-sm text-muted hover:text-foreground">
+    <AppShell live={summary?.status === 'running'}>
+      <div className="mx-auto max-w-[1240px]">
+        <Link
+          to="/"
+          className="mb-3 inline-flex items-center gap-1.5 text-sm text-muted hover:text-foreground"
+        >
           <ArrowLeft size={15} aria-hidden /> All runs
         </Link>
 
-        <div className="mb-5 flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight">{id}</h1>
-          {data && <StatusBadge status={data.summary.test_reward != null ? 'done' : liveStatus} />}
-          {data?.summary.algorithm && (
-            <span className="rounded bg-surface-2 px-2 py-0.5 text-xs text-muted">{data.summary.algorithm}</span>
-          )}
-          {stream.status === 'live' && (
-            <span className="tnum ml-auto text-xs text-muted">{stream.count} live events</span>
-          )}
-        </div>
-
         {isLoading && (
           <div className="grid gap-3">
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-              {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton className="h-9 w-64" />
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
+              {Array.from({ length: 12 }).map((_, i) => (
                 <Skeleton key={i} className="h-16" />
               ))}
             </div>
@@ -112,85 +144,136 @@ export function RunDeepDive() {
         )}
 
         {isError && isLivePending && (
-          <Card className="border-accent/40">
+          <Card className="border-primary/40">
             <div className="p-4 text-sm text-muted">
-              Hold on — this run just started. Live data will show up here in a few minutes,
-              once the first snapshot is exported.
+              This run just started. Its first snapshot has not been exported yet — this
+              page polls every 10 seconds and will fill in on its own.
             </div>
           </Card>
         )}
 
         {isError && !isLivePending && (
           <Card className="border-rejected/40">
-            <div className="p-4 text-sm text-rejected">Couldn’t load run: {(error as Error)?.message}</div>
+            <div className="p-4 text-sm text-rejected">
+              Couldn’t load run: {(error as Error)?.message}
+            </div>
           </Card>
         )}
 
-        {data && (
+        {data && summary && (
           <div className="space-y-5">
-            <KpiStrip summary={data.summary} />
+            <RunHeader
+              runId={id!}
+              summary={summary}
+              liveEvents={stream.status === 'live' ? stream.count : 0}
+            />
+            <KpiStrip summary={summary} />
             <Tabs tabs={tabs}>
-              {(active) =>
-                active === 'overview' ? (
-                  <BestCurveChart nodes={data.graph.nodes} />
-                ) : active === 'cost' ? (
-                  <CostPanel summary={data.summary} />
-                ) : active === 'phases' ? (
-                  <PhasesTimeline detail={data} />
-                ) : active === 'lineage' ? (
-                  <LineageTree graph={data.graph} />
-                ) : active === 'trajectories' ? (
-                  <Trajectories runId={id!} />
-                ) : active === 'iterations' ? (
-                  <IterationsDiff runId={id!} graph={data.graph} />
-                ) : active === 'git' ? (
-                  <GitDiff runId={id!} />
-                ) : active === 'memory' ? (
-                  <MemoryPanel runId={id!} graph={data.graph} />
-                ) : active === 'files' ? (
-                  <FileTree runId={id!} />
-                ) : active === 'insights' ? (
-                  <Insights runId={id!} detail={data} />
-                ) : active === 'custom' && customUrl ? (
-                  <div className="flex flex-col gap-2">
-                    <div className="flex items-center justify-end">
-                      <a
-                        href={customUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-bg hover:text-fg"
-                        title={`Open ${customView?.title || 'this view'} full-screen in a new tab`}
-                      >
-                        Open full view in new window
-                        <span aria-hidden="true">↗</span>
-                      </a>
-                    </div>
-                    <iframe
-                      src={customUrl}
-                      title={customView?.title || 'Custom view'}
-                      // The embedded page is data-driven (declared by the run dir), so
-                      // sandbox it: allow scripts, its own-origin storage, and forms,
-                      // but deny top-level navigation and popups. NOTE: allow-scripts +
-                      // allow-same-origin only sandboxes while `customUrl` is a *different*
-                      // origin than this dashboard (it is today — a separate localhost
-                      // port). If a run ever points this at the dashboard's own origin,
-                      // the frame could remove its own sandbox; keep custom views cross-origin.
-                      sandbox="allow-scripts allow-same-origin allow-forms"
-                      referrerPolicy="no-referrer"
-                      loading="lazy"
-                      className="h-[80vh] w-full rounded-lg border border-border bg-surface"
-                    />
-                  </div>
-                ) : (
-                  <Card>
-                    <div className="p-8 text-center text-sm text-muted">Unknown view.</div>
-                  </Card>
-                )
-              }
+              {(active) => (
+                <TabBody
+                  active={active}
+                  data={data}
+                  runId={id!}
+                  selectedCandidate={selectedCandidate}
+                  onSelectCandidate={setSelectedCandidate}
+                />
+              )}
             </Tabs>
           </div>
         )}
       </div>
     </AppShell>
   )
+}
+
+function TabBody({
+  active,
+  data,
+  runId,
+  selectedCandidate,
+  onSelectCandidate,
+}: {
+  active: string
+  data: RunDetail
+  runId: string
+  selectedCandidate: string | null
+  onSelectCandidate: (id: string) => void
+}) {
+  const s = data.summary
+  const extra = s.algo_extra ?? {}
+  switch (active) {
+    case 'overview':
+      return (
+        <div className="space-y-5">
+          <BestCurveChart nodes={data.graph.nodes} />
+          <PhasesTimeline detail={data} />
+        </div>
+      )
+    case 'candidates':
+      return (
+        <CandidatesPanel
+          graph={data.graph}
+          summary={s}
+          selectedId={selectedCandidate}
+          onSelectId={onSelectCandidate}
+        />
+      )
+    case 'gate':
+      return <GatePanel summary={s} nodes={data.graph.nodes} />
+    case 'tasks':
+      return (
+        <TaskMatrix
+          summary={s}
+          nodes={data.graph.nodes}
+          selectedId={selectedCandidate}
+          screens={extra.screens}
+        />
+      )
+    case 'cost':
+      // The ledger already accounts for every dollar by phase; CostPanel's by-role chart
+      // restated the ledger and was dropped. Its per-iteration table is the only place
+      // per-step optimizer-vs-runner LATENCY is visible (the ledger and BudgetPanel are
+      // cost/reward-oriented, not time-oriented), so it stays.
+      return (
+        <div className="space-y-5">
+          <CostLedger summary={s} />
+          <BudgetPanel summary={s} />
+          <PerIterationCostTime summary={s} />
+        </div>
+      )
+    case 'logs':
+      return <LogStream log={s.log ?? []} />
+    case 'rounds':
+      return <RoundsTimeline summary={s} nodes={data.graph.nodes} screens={extra.screens ?? []} />
+    case 'gepa':
+      return <GepaPanel extra={extra} nodes={data.graph.nodes} />
+    case 'skillopt':
+      return <SkillOptPanel extra={extra} nodes={data.graph.nodes} />
+    case 'evograph':
+      return <EvographPanel extra={extra} metered={s.cost?.metered !== false} />
+    case 'process':
+      return <ProcessPanel runId={runId} />
+    case 'diffs':
+      return <IterationsDiff runId={runId} graph={data.graph} />
+    case 'trajectories':
+      return <Trajectories runId={runId} />
+    case 'memory':
+      return (
+        <div className="space-y-5">
+          <NarrativePanel summary={s} />
+          <MemoryPanel runId={runId} graph={data.graph} />
+          <GitDiff runId={runId} />
+        </div>
+      )
+    case 'config':
+      return <ConfigPanel summary={s} />
+    case 'files':
+      return <FileTree runId={runId} />
+    default:
+      return (
+        <Card>
+          <div className="p-8 text-center text-sm text-muted">Unknown view.</div>
+        </Card>
+      )
+  }
 }

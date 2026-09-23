@@ -24,14 +24,17 @@
   <!-- dark-first: default dark, honor an explicit saved choice. Applied pre-paint (no FOUC) + enables JS-gated reveal -->
   <script>(function(){try{document.documentElement.setAttribute('data-theme',localStorage.getItem('capevolve-theme')||'dark');}catch(e){document.documentElement.setAttribute('data-theme','dark');}document.documentElement.classList.add('js');})();</script>
   <!-- bump the ?v=... string on every style.css edit so browsers ignore their cached copy -->
-  <link rel="stylesheet" href="style.css?v=20260724b">
+  <link rel="stylesheet" href="style.css?v=20260908a">
 </head>
 <body>
 
 <nav class="nav">
   <div class="nav-inner">
     <a class="nav-brand" href="./"><img src="assets/logo-300.png" alt="" class="nav-brand-logo" aria-hidden="true"><span class="wordmark">cap<span class="wordmark-dot">·</span>evolve</span></a>
-    <div class="nav-links">
+    <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false" aria-controls="nav-links">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>
+    </button>
+    <div class="nav-links" id="nav-links">
       <a href="getting-started.html">Get started</a>
       <a href="run-end-to-end.html">Run end-to-end</a>
       <a href="results.html">Results</a>
@@ -82,7 +85,7 @@
       <span class="badge">beta (0.x)</span>
       <span class="badge">python 3.10+</span>
       <span class="badge">Apache-2.0</span>
-      <span class="badge badge-accent">20 skills · 5 algorithms (3 run-executable + 2 agent-mode)</span>
+      <span class="badge badge-accent">22 skills · 5 algorithms (3 run-executable + 2 agent-mode)</span>
       <span class="badge badge-amber">14 optimizer backends</span>
     </div>
     <div class="hero-affil">
@@ -119,6 +122,25 @@ bash examples/toy_calc/run.sh</code></pre>
       best <span class="num">71.2%</span>. The curve only steps <em>up</em>: the paired
       significance gate refused every change it couldn't tell from noise.
     </div>
+  </div>
+
+  <!-- ─────────────────────────── demo video ─────────────────────────── -->
+  <!-- preload="metadata", never autoplay: this is a 15 MB file and the poster carries the
+       frame that matters. cap-evolve-demo.mp4 lives in docs/assets/demo/ in the repo and is
+       copied into site/assets/demo/ by .github/workflows/pages.yml, so it is committed once
+       rather than twice. No <track>: the narration carries the film and subtitles were
+       removed deliberately. -->
+  <div class="hero-screenshot reveal" id="demo-video">
+    <video
+      controls
+      preload="metadata"
+      playsinline
+      poster="assets/demo-poster.jpg"
+      style="width:100%;height:auto;display:block">
+      <source src="assets/demo/cap-evolve-demo.mp4" type="video/mp4">
+      Your browser can’t play embedded video —
+      <a href="assets/demo/cap-evolve-demo.mp4">download the 85-second demo (15 MB)</a>.
+    </video>
   </div>
 
   <!-- ─────────────────────────── how it works ─────────────────────────── -->
@@ -181,12 +203,12 @@ bash examples/toy_calc/run.sh</code></pre>
     </p>
     <div class="shot-grid">
       <figure class="shot">
-        <img src="assets/dash-lineage.png" alt="Lineage tree: seed candidate, five accepted candidates on the best path, and the rejected branches, with the paired-gate math for the champion.">
-        <figcaption class="shot-cap">Lineage — accepted (green) vs rejected (red), and the paired-gate math behind the champion.</figcaption>
+        <img src="assets/dash-lineage.png" alt="Candidates tab: the lineage tree — seed, five accepted candidates on the best path, the rejected branches, and the paired-gate math for the champion.">
+        <figcaption class="shot-cap">Candidates — accepted (green) vs rejected (red), and the paired-gate math behind the champion.</figcaption>
       </figure>
       <figure class="shot">
-        <img src="assets/dash-gitdiffs.png" alt="Git diffs view: one commit per iteration and the actual JOURNAL.md diff the optimizer wrote.">
-        <figcaption class="shot-cap">Git diffs — one commit per iteration; the optimizer's real edits and its institutional memory.</figcaption>
+        <img src="assets/dash-gitdiffs.png" alt="Diffs tab: one commit per iteration and the actual diff the optimizer wrote.">
+        <figcaption class="shot-cap">Diffs — one commit per iteration; the optimizer's real edits and its institutional memory.</figcaption>
       </figure>
     </div>
   </section>
@@ -340,6 +362,6 @@ bash examples/toy_calc/run.sh</code></pre>
   </div>
 </footer>
 
-<script src="js/site.js?v=20260724" defer></script>
+<script src="js/site.js?v=20260822" defer></script>
 </body>
 </html>

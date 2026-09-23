@@ -169,21 +169,27 @@ def _slow_update_instructions(epoch: int, categories: dict[str, list[dict]]) -> 
 def _categorize(prev_pt: list, cur_pt: list) -> dict[str, list[dict]]:
     """Categorize each task improved / regressed / persistent_fail / stable_success
     from two per-task reward maps (carrying the CURRENT feedback)."""
-    prev = {pt.get("task_id"): float(pt.get("reward", 0.0) or 0.0) for pt in (prev_pt or [])}
+    prev = {pt.get("task_id"): pt for pt in (prev_pt or [])}
     cur = {pt.get("task_id"): pt for pt in (cur_pt or [])}
     cats: dict[str, list[dict]] = {"improved": [], "regressed": [],
                                    "persistent_fail": [], "stable_success": []}
-    eps = 1e-9
     for tid, pt in cur.items():
         if tid not in prev:
             continue
-        before = prev[tid]
+        before = float(prev[tid].get("reward", 0.0) or 0.0)
         after = float(pt.get("reward", 0.0) or 0.0)
+        # ``improved`` feeds the within-epoch buffer the optimizer prompt reads, so it must
+        # clear 2*SE of its own per-task measurement (``harness.move_is_resolved`` — the ONE
+        # shared bar). At 10 trials a 0.9 -> 1.0 move is one flipped rollout, and booking that
+        # as an improvement teaches the next mini-batch to keep an edit that did nothing.
+        resolved = harness.move_is_resolved(before, after,
+                                            prev[tid].get("stderr") or 0.0,
+                                            pt.get("stderr") or 0.0)
         passed_before = before >= 1.0
         passed_after = after >= 1.0
-        if after > before + eps:
+        if after > before and resolved:
             cats["improved"].append(pt)
-        if passed_before and not passed_after:
+        if passed_before and not passed_after and resolved:
             cats["regressed"].append(pt)
         elif not passed_before and not passed_after:
             cats["persistent_fail"].append(pt)
@@ -213,6 +219,8 @@ def skillopt_loop(
     slow_update_sample: int = 20,
     algorithm: str = "skillopt",
     store=None,
+    protected_patterns=None,
+    ctx: harness.OptimizerContext | None = None,
 ) -> dict:
     """Run the SkillOpt epochs × mini-batches climb.
 
@@ -222,8 +230,14 @@ def skillopt_loop(
 
     Returns a result dict shaped like ``hill_climb_loop``'s, plus ``epochs`` /
     ``edit_budget_schedule`` / ``slow_updates`` / per-epoch ``epoch_stats``.
+
+    ``ctx`` is the shared ``harness.OptimizerContext`` — the capability skills, the
+    diagnose method, the sources, the optimizer features reference and the prompt
+    template. It is the SAME object hill-climb and gepa get; skillopt owns only the
+    schedule/buffer/slow-update blocks it appends.
     """
     gate_kwargs = dict(gate_kwargs or {})
+    ctx = ctx or harness.OptimizerContext()
     rejected, history, store = harness._init_memory_store(run_dir, store)
 
     train_ids = list(run_dir.read_splits().train)
@@ -287,17 +301,27 @@ def skillopt_loop(
 
             label = f"epoch {epoch}/{epochs} step {s + 1}/{steps_per_epoch} "
             label += f"(mini-batch of {len(minibatch_ids)} train tasks, L={L})"
-            instructions = harness._focus_instructions(current_val, minibatch_ids, label)
-            instructions += "\n" + _buffer_block(L, step_buffer, rejected_this_epoch)
-
             cid = f"so_e{epoch:02d}s{s + 1:02d}"
             parent_dir = run_dir.candidate_dir(run_dir.best_id)  # single lineage: always best
+            instructions = ctx.instructions(current_val, minibatch_ids, label,
+                                            algorithm=algorithm, parent_dir=parent_dir,
+                                            extra=_buffer_block(L, step_buffer,
+                                                                rejected_this_epoch))
             step = harness.run_step(
                 adapter, run_dir=run_dir, parent_dir=parent_dir,
                 optimizer=optimizer, instructions=instructions, current_val=current_val,
                 n_trials=n_trials, gate_kwargs=gate_kwargs, candidate_id=cid,
                 no_regression=no_regression, rejected=rejected, history=history, store=store,
+                ctx=ctx, protected_patterns=protected_patterns,
             )
+            if step.get("candidate_val") is None:
+                # Indecisive (protected-path tamper): no measurement exists, so it must
+                # not enter the failure/rejected buffers — those teach the optimizer
+                # about edits that were actually evaluated.
+                steps.append(step)
+                epoch_steps += 1
+                global_step += 1
+                continue
             cand_val = SplitResult.from_dict(step["candidate_val"])
             accepted = bool(step["accepted"])
 
@@ -349,11 +373,12 @@ def skillopt_loop(
                 epoch=epoch, sample=slow_update_sample, edit_budget=schedule[-1] if schedule else edit_budget,
                 n_trials=n_trials, gate_kwargs=gate_kwargs, no_regression=no_regression,
                 rejected=rejected, history=history, store=store,
+                protected_patterns=protected_patterns, ctx=ctx,
             )
             if slow_rec is not None:
                 slow_updates.append(slow_rec)
                 steps.append(slow_rec["step"])
-                if slow_rec["step"]["accepted"]:
+                if slow_rec["step"]["accepted"] and slow_rec["step"].get("candidate_val"):
                     current_val = SplitResult.from_dict(slow_rec["step"]["candidate_val"])
                     epoch_accepts += 1
 
@@ -422,7 +447,8 @@ def _run_slow_update(
     adapter, *, run_dir: RunDir, optimizer, current_val: SplitResult,
     prev_epoch_skill: SplitResult, prev_epoch_best_id, epoch: int, sample: int,
     edit_budget: int, n_trials: int, gate_kwargs: dict, no_regression: bool,
-    rejected, history, store,
+    rejected, history, store, protected_patterns=None,
+    ctx: harness.OptimizerContext | None = None,
 ) -> dict | None:
     """Re-evaluate the epoch-start skill vs current best on a small TRAIN subset,
     categorize, and run ONE extra gated step. Counted in budget; sample is small
@@ -461,20 +487,29 @@ def _run_slow_update(
                       stable_success=len(categories["stable_success"]),
                       improved=len(categories["improved"]))
 
-    instructions = _slow_update_instructions(epoch, categories)
-    instructions += "\n" + _buffer_block(edit_budget, [], [])  # carry the consolidating L budget
-
+    ctx = ctx or harness.OptimizerContext()
     cid = f"so_e{epoch:02d}_slow"
+    parent_dir = run_dir.candidate_dir(run_dir.best_id)
+    # Same shared read-context as a normal step; the longitudinal block is this step's
+    # own addition (+ the consolidating L budget).
+    extra = (_slow_update_instructions(epoch, categories) + "\n"
+             + _buffer_block(edit_budget, [], []))
+    instructions = ctx.instructions(current_val, sample_ids, f"epoch {epoch} slow/meta update",
+                                   algorithm="skillopt", parent_dir=parent_dir, extra=extra)
     step = harness.run_step(
-        adapter, run_dir=run_dir, parent_dir=run_dir.candidate_dir(run_dir.best_id),
+        adapter, run_dir=run_dir, parent_dir=parent_dir,
         optimizer=optimizer, instructions=instructions, current_val=current_val,
         n_trials=n_trials, gate_kwargs=gate_kwargs, candidate_id=cid,
         no_regression=no_regression, rejected=rejected, history=history, store=store,
+        ctx=ctx, protected_patterns=protected_patterns,
     )
     step["epoch"] = epoch
     step["step_in_epoch"] = "slow"
     step["edit_budget"] = edit_budget
-    action = "accepted" if step["accepted"] else "rejected"
+    if step.get("candidate_val") is None:
+        action = "indecisive"   # never measured (tamper) — not a verdict on the edit
+    else:
+        action = "accepted" if step["accepted"] else "rejected"
     run_dir.log_event("skillopt_slow_update", epoch=epoch, candidate=cid,
                       accept=step["accepted"], action=action,
                       regressed=len(categories["regressed"]))

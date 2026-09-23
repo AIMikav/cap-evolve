@@ -31,6 +31,24 @@ def _find_script(workdir: Path) -> Path | None:
     return None
 
 
+def _append_mock_journal(workdir: Path) -> None:
+    """Append a minimal handover entry to JOURNAL.md, if the harness seeded one.
+
+    The harness now escalates (logs + visibly flags) an iteration whose optimizer wrote
+    an empty JOURNAL.md handover (see ``harness._reconcile_journal``). The mock optimizer
+    stands in for a real one in tests, so it writes a (trivial but non-empty) handover too
+    instead of tripping that escalation.
+    """
+    journal = workdir / "JOURNAL.md"
+    if not journal.exists():
+        return
+    text = journal.read_text(encoding="utf-8")
+    if "cap-evolve:journal-append-below" not in text:
+        return
+    text += "\n## Iteration (mock) — applied mock_script.json edits\n- deterministic mock edit, see mock_script.json\n"
+    journal.write_text(text, encoding="utf-8")
+
+
 def apply_edits(workdir: Path, edits: list[dict]) -> list[dict]:
     applied = []
     for e in edits:
@@ -65,11 +83,16 @@ def main(argv=None) -> int:
     workdir = Path(args.workdir)
     script = _find_script(workdir)
     if script is None:
-        print(json.dumps({"optimizer": "mock", "applied": [],
-                          "note": "no mock_script.json found; no edits made"}))
+        # The note goes to STDERR: stdout is the machine-readable payload, and a
+        # diagnostic buried in it is dropped by every layer that only parses cost.
+        note = "no mock_script.json found; no edits made"
+        print(f"mock optimizer: {note} (looked under {workdir} and $CAPEVOLVE_MOCK_SCRIPT)",
+              file=sys.stderr, flush=True)
+        print(json.dumps({"optimizer": "mock", "applied": [], "note": note}))
         return 0
     edits = json.loads(script.read_text(encoding="utf-8")).get("edits", [])
     applied = apply_edits(workdir, edits)
+    _append_mock_journal(workdir)
     print(json.dumps({"optimizer": "mock", "script": str(script), "applied": applied}))
     return 0
 

@@ -1,7 +1,8 @@
 # Benchmark regression suite
 
 Triggerable, real-model optimization regression over **tau2 · swebench · skillsbench ·
-spreadsheetbench**,
+spreadsheetbench · rfe-creator**, plus the two tau2-airline **delivery arms**
+(**tau2_custom_direct · tau2_custom_spa**),
 built on the [adapter templates](../../templates/adapters/). Each benchmark runs a curated
 set of **representative** tasks (calibrated for headroom — nonzero but not saturated at
 baseline) and reports **reward / latency / cost** base→opt from a single run, plus the
@@ -26,6 +27,18 @@ not a leaderboard.
   nothing is pre-frozen or reused across runs.
 - Results are uploaded as an artifact and posted as a sticky PR comment (metrics table +
   optimized-capability diff).
+
+> **Also in this tree, but not part of the CI suite: [`parsec`](parsec/README.md)**
+> (**local-only / internal-only**). Red Hat's LLM-agentic troubleshooting tool; tiers
+> `smoke` (5) · `pilot` (30 v1 real-trace tasks) · `v2` (10 authored tasks, one isolated
+> simulator each). `run_suite.sh` accepts it as a `<bench>`, so it runs the same code path
+> locally, but it is deliberately absent from `benchmarks.yml`'s `BENCHES` and from every
+> other dispatch list: neither its task trees (internal RH, not in the public
+> `rhpds/parsec`) nor its kaegis simulators (`github.ibm.com/kaegis/simulation-harness`)
+> exist outside IBM/RH, so a dispatched leg could only ever fail for infrastructure
+> reasons. Nothing but per-tier `tasks.json` metadata is committed — the datasets are
+> regenerated locally by `parsec/utils/`. See its README for the setup pipelines and the
+> reasoning.
 
 ## Layout
 
@@ -69,6 +82,35 @@ or drop `--ephemeral` in the script for a persistent runner). The runner package
 live under `~/.cache/capevolve-gh-runner/` (outside the repo). Confirm it appears under
 repo → Settings → Actions → Runners with the `ibm-vpc` label.
 
+## The two tau2-airline delivery arms
+
+`tau2_custom_direct` and `tau2_custom_spa` are one benchmark measured twice, not two
+benchmarks. Both run the **same** airline task ids with the **same** tools-only capability
+surface, sourced from [`examples/tau2_custom/`](../../examples/tau2_custom/);
+the only difference is how a candidate reaches the agent:
+
+| | `tau2_custom_direct` | `tau2_custom_spa` |
+|---|---|---|
+| delivery | the runner imports the candidate tools in its own process | the Skillberry **Store** serves the candidate skill and the **Proxy-Agent** uses it |
+| tau2 agent model | the gateway model itself | the `ibm/skillberry-local` sentinel, which routes through the proxy to that same model |
+| services started by the run | none | tau2 Environment Manager (`:8004`) + Store + Proxy-Agent, torn down on exit |
+| rollout concurrency | 10 | 4 |
+
+Pick them with **`benchmark: tau2-custom`** plus **`intervention: direct | spa`**, which maps
+straight onto the spec key of the same name. `intervention` is ignored by every other benchmark —
+they all run direct. Internally each arm stays its own leg (`tau2_custom_direct` /
+`tau2_custom_spa`) so it keeps its own tier task lists, history row and concurrency group, and
+`benchmark=all` sweeps both regardless of `intervention`.
+
+Their rewards are comparable **to each other**, and *not* to the plain `tau2` leg: that one
+also optimizes `policy.md` and installs the public `sierra-research/tau2-bench`, while the arms
+install `skillberry-ai/skillberry-benchmarks` at the pin their own `setup.sh` uses (a test
+asserts the two pins stay equal). The `spa` arm additionally needs that build's
+`airline_skillberry` domain, which the public checkout does not have.
+
+Cheapest way to exercise an arm: **Integration tests** → Run workflow → `bench` =
+`tau2_custom_spa`. One task, 1 iteration, 1 trial.
+
 ## Trigger the suite
 
 Runs come in two **tiers** (a first-class dimension in the workflow, same workflow + history page):
@@ -80,6 +122,9 @@ Runs come in two **tiers** (a first-class dimension in the workflow, same workfl
   separately from `smoke`'s 200-task sample via `SPREADSHEETBENCH_VARIANT=full_912` — see
   `ci/benchmarks/spreadsheetbench/fetch_data.sh`), matching the population SpreadsheetBench's
   self-reported leaderboard is computed over; `swebench` and `skillsbench` are not yet.
+  `rfe-creator/full/tasks.json` covers all 25 curated cases; a full run there costs real
+  money (~$235 for 3 iterations x 25 tasks x 3 trials, measured) — dispatch deliberately,
+  not routinely.
   A 912-task run is long — the `bench` job has a 1440min (`24h`) `timeout-minutes` and
   `full` defaults `SPREADSHEETBENCH_CONCURRENCY` to `8` (vs. smoke's `4`; override either
   via the env var / workflow input if the runner's Docker headroom can't take it — each
@@ -94,6 +139,14 @@ Runs come in two **tiers** (a first-class dimension in the workflow, same workfl
     runner is uid 1004, so the adapter widens the mode of the output dirs it creates; see
     `_make_container_writable` in the adapter. A `PermissionError` on `*_output.xlsx` in
     the traces means that fix regressed.
+
+  **`rfe-creator` runner prerequisites:**
+  - `ci_setup.sh` clones `opendatahub-io/rfe-creator` + `opendatahub-io/agent-eval-harness`
+    (public, unlicensed — see `ci/benchmarks/rfe-creator/utils/fetch_data.sh`) and installs
+    `agent-eval-harness` editable into the shared venv. Neither is vendored, so an air-gapped
+    runner needs its own mirror.
+  - Same gateway/entitlement preflight as every other bench (`ANTHROPIC_BASE_URL` /
+    `ANTHROPIC_AUTH_TOKEN`); no extra credentials (the eval runs `--dry-run`, no Jira).
 
 The tier surfaces everywhere: PR checks read **`<tier> / <bench>`** (e.g. `smoke / tau2`,
 `full / swebench`), the report header reads **`## <Tier> suite — <bench>`**, and the history page
@@ -112,18 +165,54 @@ has a **Type** column + filter.
   | `optimizer_usd_per_iter` | `0` (unlimited) | per-iteration $ cap on the optimizer — `0` disables Claude Code's native `--max-budget-usd` cap entirely; set e.g. `4.0` to bound it |
   | `optimizer_max_turns` | `80` | per-iteration turn cap on the optimizer |
   | `gate_k_se` | `1.0` | acceptance-gate strictness (accept iff Δ > k_se·SE) |
-  | `algorithm_focus` | `all` | hill-climb schedule: `all` \| `cyclic` \| `hardest-first` |
+  | `algorithm` | `hill-climb-all` | which optimization algorithm — see below |
 
   Overriding `agent_model` takes precedence over any per-task `agent` a curated `tasks.json`
   entry pins — `run_suite.sh` warns (doesn't fail) on a mismatch so you know it happened.
+
+#### The `algorithm` input
+
+One token names the algorithm and, for hill-climb, its focus schedule.
+
+  | value | what runs |
+  |---|---|
+  | `hill-climb-all` (default) | deterministic loop, whole train set each iteration |
+  | `hill-climb-cyclic` | deterministic loop, one task at a time |
+  | `hill-climb-hardest-first` | deterministic loop, lowest-scoring task first |
+  | `agent-optimize` | the fully-agentic loop (see below) |
+
+`agent-optimize` is not just a fourth schedule. It has no deterministic loop at all: the run
+switches to `orchestration_mode: agent`, where `cap-evolve run` does check + baseline, prints a
+handoff and returns. There being no conversational agent in CI, `run_suite.sh` then hands the
+loop to the algorithm's own headless host
+(`skills/algorithms/agent-optimize/scripts/host.py` — see
+[`docs/AGENT_ORCHESTRATION.md`](../../docs/AGENT_ORCHESTRATION.md)), which briefs a Claude Code
+process to run the rounds itself and guarantees the run ends sealed even if that process stops
+early.
+
+Two consequences worth knowing before you compare numbers:
+
+- **Its budget is a `stop_condition`, not a schedule.** `run_suite.sh` derives free-text prose
+  from the same dispatch inputs (`iterations` → max rounds, `optimizer_usd_per_iter` × rounds →
+  a whole-loop $ ceiling, `gate_k_se`/`trials` → the gate), so a given dispatch bounds both
+  algorithms comparably. The agent may still stop earlier on its own `spend.py` reading.
+- **`optimizer_max_turns` becomes a whole-loop cap.** The entire search is one agent process
+  rather than one call per iteration, so the host multiplies the per-iteration turn cap by the
+  round count.
+
+`runmeta.json` records the `algorithm`, so the history page never compares a hill-climb number
+against an agent-optimize one as though they were the same run type.
 - **On a PR — labels:**
-  - **`benchmark-smoke`** / **`benchmark-full`** → run all four benchmarks of that tier.
+  - **`benchmark-smoke`** / **`benchmark-full`** → run every benchmark of that tier, the two
+    delivery arms included.
   - **`benchmark-smoke-<bench>`** / **`benchmark-full-<bench>`** (`tau2` · `swebench` ·
-    `skillsbench` · `spreadsheetbench`) → run just that one (combine labels to run a subset).
+    `skillsbench` · `spreadsheetbench` · `rfe-creator` · `tau2_custom_direct` ·
+    `tau2_custom_spa`) → run just that one (combine labels to run a subset).
 
   (The tau2 pipeline regression is the **`integration-test`** label / **Integration tests**
   workflow — the same `run_suite.sh` path as above, scoped to a single-task `integration`
-  tier: `ci/benchmarks/tau2/integration/tasks.json`.)
+  tier: `ci/benchmarks/<bench>/integration/tasks.json`. The label always runs `tau2`; to run an
+  arm's integration tier, dispatch that workflow with `bench` set.)
 
 ### Populate the `full` tier
 
@@ -152,8 +241,8 @@ per **suite iteration** (baseline → each hill-climb step → finalize): `optim
 and `eval $`/time. **Latency** is wall-time and hardware-dependent (baseline and
 optimized are both measured on the same run's runner host; treat cross-host/cross-run
 comparisons as indicative only). **Cost/tokens** are hardware-independent, but the
-tau2/skillsbench runners do not surface usage (reads 0); swebench and spreadsheetbench
-(both litellm) do.
+tau2/skillsbench runners do not surface usage (reads 0); swebench, spreadsheetbench, and
+rfe-creator (all shell out to a real agent CLI) do.
 
 ## Adding / changing tasks
 

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Benchmark runs — cap-evolve</title>
-  <meta name="description" content="Every ci/benchmarks execution (tau2 · swebench · skillsbench), on PRs and manual runs — a sortable, filterable log of reward, eval/optimizer cost, and models, each measured against that run's own freshly-computed baseline.">
+  <meta name="description" content="Every ci/benchmarks execution (tau2 · swebench · skillsbench · rfe-creator), on PRs and manual runs — a sortable, filterable log of reward, eval/optimizer cost, and models, each measured against that run's own freshly-computed baseline.">
   <link rel="canonical" href="https://skillberry-ai.github.io/cap-evolve/benchmarks.html">
   <meta property="og:type" content="article">
   <meta property="og:site_name" content="cap-evolve">
@@ -24,18 +24,21 @@
   <!-- dark-first: default dark, honor an explicit saved choice. Applied pre-paint (no FOUC) + enables JS-gated reveal -->
   <script>(function(){try{document.documentElement.setAttribute('data-theme',localStorage.getItem('capevolve-theme')||'dark');}catch(e){document.documentElement.setAttribute('data-theme','dark');}document.documentElement.classList.add('js');})();</script>
   <!-- bump the ?v=... string on every style.css edit so browsers ignore their cached copy -->
-  <link rel="stylesheet" href="style.css?v=20260729c">
+  <link rel="stylesheet" href="style.css?v=20260908a">
 </head>
 <body>
 
 <nav class="nav">
   <div class="nav-inner">
     <a class="nav-brand" href="./"><img src="assets/logo-300.png" alt="" class="nav-brand-logo" aria-hidden="true"><span class="wordmark">cap<span class="wordmark-dot">·</span>evolve</span></a>
-    <div class="nav-links">
+    <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false" aria-controls="nav-links">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>
+    </button>
+    <div class="nav-links" id="nav-links">
       <a href="getting-started.html">Get started</a>
       <a href="run-end-to-end.html">Run end-to-end</a>
       <a href="results.html">Results</a>
-      <a href="benchmarks.html" class="active">Benchmarks</a>
+      <a href="benchmarks.html" class="active" aria-current="page">Benchmarks</a>
       <a href="architecture.html">Architecture</a>
       <a href="agent-orchestration.html">Agent mode</a>
       <a href="harbor.html">Harbor</a>
@@ -53,16 +56,23 @@
   <div class="reveal">
     <h1>Benchmark runs</h1>
     <p class="lead">
-      Every <code>ci/benchmarks</code> execution (tau2 · swebench · skillsbench), on PRs and manual
+      Every <code>ci/benchmarks</code> execution (tau2 · swebench · skillsbench · rfe-creator), on PRs and manual
       runs. Each row is one benchmark in one run, measured against that run's own
       freshly-computed baseline (all of a tier's tasks are optimized together, in one run —
-      nothing is pre-frozen or reused across runs); the <strong>Type</strong>
-      column marks the tier (<code>smoke</code> or <code>full</code>). Click a row to expand its
-      per-task reward and per-iteration cost/latency detail. <span id="updated" class="muted"></span>
+      nothing is pre-frozen or reused across runs); the <strong>Type</strong> column marks the
+      run size — <code>smoke</code> and <code>full</code> are the standing ones, plus any
+      ad-hoc tier a run declares — and <strong>Experiment</strong> marks which named study a
+      run belongs to, where applicable. The Benchmark/Type/Experiment filters are built from
+      the loaded data, and Type/Experiment list only the values that exist for the selected
+      benchmark. Click a row to expand its per-task reward and per-iteration cost/latency
+      detail. <span id="updated" class="muted"></span>
     </p>
     <p>
       See the hand-verified canonical numbers on the <a href="results.html">Results</a> page; this
       is the raw CI log. Failed/cancelled runs are shown too, so infra breakage is visible.
+      SkillsBench rows with a <strong>Report ↗</strong> link in the UI column drill down to a
+      rendered heatmap and (where it exists) per-task detail — start from the
+      <a href="skillsbench/index.html">SkillsBench experiments</a> hub.
     </p>
   </div>
 
@@ -89,10 +99,16 @@
       <input id="f-to" type="datetime-local">
     </label>
     <label>Benchmark
+      <!-- options derived from the loaded records by benchmarks.js -->
       <select id="f-bench"><option value="">all</option></select>
     </label>
     <label>Type
+      <!-- options derived by benchmarks.js, narrowed to the tiers present for the selected Benchmark -->
       <select id="f-tier"><option value="">all</option></select>
+    </label>
+    <label id="f-exp-wrap" hidden>Experiment
+      <!-- options derived by benchmarks.js; hidden entirely when the selected Benchmark has none -->
+      <select id="f-exp"><option value="">all</option></select>
     </label>
     <label>Source
       <select id="f-source"><option value="">all</option><option value="pr">PR</option><option value="manual">manual</option></select>
@@ -111,6 +127,8 @@
       <th data-k="source">Source</th>
       <th data-k="bench">Bench</th>
       <th data-k="tier">Type</th>
+      <th data-k="experiment">Experiment</th>
+      <th data-k="algorithm">Algorithm</th>
       <th data-k="iterations">Iters</th>
       <th data-k="trials">Trials</th>
       <th data-k="reward">Reward base→opt</th>
@@ -149,7 +167,7 @@
   </div>
 </footer>
 
-<script src="benchmarks.js?v=20260730d"></script>
-<script src="js/site.js?v=20260724" defer></script>
+<script src="benchmarks.js?v=20260908a"></script>
+<script src="js/site.js?v=20260822" defer></script>
 </body>
 </html>

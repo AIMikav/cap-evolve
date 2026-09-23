@@ -15,14 +15,32 @@ const FILL: Record<GraphNode['status'], string> = {
   seed: 'var(--seed)',
   accepted: 'var(--accepted)',
   rejected: 'var(--rejected)',
+  indecisive: 'var(--indecisive)',
   failed: 'var(--muted)',
+  // A screen never earns a real graph node (see TaskMatrix's synthetic column), so this
+  // is unreachable here — the map must stay exhaustive over NodeStatus regardless.
+  screened: 'var(--muted)',
 }
 
 /** Best-path-as-spine lineage: the winning chain reads as a flat amber line
- * across the top; off-spine candidates hang below with L-connectors. */
-export function LineageTree({ graph }: { graph: RunGraph }) {
+ * across the top; off-spine candidates hang below with L-connectors.
+ *
+ * Selection is controlled by the parent when `selectedId`/`onSelectId` are given, so the
+ * Tasks tab (a sibling of this panel, not a child) can react to the same click — falls
+ * back to local state so the panel still works standalone. */
+export function LineageTree({
+  graph,
+  selectedId,
+  onSelectId,
+}: {
+  graph: RunGraph
+  selectedId?: string | null
+  onSelectId?: (id: string) => void
+}) {
   const layout = layoutLineage(graph)
-  const [selected, setSelected] = useState<string | null>(graph.best_id)
+  const [localSelected, setLocalSelected] = useState<string | null>(graph.best_id)
+  const selected = selectedId !== undefined ? selectedId : localSelected
+  const setSelected = onSelectId ?? setLocalSelected
   const reduce = prefersReducedMotion()
 
   if (layout.nodes.length === 0) {
@@ -116,6 +134,13 @@ export function LineageTree({ graph }: { graph: RunGraph }) {
             )}
           </div>
           {sel.reason && <div className="mt-1 text-xs text-muted">{sel.reason}</div>}
+          {(sel.subset || sel.clusterIds) && (
+            <div className="mt-1 text-xs text-muted">
+              {sel.subset && `screened on ${sel.subset.task_ids.length} task(s)${sel.subset.tier != null ? ` (tier ${sel.subset.tier})` : ''}`}
+              {sel.subset && sel.clusterIds && ' · '}
+              {sel.clusterIds && `clusters: ${sel.clusterIds.join(', ')}`}
+            </div>
+          )}
         </div>
       )}
     </Card>

@@ -67,6 +67,10 @@ pip install ./core           # or: export CAPEVOLVE_CORE="$PWD/core"
 Destination precedence: `$CAPEVOLVE_SKILLS_DIR` > `--host` mapping > `./.claude/skills` >
 `~/.claude/skills` > `~/.capevolve/skills`.
 
+`install.sh` verifies the installed tree before it reports success, and **exits non-zero**
+naming what is missing if anything did not land — so `./install.sh && pip install ./core`
+stops instead of leaving you with an install that cannot run an optimizer.
+
 ### C. Manual adapter + CLI (any language/agent)
 
 ```bash
@@ -83,8 +87,9 @@ See [`OPTIMIZE_YOUR_OWN.md`](OPTIMIZE_YOUR_OWN.md) and [`ADAPTER_CONTRACT.md`](A
 The toy example needs none. Optimizing a real agent needs, in a repo-root `.env`:
 - a **coding-agent CLI** to act as the optimizer (e.g. `claude`, `codex`, `gemini`) with
   its credentials (e.g. a logged-in Claude Code session or `ANTHROPIC_API_KEY`);
-- your **runner** model credentials (e.g. `OPENAI_API_KEY`, `RITS_API_KEY` + `RITS_API_URL`,
-  `WATSONX_*`, or an `ANTHROPIC_BASE_URL` gateway).
+- your **runner** model credentials (e.g. `OPENAI_BASE_URL` + `OPENAI_API_KEY`,
+  `WATSONX_*`, or `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` for an
+  Anthropic-compatible gateway). Which of these an example needs depends on its adapter.
 
 Never hardcode a secret; cap-evolve executes untrusted optimizer/adapter/tool code — see
 [`../SECURITY.md`](../SECURITY.md). Trouble? [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).

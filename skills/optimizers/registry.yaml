@@ -15,6 +15,11 @@
 #   install_url      : where to get the CLI (printed when it is not on PATH).
 #   auth_notes       : one-line auth hint.
 #   json_flag        : extra flag(s) to request machine-readable output, or "".
+#   transcript_flag  : OPTIONAL. flag(s) requesting a TURN-BY-TURN stream (every message and
+#                      tool call), used INSTEAD of json_flag when the caller passes
+#                      --transcript. Its last line must still be the result object json_flag
+#                      would have produced, so cost/stop parsing is unchanged. Omit for a CLI
+#                      with no streaming mode — --transcript then records whatever it printed.
 #   budget_flag      : flag(s) with a {budget} placeholder to cap one optimization
 #                      iteration's work (e.g. claude --max-turns N), or "" if the CLI
 #                      has no such knob. Appended only when run-optimizer gets --budget.
@@ -75,11 +80,28 @@ claude-code:
   # text it can't test, so it conservatively avoids shipping scripts/tool code. Verifying edits
   # is core to optimizing skills/tools, so this is on by default. Edits stay auto-approved
   # (acceptEdits); the optimizer runs in an isolated candidate-copy workdir.
-  command_template: "claude -p {prompt_text} --permission-mode acceptEdits --allowedTools Bash --model {model}"
+  #
+  # --disallowedTools Monitor (issue #431): on run_e2e_run3 the driver reached for a persistent
+  # ``Monitor`` (a ``tail -f`` watch on a round's gate) to background the wait instead of
+  # staying in the foreground as the briefing demands, and was saved only by the permission
+  # system happening to deny it — Monitor was never in --allowedTools, so it fell back to
+  # -p's no-human-to-ask auto-deny. That is luck, not a guarantee: it depends on Monitor
+  # staying off an allowlist nobody wrote to protect this. --disallowedTools always takes
+  # precedence over --allowedTools in Claude Code's own permission resolution, so listing
+  # Monitor here makes the denial unconditional instead of an accident of what else is allowed.
+  command_template: "claude -p {prompt_text} --permission-mode acceptEdits --allowedTools Bash --disallowedTools Monitor --model {model}"
   env_keys: "ANTHROPIC_API_KEY"
   install_url: "https://docs.claude.com/claude-code"
   auth_notes: "Logged-in Claude Code session or ANTHROPIC_API_KEY."
   json_flag: "--output-format json"
+  # `--output-format json` returns ONE result object: the final text, num_turns, cost. It does
+  # NOT contain the turns, so a run that stalls mid-loop leaves nothing to diagnose with — on
+  # run 32814848187 four hours of wall clock had to be inferred from event timestamps because
+  # the only record kept was an 800-char stdout tail. stream-json emits every message and tool
+  # call, and its LAST line is the same result object, so cost + stop parsing are unaffected.
+  # Separate key, not a change to json_flag: only a caller that asks for a transcript pays the
+  # extra output, so the deterministic per-iteration path is untouched.
+  transcript_flag: "--output-format stream-json --verbose"
   budget_flag: "--max-turns {budget}"
   usd_budget_flag: "--max-budget-usd {usd}"   # native per-iteration $ cap (works with -p/--print)
   offline: "false"

@@ -1,6 +1,199 @@
 /** Mirrors the Plan 1 backend payloads (see core/cap_evolve/dashboard.py schemas). */
 
-export type RunStatus = 'live' | 'done' | 'failed'
+/** Run outcome, derived by the reducer from the event log's own evidence.
+ *  `interrupted` and `budget_exhausted` used to both masquerade as "live". */
+export type RunStatus =
+  | 'running'
+  | 'awaiting_agent'
+  | 'completed'
+  | 'budget_exhausted'
+  | 'stalled'
+  | 'interrupted'
+  | 'failed'
+  // A run whose artifacts predate status derivation (e.g. an older static export).
+  // Absence of evidence is NOT evidence of failure, so it gets its own state.
+  | 'unknown'
+
+export type Verdict = 'accept' | 'reject' | 'indecisive' | 'no measurement'
+
+/** One row of summary.gate_decisions. Δ̄/SE/n are parsed out of the gate's own reason
+ *  string; a value the gate did not record is `null` — never a stand-in 0. */
+export interface GateDecision {
+  iteration: number | null
+  candidate: string
+  verdict: Verdict
+  val: number | null
+  parent: string | null
+  parent_val: number | null
+  delta: number | null
+  stderr: number | null
+  n: number | null
+  k_se: number | null
+  threshold: number | null
+  reason: string
+  /** Which reference the gate actually used ("parent" vs a drift-controlled reference). */
+  gate_mode?: string | null
+  /** The RAW gate verdict before any override — present only when the driver overrode
+   *  it (see `overrode_gate`). A raw accept can still end in a final `verdict` of
+   *  reject: this is the number that disagreement is measured against. */
+  gate_verdict?: Verdict | null
+  /** A second, drift-controlled verdict against same-round null-control replicates —
+   *  absent when the round measured no controls. */
+  control_relative_verdict?: Verdict | null
+  control_relative_delta?: number | null
+  /** Whether `control_relative_verdict` agrees across EVERY control replicate, not
+   *  just on their pooled average — read from the round's own gate table. */
+  verdict_stable?: boolean | null
+  /** The smallest delta this round could resolve as real signal (vs measurement
+   *  noise) — a candidate's delta below this is not evidence either way. */
+  evidence_bar?: number | null
+  /** True when the driver's final `verdict` disagrees with the raw `gate_verdict` —
+   *  e.g. a raw accept overridden to reject on the control-relative comparison. */
+  overrode_gate?: boolean | null
+  /** Why the driver overrode the raw gate, when it did (e.g. "driver_judgement"). */
+  reject_basis?: string | null
+}
+
+/** One spend row. `usd: null` means the cost was never recorded (show "—", not $0). */
+export interface CostRow {
+  phase: 'intake' | 'baseline' | 'optimize' | 'finalize'
+  kind: 'intake' | 'baseline_eval' | 'candidate_eval' | 'test_eval' | 'optimizer_call'
+  label: string
+  candidate: string | null
+  split: string | null
+  usd: number | null
+  seconds: number
+  tokens: number
+  note?: string
+}
+
+export interface CostLedger {
+  rows: CostRow[]
+  attributed_usd: number
+  total_usd: number
+  /** Recorded spend the event rows cannot account for. Shown, never hidden. */
+  unattributed_usd: number
+  rows_missing_cost: number
+  /** See RunSummary.cost.metered — $0 after real calls is missing data, not free. */
+  metered?: boolean
+}
+
+/** One event from the run's append-only log, phase-tagged and sanitized. */
+export interface LogRow {
+  seq: number
+  t: number | null
+  kind: string
+  phase: 'intake' | 'baseline' | 'optimize' | 'finalize'
+  candidate: string | null
+  detail: Record<string, unknown>
+  /** Optimizer stderr / diagnosis prose, control-characters stripped. */
+  text: string
+}
+
+/** Which panels this run has real data for. Absent signal ⇒ panel omitted, never faked. */
+export interface RunCapabilities {
+  per_task: boolean
+  lineage: boolean
+  gate: boolean
+  cost: boolean
+  log: boolean
+  trajectories: boolean
+  diffs: boolean
+  minibatch: boolean
+  gepa: boolean
+  skillopt: boolean
+  epochs: boolean
+  focus: boolean
+  evograph: boolean
+  parallel: boolean
+  freeform: boolean
+  /** agent-optimize recorded tiered cheap screens (`screen` events + `screens/*.json`). */
+  screens: boolean
+  /** The optimizer wrote its own `dashboard.html` snapshot mid-run (via `cap-evolve
+   *  dashboard --export`) -- shows the "Process" tab. */
+  process_html: boolean
+  /** At least one round's driver reported an empty/malformed handover
+   *  (`optimizer_context_warning`) — that round's note is reconstructed, not live. */
+  context_warnings?: boolean
+}
+
+export interface SplitsInfo {
+  train: number | null
+  val: number | null
+  test: number | null
+  seed: number | null
+  /** train==val==test — the "test" number is NOT a generalization estimate. */
+  no_holdout: boolean
+  warning: string
+}
+
+export interface EvographRound {
+  round: number | string | null
+  split: string | null
+  started_at: string | null
+  completed_at: string | null
+  num_tasks: number | null
+  primary_metric: string | null
+  metrics: Record<string, number | null>
+  cost_usd: number | null
+}
+
+export interface EvographWeakness {
+  slug: string
+  status?: string
+  tags?: string[]
+  discovered_in_round?: string | number
+  solved_in_round?: string | number
+  affected_tasks?: string[]
+  related?: string[]
+  num_solutions?: number
+  [k: string]: unknown
+}
+
+export interface AlgoExtra {
+  minibatch?: { candidate: string | null; reward: number | null; n_tasks: number | null; tasks: string[]; t: number | null }[]
+  gepa?: { kind: string; t: number | null; candidate: string | null; detail: Record<string, unknown> }[]
+  skillopt?: { kind: string; t: number | null; epoch?: number | null; lr?: number | null; candidate: string | null; detail: Record<string, unknown> }[]
+  epochs?: number[]
+  focus?: string[]
+  evograph?: { rounds: EvographRound[]; weaknesses: EvographWeakness[] }
+  parallel?: Record<string, unknown>[]
+  screens?: ScreenRow[]
+}
+
+/** One agent-optimize cheap screen: a paired subset eval that decides whether a
+ *  candidate is worth a full val run. `mean_delta` is a SUBSET statistic — never a val
+ *  score — and `inconclusive` means the subset could not separate the two. */
+export interface ScreenRow {
+  candidate: string
+  screen_tag: string
+  tier: number | null
+  decision: string | null
+  inconclusive: boolean
+  mean_delta: number | null
+  se: number | null
+  n: number | null
+  threshold: number | null
+  net_rollouts: number | null
+  ids: string[]
+  holdout: string[]
+  informative: string[]
+  fixed: string[]
+  regressed: string[]
+  pool_n: number | null
+  t: number | null
+  rationale?: string | null
+  /** The candidate this screen compared against (usually the current best/parent). */
+  reference?: string | null
+  /** Per-task reward on the subset, rebuilt from this screen's own persisted rollouts —
+   *  the same shape a full-val node's `per_task` uses, so a screen renders identically
+   *  in the Tasks matrix. Empty when no rollouts were persisted for this screen. */
+  per_task?: Record<string, number>
+  feedback?: Record<string, string>
+  /** Per-task delta vs `reference`, straight from this screen's own `paired.deltas` —
+   *  the number the screen actually decided on (never re-derived from `per_task`). */
+  delta_by_task?: Record<string, number>
+}
 
 /** One row from GET /api/runs (light hub summary). */
 export interface RunSummary {
@@ -8,15 +201,21 @@ export interface RunSummary {
   path: string
   algorithm: string | null
   status: RunStatus
+  status_reason?: string
   best_val: number | null
   baseline_val: number | null
   delta_pct: number | null
+  delta_abs?: number | null
+  test_reward?: number | null
   iterations: number
   total_usd: number | null
+  /** False => the runner reports no cost; total_usd is missing data, not $0. */
+  cost_metered?: boolean
+  last_event_t?: number | null
   mtime: number
 }
 
-export type NodeStatus = 'seed' | 'accepted' | 'rejected' | 'failed'
+export type NodeStatus = 'seed' | 'accepted' | 'rejected' | 'indecisive' | 'failed' | 'screened'
 
 /** One row of reduced["summary"].per_iteration — optimizer vs runner cost/time per step.
  * Cost fields are nullable (runner cost is often $0/null on RITS); time is always set. */
@@ -48,6 +247,9 @@ export interface Evaluation {
   cost_usd: number
   seconds: number
   tokens: number
+  /** {cost_source: count} from Rollout.metadata, e.g. {"unpriced": 12} — present only
+   * when some rollout's adapter tagged it (an unmetered target model). */
+  cost_source?: Record<string, number>
 }
 
 /** A candidate in reduced["graph"].nodes. */
@@ -60,6 +262,10 @@ export interface GraphNode {
   stderr?: number | null
   per_task?: Record<string, number>
   feedback?: Record<string, string>
+  /** Tasks this candidate fixed / broke vs its parent, when the run recorded the
+   *  movement. Empty (not absent-as-zero) when nothing was recorded. */
+  fixed?: string[]
+  broke?: string[]
   cost_usd?: number | null
   tokens?: number | null
   opt_cost_usd?: number | null
@@ -69,9 +275,24 @@ export interface GraphNode {
   runner_seconds?: number | null
   iteration?: number | null
   reason?: string | null
+  /** The parent's val at the time this candidate was gated (null when not recorded). */
+  parent_val?: number | null
   epoch?: number
   merge_of?: string[]
   best_so_far?: boolean
+  /** Which diagnose() failure cluster(s) this edit targeted (graph.jsonl, #446). */
+  cluster_ids?: string[]
+  /** The task subset a cheap screen ran this candidate on before full val (graph.jsonl). */
+  subset?: { task_ids: string[]; tier: number | null } | null
+  micro_tests?: string[]
+  /** 'screen' marks a synthetic, non-graph entry the Tasks matrix builds from a cheap
+   *  screen's own rollouts (see `ScreenRow.per_task`) — never emitted by the reducer
+   *  itself, so absent means "a real candidate". */
+  kind?: 'candidate' | 'screen'
+  /** Set when the driver's own handover file came back empty/malformed for this
+   *  round: the `reason`/`note` shown is reconstructed after the fact, not the
+   *  optimizer's live reasoning. */
+  context_warning?: { what: string | null; error: string | null } | null
 }
 
 export interface RunGraph {
@@ -83,14 +304,57 @@ export interface RunGraph {
 export interface RunSummaryDetail {
   run_id?: string
   algorithm?: string | null
+  algorithm_source?: string | null
+  status?: RunStatus
+  status_reason?: string
+  started_t?: number | null
+  last_event_t?: number | null
+  /** Real wall time: first event → last event when the run is over, first event → now
+   *  while it is still running (see elapsed_open). Includes idle gaps, unlike
+   *  wall_clock_seconds. */
+  elapsed_seconds?: number | null
+  /** True ⇒ elapsed_seconds has no end yet and is still growing; label it "so far". */
+  elapsed_open?: boolean
+  event_count?: number
+  capabilities?: RunCapabilities
+  splits?: SplitsInfo | null
+  gate_decisions?: GateDecision[]
+  cost_ledger?: CostLedger
+  log?: LogRow[]
+  algo_extra?: AlgoExtra
   baseline_val: number | null
+  baseline_stderr?: number | null
   best_val: number | null
+  best_id?: string | null
+  delta_abs?: number | null
   delta_pct: number | null
   test_reward: number | null
+  test_stderr?: number | null
   test_sealed?: boolean
+  /** The SEED's score on the same sealed test split, and best − seed on test. A sealed
+   *  test number means nothing without it: `test_delta === 0` is the normal reading for
+   *  a run whose best candidate is the seed. */
+  test_baseline_reward?: number | null
+  test_delta?: number | null
   /** {k: pass^k}. A k is ABSENT when k > num_trials (undefined ⇒ show "N/A", never 0). */
   test_pass_k?: Record<string, number> | null
-  counts?: { accepted: number; rejected: number; failed: number; seed: number; total: number }
+  /** The full bookend `finalize` writes into final.json (seed/best × train/val/test),
+   *  flattened to scalars the same way test_reward/test_baseline_reward already are.
+   *  Absent/null when train was skipped (empty split, or identical to val — see
+   *  train_equals_val) rather than genuinely 0. */
+  train_reward?: number | null
+  train_baseline_reward?: number | null
+  train_delta?: number | null
+  train_equals_val?: boolean | null
+  counts?: {
+    accepted: number
+    rejected: number
+    /** ABSENT in older/static exports — never interpolate it unguarded. */
+    indecisive?: number
+    failed: number
+    seed: number
+    total: number
+  }
   frontier?: number
   tasks?: string[]
   wall_clock_seconds?: number | null
@@ -102,12 +366,25 @@ export interface RunSummaryDetail {
     runner_usd: number | null
     intake_usd?: number | null
     total_usd: number | null
+    /** False when the run made real calls yet reports exactly $0 — the runner does
+     *  not report cost (self-hosted vLLM, an internal endpoint, a proxy that returns
+     *  no usage). Render "not metered", never "$0.000": nobody measured that. */
+    metered?: boolean
   }
   tokens?: number | null
   tokens_by_role?: { runner: number; optimizer: number; intake: number }
   per_iteration?: PerIterationCost[]
   evaluations?: Evaluation[]
-  intake?: { usd: number; seconds: number; tokens: number; output_summary?: string; implemented?: string[] }
+  intake?: {
+    usd: number
+    seconds: number
+    tokens: number
+    output_summary?: string
+    implemented?: string[]
+    /** True only when an "intake" event was actually logged (intake.json was
+     * written) — false means intake's cost was never metered, not that it was $0. */
+    recorded?: boolean
+  }
   budget?: {
     max_iterations?: number
     max_metric_calls?: number
@@ -126,6 +403,20 @@ export interface RunSummaryDetail {
   gate_warnings?: unknown[]
   diagnoses?: unknown[]
   git_log?: { hash: string; subject: string }[]
+  /** The intake-authored project config — capevolve.yaml (grouped), PROJECT.md, and
+   *  every other file under the project dir (adapters/, seed_capability/, splits). */
+  config?: {
+    project_dir: string
+    spec_missing: boolean
+    spec_groups: { group: string; items: { key: string; value: unknown }[] }[]
+    project_md: string | null
+    files: { path: string; size: number; preview: string | null; truncated: boolean; binary: boolean }[]
+  } | null
+  /** Run-level optimizer narrative — JOURNAL/INSIGHTS/META_INSIGHTS/FRAMEWORK_IMPROVEMENTS
+   *  plus the best candidate's PROCESS.md, in that order. */
+  narrative?: {
+    files: { name: string; title: string; text: string; template_only: boolean }[]
+  } | null
 }
 
 /** GET /api/runs/{id}. */
@@ -166,12 +457,19 @@ export interface CompareRow {
   run_id: string
   algorithm: string | null
   baseline_val: number | null
+  baseline_stderr?: number | null
   best_val: number | null
   delta_pct: number | null
   test_reward: number | null
   total_usd: number | null
+  cost_metered?: boolean
   tokens: number | null
   iterations: number
+  status?: RunStatus
+  splits?: SplitsInfo | null
+  /** The val task ids this run's means are over. Runs with different task sets are NOT
+   *  comparable — the view says so rather than putting them in one chart silently. */
+  tasks?: string[]
   series: { iteration: number; best_so_far: number }[]
 }
 
@@ -195,13 +493,6 @@ export interface RejectedEntry {
 export interface MemoryResult {
   history: HistoryEntry[]
   rejected: RejectedEntry[]
-}
-
-/** GET /api/runs/{id}/custom-view — an optional algorithm-shipped view to embed.
- *  `{}` (no url) means the run ships no custom view. */
-export interface CustomView {
-  title?: string
-  url?: string
 }
 
 /** GET /api/runs/{id}/candidate/{cid}/files. */

@@ -29,16 +29,21 @@ on:
         description: "Which benchmark to run"
         type: choice
         default: all
-        options: [all, tau2, swebench, skillsbench, spreadsheetbench]
+        options: [all, tau2, swebench, skillsbench, spreadsheetbench, rfe-creator, tau2-custom]
+      intervention:
+        description: "How the candidate reaches the model."
+        type: choice
+        default: direct
+        options: [direct, spa]
       tier:
         description: "Which tier (default smoke; pilot is a small cost/runtime measurement rig — its rewards are NOT comparable; full is the whole benchmark and is expensive). A tier only runs for benchmarks that populate it."
         type: choice
         default: smoke
         options: [all, smoke, pilot, full]
       iterations:
-        description: "Optimizer iterations per task for the FULL tier (default 10; raise to give the optimizer more budget). Smoke always runs 3, regardless of this input."
+        description: "Optimizer iterations. LEAVE BLANK for the tier default (smoke 3, everything else 10). Set a value to override deliberately — including on smoke, where more rounds are how you watch a per-iteration curve rather than a single step."
         type: string
-        default: "10"
+        default: ""
       trials:
         description: "Trials per task per eval. LEAVE BLANK for the tier default (smoke 3, everything else 10). Set a value only to override deliberately — on a 5-task binary tier, 1 trial cannot separate signal from noise, which is why blank does not mean 1."
         type: string
@@ -55,6 +60,7 @@ on:
           - "aws/claude-sonnet-4-6"
           - "aws/claude-sonnet-5"
           - "aws/gpt-oss-120b"
+          - "Azure/gpt-5-mini-2025-08-07"
           - "azure/gpt-5.4"
           - "azure/gpt-5.5"
           - "azure/gpt-5.6-luna"
@@ -83,6 +89,8 @@ on:
           - "aws/claude-opus-5"
           - "aws/claude-sonnet-4-6"
           - "aws/claude-sonnet-5"
+          - "aws/gpt-oss-120b"
+          - "Azure/gpt-5-mini-2025-08-07"
           - "azure/gpt-5.4"
           - "azure/gpt-5.5"
           - "azure/gpt-5.6-luna"
@@ -112,14 +120,11 @@ on:
         description: "Acceptance-gate strictness: accept a candidate iff improvement > k_se·SE (default 1.0; lower = more lenient, higher = stricter)"
         type: string
         default: "1.0"
-      algorithm_focus:
-        description: "Hill-climb focus schedule: all (whole train set each iteration) | cyclic (one task at a time) | hardest-first (lowest-scoring task first)"
+      algorithm:
+        description: "Optimization algorithm. hill-climb-* is the deterministic loop and its focus schedule: all (whole train set each iteration) | cyclic (one task at a time) | hardest-first (lowest-scoring task first). agent-optimize is the fully-agentic loop — run_suite.sh switches the run to orchestration_mode: agent and a headless agent drives the rounds itself, bounded by a stop_condition derived from `iterations`/`optimizer_*` rather than a fixed schedule."
         type: choice
-        default: all
-        options: [all, cyclic, hardest-first]
-      # NB: workflow_dispatch allows at most 10 inputs and this list is full. SPLIT_SEED is
-      # therefore driven by the repo variable `vars.BENCH_SPLIT_SEED` (see the job env) rather
-      # than an 11th input, which would make this workflow invalid.
+        default: hill-climb-all
+        options: [hill-climb-all, hill-climb-cyclic, hill-climb-hardest-first, agent-optimize]
   pull_request:
     types: [labeled]
 
@@ -173,6 +178,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           TIER_SEL: ${{ github.event.inputs.tier || 'smoke' }}
           BENCH_SEL: ${{ github.event.inputs.benchmark || 'all' }}
+          INTERVENTION_SEL: ${{ github.event.inputs.intervention || 'direct' }}
           # toJSON (not a ','-join) so labels stay exactly comparable: label names may
           # themselves contain commas, and the PR gate below is an exact-match test.
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
@@ -185,7 +191,22 @@ jobs:
           # tier is a first-class dimension. full runs the whole/representative benchmark
           # (frozen baselines under <bench>/full/); it no-ops until that tier is populated.
           TIERS = ["smoke", "pilot", "full"]
-          BENCHES = ["tau2", "swebench", "skillsbench", "spreadsheetbench"]
+          # tau2_custom_direct / _spa are the DELIVERY ARMS of the tau2 airline benchmark:
+          # same tasks and tiers, candidate delivered in-process versus through the Skillberry
+          # Store + Proxy-Agent. They stay separate legs so each keeps its own tier task lists,
+          # its own history row and its own concurrency group.
+          BENCHES = ["tau2", "swebench", "skillsbench", "spreadsheetbench", "rfe-creator",
+                     "tau2_custom_direct", "tau2_custom_spa"]
+
+          # `tau2-custom` is the picker's name for "the arms"; `intervention` chooses which one.
+          # A benchmark token is what the rest of the pipeline keys off — tasks.json paths, the
+          # work dirs, the history rows — so resolve it here, once.
+          CUSTOM = "tau2-custom"
+          ARM_OF = {"direct": "tau2_custom_direct", "spa": "tau2_custom_spa"}
+          # Both arms are one benchmark on disk: ci/benchmarks/tau2_custom/<arm>/<tier>/.
+          BENCH_DIR = {v: "tau2_custom/" + k for k, v in ARM_OF.items()}
+          # `all` sweeps both arms regardless of `intervention`: it means every leg, and the two
+          # arms are the comparison they exist for.
 
           # Tiers that `tier=all` must NOT sweep in — they only run when named explicitly.
           # `pilot` is a cost/runtime measurement rig: its splits are sized for measurement,
@@ -204,7 +225,13 @@ jobs:
           event = os.environ["EVENT"]
           tier_sel = os.environ.get("TIER_SEL") or "smoke"
           bench_sel = os.environ.get("BENCH_SEL") or "all"
+          intervention = (os.environ.get("INTERVENTION_SEL") or "direct").strip().lower()
           labels = set(json.loads(os.environ.get("LABELS") or "[]") or [])
+
+          if bench_sel == CUSTOM:
+              bench_sel = ARM_OF.get(intervention, ARM_OF["direct"])
+              print(f"{CUSTOM} + intervention={intervention} -> {bench_sel}",
+                    file=sys.stderr, flush=True)
 
           legs = []
           for tier in TIERS:
@@ -227,7 +254,7 @@ jobs:
                   # dispatch into a no-op that still reports success. Only trust the filter
                   # when there is a tree to look at.
                   if run and tree_present and not os.path.isfile(
-                          f"ci/benchmarks/{bench}/{tier}/tasks.json"):
+                          f"ci/benchmarks/{BENCH_DIR.get(bench, bench)}/{tier}/tasks.json"):
                       print(f"skip {tier}/{bench}: no tasks.json for that tier",
                             file=sys.stderr, flush=True)
                       run = False
@@ -272,10 +299,14 @@ jobs:
     env:
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
-      # Smoke always runs a fixed 3 iterations (cheap, fast regression) — decoupled
-      # from the `iterations` input, which only controls the (expensive) full tier
-      # (default 10 there — see the `iterations` input above).
-      ITERATIONS: ${{ matrix.tier == 'smoke' && '3' || github.event.inputs.iterations || '10' }}
+      # Smoke DEFAULTS to 3 iterations (cheap, fast regression) but an explicit dispatch value
+      # now wins, exactly as it does for NUM_TRIALS below and for the same reason: the input's
+      # own default is "" so "user asked for 10" is distinguishable from "user asked for
+      # nothing". Before this, `matrix.tier == 'smoke' && '3'` came FIRST and short-circuited,
+      # so a dispatch of iterations=5 on smoke was silently ignored and the operator learned it
+      # only by reading ITERATIONS in the job log. Smoke is the tier you iterate the algorithm
+      # on, so pinning it was the wrong knob to make unreachable.
+      ITERATIONS: ${{ github.event.inputs.iterations || (matrix.tier == 'smoke' && '3') || '10' }}
       # Smoke pins 3 trials, same as it pins iterations, and for a measurable reason.
       # Run 31183768756 was dispatched with trials=1 and re-scored the SAME seed capability at
       # 0.400 (baseline) then 0.200 (finalize) — pytest-dev__pytest-7432 flipped 1.000 -> 0.000
@@ -299,7 +330,11 @@ jobs:
       OPTIMIZER_USD_PER_ITER: ${{ github.event.inputs.optimizer_usd_per_iter || (matrix.tier == 'smoke' && '50' || '0') }}
       OPTIMIZER_MAX_TURNS: ${{ github.event.inputs.optimizer_max_turns || '80' }}
       GATE_K_SE: ${{ github.event.inputs.gate_k_se || '1.0' }}
-      ALGORITHM_FOCUS: ${{ github.event.inputs.algorithm_focus || 'all' }}
+      # Names the algorithm and (for hill-climb) its focus schedule in one token, because
+      # the 10-input cap above leaves no room for two. run_suite.sh splits it, and maps
+      # agent-optimize to orchestration_mode: agent + a derived stop_condition. A PR-label
+      # dispatch has no inputs at all, so the default keeps every existing leg unchanged.
+      ALGORITHM: ${{ github.event.inputs.algorithm || 'hill-climb-all' }}
       # Run seed. With a tier that ships a committed split_ids.json the partition is FIXED, so
       # this varies only the per-trial rollout seeding — which is what makes the independent
       # seeds a paper comparison needs (">=3 seeds") possible on one split. Set the repo
@@ -370,7 +405,9 @@ jobs:
       - name: Assert the suite run completed
         if: always()
         run: |
-          tasks="ci/benchmarks/${{ matrix.bench }}/${{ matrix.tier }}/tasks.json"
+          bench_dir="${{ matrix.bench }}"
+          case "$bench_dir" in tau2_custom_*) bench_dir="tau2_custom/${bench_dir#tau2_custom_}" ;; esac
+          tasks="ci/benchmarks/$bench_dir/${{ matrix.tier }}/tasks.json"
           if [ ! -f "$tasks" ]; then
             echo "no tasks.json for ${{ matrix.tier }}/${{ matrix.bench }} — nothing to assert"
             exit 0
@@ -399,7 +436,9 @@ jobs:
           # SB_* flags live in the tier's committed overrides.env, which only run_suite.sh
           # sources — so resolve them here too, or the disclosure field below would always read
           # as "not warm" even on a warm-started run. An env var still wins over the file.
-          ov="$GITHUB_WORKSPACE/ci/benchmarks/${{ matrix.bench }}/${{ matrix.tier }}/overrides.env"
+          ov_dir="${{ matrix.bench }}"
+          case "$ov_dir" in tau2_custom_*) ov_dir="tau2_custom/${ov_dir#tau2_custom_}" ;; esac
+          ov="$GITHUB_WORKSPACE/ci/benchmarks/$ov_dir/${{ matrix.tier }}/overrides.env"
           warm_file=$(sed -n 's/^[[:space:]]*SB_WARM_SEED=\([01]\).*/\1/p' "$ov" 2>/dev/null | tail -1)
           if [ "${SB_WARM_SEED:-${warm_file:-0}}" = "1" ]; then warm_json=true; else warm_json=false; fi
           # Emit both free-form fields as JSON *string literals*. Shell quoting alone is not
@@ -424,6 +463,7 @@ jobs:
             "agent_model": "${AGENT_MODEL:-aws/gpt-oss-120b}",
             "optimizer_model": "${OPTIMIZER_MODEL:-claude-opus-4-8}",
             "gate_k_se": ${GATE_K_SE:-1.0},
+            "algorithm": "${ALGORITHM:-hill-climb-all}",
             "warm_seed": $warm_json,
             "conclusion": "${{ job.status }}"
           }
@@ -435,6 +475,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: benchmarks-${{ matrix.tier }}-${{ matrix.bench }}
+          # EXACTLY ONE path. A second one makes upload-artifact re-root the artifact at the
+          # common ancestor of both, and the aggregate job reads runmeta.json flat at the root —
+          # it would then skip the leg and publish no history row.
           path: ci/benchmarks/.work/suite_${{ matrix.tier }}_${{ matrix.bench }}/**
           if-no-files-found: warn
 

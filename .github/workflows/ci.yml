@@ -4,10 +4,12 @@
 #
 # PURPOSE:
 # Runs parallel jobs on every push to main and every pull request:
-#   1. test-python     — installs cap-evolve-core[dev] and runs pytest on core/tests/
-#   2. build-dashboard — installs dashboard/frontend dependencies and runs npm build
+#   1. test-python     — installs cap-evolve-core[dev] and capevolve-dashboard[dev], then
+#                        runs pytest on core/tests/ and dashboard/backend/tests/
+#   2. build-dashboard — installs dashboard/frontend dependencies, runs npm build + vitest
 #   3. toy-example     — runs the zero-API toy_calc example and asserts test_reward 1.0
-#   4. docs-links      — checks relative links/images in Markdown resolve (offline)
+#   4. docs-links      — checks relative links/images in Markdown resolve (offline), and
+#                        that every documented `cap-evolve <sub>` exists in the CLI (#203)
 #   5. spellcheck      — codespell over README + docs
 #
 # No shared-workflow delegation needed: this is repo-specific CI.
@@ -23,7 +25,7 @@ on:
 
 jobs:
   test-python:
-    name: Test Python (core)
+    name: Test Python (core + dashboard backend)
     runs-on: ubuntu-latest
 
     steps:
@@ -40,6 +42,12 @@ jobs:
 
       - name: Run pytest
         run: python -m pytest core/tests -q
+
+      - name: Install dashboard backend with dev extras
+        run: pip install -e "./dashboard/backend[dev]"
+
+      - name: Run pytest (dashboard backend)
+        run: python -m pytest dashboard/backend/tests -q
 
   build-dashboard:
     name: Build Dashboard (frontend)
@@ -109,6 +117,66 @@ jobs:
             && echo "$out" | grep -q '"test_reward": 1.0' \
             || { echo "::error::toy_calc did not reach baseline_val 0.0 -> test_reward 1.0"; exit 1; }
 
+  install-smoke:
+    name: Install smoke (./install.sh, then run from the install)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install cap-evolve-core
+        run: pip install ./core
+
+      - name: Install via ./install.sh through the --host mapping
+        env:
+          # A clean HOME so `--host claude` lands somewhere this job owns.
+          HOME: ${{ runner.temp }}/fakehome
+        run: |
+          set -euo pipefail
+          # Unset, or detect_dest short-circuits to the checkout and the --host
+          # mapping plus the copy loop are never exercised (what toy-example does).
+          unset CAPEVOLVE_SKILLS_DIR
+          mkdir -p "$HOME"
+          ./install.sh --host claude
+          # The installed tree must carry the optimizer registry, not just skill dirs.
+          test -f "$HOME/.claude/skills/optimizers/registry.yaml"
+
+      - name: cap-evolve entry point is importable and runnable
+        run: |
+          set -euo pipefail
+          python -c 'import cap_evolve, cap_evolve.cli'
+          cap-evolve --version
+
+      - name: Run toy_calc FROM THE INSTALL, outside the repo tree
+        env:
+          HOME: ${{ runner.temp }}/fakehome
+        run: |
+          set -euo pipefail
+          R="$PWD"; D="$(mktemp -d)"
+          mkdir -p "$D/.capevolve/project/adapters"
+          cp    "$R/examples/toy_calc/adapter.py"     "$D/.capevolve/project/adapters/"
+          cp -R "$R/examples/toy_calc/capability"     "$D/seed_capability"
+          cp    "$R/templates/project/capevolve.yaml" "$D/.capevolve/project/capevolve.yaml"
+          # OUTSIDE the repo: run.py's parent-walk would otherwise find the checkout's
+          # optimizers/registry.yaml and this assertion would prove nothing.
+          cd "$D"
+          export CAPEVOLVE_SKILLS_DIR="$HOME/.claude/skills"
+          export CAPEVOLVE_TOY_DATA="$R/examples/toy_calc"
+          export CAPEVOLVE_MOCK_SCRIPT="$R/examples/toy_calc/mock_script.json"
+          out="$(cap-evolve run --spec "$D/.capevolve/project/capevolve.yaml" \
+                                --project "$D/.capevolve/project" --run-ts ci)"
+          echo "$out"
+          # Assert the OUTCOME, not the exit code: an install that cannot run an
+          # optimizer keeps the seed and reports test_reward 0.0 while exiting 0.
+          echo "$out" | grep -q '"test_reward": 1.0' \
+            || { echo "::error::the installed tree ran but optimized nothing"; exit 1; }
+
   docs-links:
     name: Docs link check
     runs-on: ubuntu-latest
@@ -126,6 +194,36 @@ jobs:
             --exclude-path examples/skillsbench/run_full
             "README.md" "docs/**/*.md" "examples/**/*.md" "*.md"
           fail: true
+
+      # Docs/skills/code must not instruct agents to run a `cap-evolve <sub>` that does
+      # not exist (issue #203). The valid set is parsed out of core/cap_evolve/cli.py, so
+      # no install is needed and the check cannot drift from the CLI.
+      - name: Check documented cap-evolve subcommands exist
+        run: python3 ci/check_cli_subcommands.py
+
+  lint-skills:
+    name: Skill authoring lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Points the shipped skill-package validator at the repo's OWN skills, so the
+      # framework is held to the authoring bar it advertises in CONTRIBUTING.md.
+      #
+      # BLOCKING, with no violation baseline. It was designed report-only against a
+      # 14-violation baseline while the skills were rewritten under #322-#339; that
+      # sweep cleared all 14, so the tree is clean and the next violation is a
+      # regression to fix rather than debt to record. Advisory findings (description
+      # style, bundled-script self-check) print but never fail the step.
+      - name: Lint bundled skills against the authoring rules
+        run: python skills/_registry/lint_skills.py skills
 
   spellcheck:
     name: Spellcheck (docs)

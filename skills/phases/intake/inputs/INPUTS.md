@@ -105,6 +105,21 @@ path, how to obtain it, and the alternatives. Never invent a NEEDED input.
   `run-optimizer` skill against `optimizers/registry.yaml` (run `run-optimizer --list`
   to see the available names); `optimizer_model` is the backend-specific model id.
 
+- **memory_skill** (default `md-files`, ask alongside algorithm/optimizer): which
+  cross-iteration memory scheme the optimizer reads/writes, selected the same way as
+  `algorithm_skill`/`optimizer_skill` (`harness.OptimizerContext` threads it through
+  every algorithm's `run.py` via `--memory-skill`; resolved off `MEMORY_SKILLS` in
+  `core/cap_evolve/harness.py`). Two options today:
+  - `md-files` (default) — `harness.py`'s built-in LEDGER/JOURNAL/PROCESS/INSIGHTS/
+    META_INSIGHTS/FRAMEWORK_IMPROVEMENTS scheme, append-only prose read fresh each
+    iteration.
+  - `wiki` — the weakness-graph format extracted from the deprecated `evograph`
+    algorithm (`skills/memory/wiki/SKILL.md`): persistent weakness nodes + solution
+    cards under `<run_dir>/wiki/`, rendered by the dashboard's Weakness-graph tab.
+    Offer this when the user wants to inspect known weaknesses across iterations as a
+    graph rather than scroll a journal, or is migrating off `evograph`.
+  Note the choice in `PROJECT.md` either way.
+
 - **target_model** (default `""` = profile-agnostic): the runtime/CONSUMING LLM the
   agent reads these capabilities with — DISTINCT from `optimizer_model`, which proposes
   the edits. Give a concrete model id (e.g. `gpt-oss-120b`) or a capability tier
@@ -130,48 +145,35 @@ path, how to obtain it, and the alternatives. Never invent a NEEDED input.
     leave `[]` when there is no such source.
 
 - **optimizer_instructions_file** (default `optimizer/INSTRUCTIONS.md`): the
-  per-iteration optimizer-prompt TEMPLATE. The scaffold already copies a generic
-  default to `project/optimizer/INSTRUCTIONS.md`; the agent CUSTOMIZES it for this
-  benchmark (keeping the `{{...}}` placeholders the harness fills) rather than
-  authoring one from scratch. Point this key at the customized file. Keep the
-  authored guidance short on meta-narration but explicit and DEMANDING on iteration
-  depth, with an explicit GOAL (maximize the eval score). The authored instructions
-  must impose a DEPTH MANDATE — each iteration is a substantial multi-cluster,
-  multi-edit-class sweep (tool code + validation + enriched returns + new tools +
-  many docs + prompt), non-regression scoped per fix; a single small edit is an
-  under-used iteration. Produce this target snippet: "Each iteration is a
-  substantial, multi-root-cause pass. Diagnose ALL clusters and fix as many as
-  possible in ONE candidate — improve multiple tools' code, validation, and return
-  values/errors; add new tools; sharpen many tool docs; and fix the prompt —
-  together. Scope each fix to protect passing tasks; do NOT trade breadth for
-  caution. A single small edit is an under-used iteration." And **scope it to the
-  SELECTED capabilities only** — include guidance / skill-references / editable
-  artifacts for just the caps in `capevolve.yaml: capabilities`. If only `tools` is
-  selected, do NOT include prompt-editing guidance, do NOT reference the
-  `system-prompt` skill, and do NOT present the prompt file as editable (and vice
-  versa). The authored instructions must also direct the optimizer to: READ and USE
-  the selected capability skills (`./guidance/<cap>/SKILL.md`), the diagnose skill
-  (`./guidance/diagnose/SKILL.md`), its own features reference
-  (`./guidance/optimizer/<name>.md`), and any `./guidance/sources/` files; READ the
-  cross-iteration files FIRST — `./LEDGER.md` (facts), the whole `./JOURNAL.md`
-  (append-only handover), and `./RUNMAP.md` + `./prior_iterations/` (every prior
-  iteration's PROCESS.md + diff) — and never re-propose a rejected-as-implemented
-  approach (not a permanent ban); each iteration fill `./PROCESS.md` (required
-  explainability) and APPEND to `./JOURNAL.md`; ship MULTIPLE edit classes and ADD a
-  new code-bearing tool whenever a CAPABILITY-GAP/stall cluster is present; and
-  address ALL failure clusters each iteration (parallel subagents → merge into one
-  candidate where supported). See intake SKILL.md step 5.
-
+  per-iteration optimizer-prompt TEMPLATE. The scaffold already copies a generic default
+  to `project/optimizer/INSTRUCTIONS.md` — the agent CUSTOMIZES that file rather than
+  authoring one from scratch, and points this key at it. Three jobs, no re-authoring of
+  what the template already says (depth mandate, non-overfitting guardrail, STEP-0
+  reading mandate, cross-iteration file protocol):
+  - keep every `{{...}}` placeholder intact — the harness fills them per iteration, and
+    `implement-and-check`'s pipeline self-test fails if one is deleted;
+  - **scope it to the SELECTED capabilities** — include guidance, skill references and
+    editable artifacts only for the caps in `capevolve.yaml: capabilities`, so no run
+    presents as editable an artifact it does not own. Each capability's own edit space
+    lives in its `./guidance/<cap>/SKILL.md`; the failure taxonomy lives in
+    `./guidance/diagnose/SKILL.md`; load `./guidance/<cap>/references/optimizer-playbook.md`
+    for any selected capability that ships one;
+  - add the benchmark facts the template cannot know: where the runner writes traces,
+    what the scoring source is, which data-model files the capability's code imports.
+  - **caution (issue #252):** a *relative* value here resolves project-relative under
+    `cap-evolve check` but cwd-relative under `cap-evolve run`, which then silently falls
+    back to the generic template. Write it absolute, or verify `run` picks up the
+    customized file.
 - **gate**: `gate_mode` (**paired** recommended — per-task paired SE on the same tasks
   both sides, ~2-3x smaller than combined-SE `significant`, so real 1-task gains bank;
-  also: significant|strict|threshold|simplicity_tiebreak), `gate_k_se` (default 1.0; the
+  also: significant|strict|threshold), `gate_k_se` (default 1.0; the
   examples use 0.2). Add `--no-regression` to forbid breaking passing tasks.
 
 - **metrics (display)**: which numbers to surface and which one GATES.
   - `metric_primary`: the single metric that decides accept/reject (= the scalar reward). Blank = use the reward directly.
   - `metrics_display` + `metric_directions`: extra SHOWN-ONLY metrics and each one's direction (`higher`|`lower`). These never affect the gate — display only.
-- **github_integration** (default `false`): if `true`, intake runs `gh auth status`; when authed, cap-evolve may mirror the algorithm's work items as issues and ship the winner as a PR (`Closes #n`). WHAT gets mirrored is algorithm-specific — the chosen `algorithm_skill` defines it (e.g. evo-graph mirrors *weaknesses*; a candidate-based algorithm might mirror candidates/iterations). GitHub is NEVER the source of truth — the run dir is. If unauthed, intake offers `gh auth login` or skip.
-- **orchestration_mode** (default `deterministic`): `deterministic` = cap-evolve sequences the loop (code-enforced honesty). `agent` = the coding agent drives the loop via cap-evolve primitives and seals with `cap-evolve finalize`. Agent mode also uses `stop_condition`.
+- **github_integration** (default `false`): if `true`, intake runs `gh auth status`; when authed, cap-evolve may mirror the algorithm's work items as issues and ship the winner as a PR (`Closes #n`). WHAT gets mirrored is algorithm-specific — the chosen `algorithm_skill` defines it (e.g. evograph mirrors *weaknesses*; a candidate-based algorithm might mirror candidates/iterations). GitHub is NEVER the source of truth — the run dir is. If unauthed, intake offers `gh auth login` or skip.
+- **orchestration_mode** (default `deterministic`): `deterministic` = cap-evolve sequences the loop (code-enforced honesty). `agent` = the coding agent drives the loop via cap-evolve primitives and seals with the finalize phase script (`skills/phases/finalize/scripts/run.py`). Agent mode also uses `stop_condition`.
 - **stop_condition** (default empty): agent-mode free-text halt rule, re-read each round. Deterministic mode ignores it and uses the budget knobs.
 
 - **baseline traces** (optional): prior rollouts to seed diagnosis. Default: none

@@ -51,31 +51,32 @@ from pathlib import Path
 from typing import Callable
 
 from . import gate as gate_mod
+from . import integrity
 from . import selection
 from .cache import EvalCache, hash_candidate_dir
 from .harness import (
-    _augment_instructions,
+    OptimizerContext,
+    move_is_resolved,
     _init_memory_store,
     _live,
     _paired_deltas,
+    _resolve_workers,
+    _SNAPSHOT_IGNORE,
     evaluate_candidate,
+    record_iteration,
     split_result_from_rollouts,
 )
 from .loop import SplitResult, aggregate_scores, has_valid_trials
 from .rundir import RunDir
-from .types import Rollout, Score
+from .trials import run_trials_pool
+from .types import NON_CAPABILITY_DIRS, NON_CAPABILITY_FILES, Rollout, Score
 
 OptimizerFn = Callable[[Path, str], None]
 
 # Optimizer-scratch / non-capability files that must NOT count as editable
 # "components" (they perturb neither the capability nor the content hash).
-_NON_COMPONENT = {
-    "MEMORY.md", "STATE.md", "INSTRUCTIONS.md", "REJECTED.md",
-    "FOCUS.md", "REFLECTION.md",
-    # cross-iteration state files (clean-ownership redesign) — scratch, not capability
-    "LEDGER.md", "JOURNAL.md", "PROCESS.md", "RUNMAP.md",
-}
-_NON_COMPONENT_DIRS = {".git", "__pycache__", "prior_iterations"}
+_NON_COMPONENT = NON_CAPABILITY_FILES
+_NON_COMPONENT_DIRS = NON_CAPABILITY_DIRS
 
 
 # ---- components (editable capability files) -------------------------------
@@ -116,6 +117,7 @@ def _eval_minibatch(
     cache: EvalCache | None,
     tag: str,
     seed: int = 0,
+    workers: int | None = None,
 ) -> SplitResult:
     """Run + score a candidate on a SPECIFIC set of train task ids (one trial).
 
@@ -134,6 +136,10 @@ def _eval_minibatch(
     honest gate). One trial per task — the minibatch is a cheap signal, not the
     significance test.
     """
+    # ``workers`` > 1 (default ``harness.DEFAULT_WORKERS``) pools the ROLLOUTS of the
+    # cache-missing tasks; scoring, rollout files and — critically — every
+    # ``cache.put`` (which rewrites the whole cache file) stay serial, in task order.
+    workers = _resolve_workers(workers)
     all_train = {t.id: t for t in adapter.tasks("all")}
     tasks = [all_train[tid] for tid in task_ids if tid in all_train]
     out_dir = run_dir.rollouts / "train"
@@ -145,16 +151,30 @@ def _eval_minibatch(
     t0 = time.time()
 
     with _live(adapter, candidate_dir) as ctx:
+        pooled = None
+        if workers > 1:
+            misses = [t for t in tasks
+                      if cache is None or cache.get(chash, t.id) is None]
+            grid = run_trials_pool(lambda t, s: adapter.run_target(t, ctx, seed=s),
+                                   misses, n_trials=1, base_seed=seed, max_workers=workers)
+            pooled = {tid: (rs[0] if rs else None) for tid, rs in grid.items()}
         for task in tasks:
             cached = cache.get(chash, task.id) if cache is not None else None
             if cached is not None:
                 reward = float(cached.get("reward", 0.0))
                 fb = str(cached.get("feedback", ""))
+                # Replay the reflective payload: without it a hit feeds
+                # _write_reflection an empty output/trace and misclassifies a cached
+                # infra failure as an actionable capability defect.
                 scores.append(Score(task_id=task.id, reward=reward, feedback=fb,
                                     n=1, stderr=0.0, trial_rewards=[reward],
-                                    raw={"cached": True}))
+                                    raw={"cached": True,
+                                         "errored": bool(cached.get("errored")),
+                                         "output": str(cached.get("output", "")),
+                                         "trace": str(cached.get("trace", ""))}))
                 continue
-            rollout = adapter.run_target(task, ctx, seed=seed)
+            rollout = (pooled.get(task.id) if pooled is not None
+                       else adapter.run_target(task, ctx, seed=seed))
             if rollout is None:
                 rollout = Rollout(task_id=task.id, error="no rollout")
             errored = bool(getattr(rollout, "error", None))
@@ -162,12 +182,12 @@ def _eval_minibatch(
             run_tokens += int(getattr(rollout, "tokens", 0) or 0)
             sc = adapter.score(task, rollout)
             n_called += 1
+            out_s = _short(getattr(rollout, "output", None))
+            trace_s = _short(getattr(rollout, "trace", None))
             scores.append(Score(
                 task_id=task.id, reward=sc.reward, feedback=sc.feedback or "",
                 n=1, stderr=0.0, trial_rewards=[sc.reward],
-                raw={"errored": errored,
-                     "output": _short(getattr(rollout, "output", None)),
-                     "trace": _short(getattr(rollout, "trace", None))},
+                raw={"errored": errored, "output": out_s, "trace": trace_s},
             ))
             (out_dir / f"{task.id}__{tag}__t0.json").write_text(
                 json.dumps({"input": task.input, "rollout": rollout.to_dict(),
@@ -175,7 +195,8 @@ def _eval_minibatch(
                 encoding="utf-8",
             )
             if cache is not None:
-                cache.put(chash, task.id, sc.reward, sc.feedback or "")
+                cache.put(chash, task.id, sc.reward, sc.feedback or "",
+                          output=out_s, trace=trace_s, errored=errored)
 
     elapsed = time.time() - t0
     # Count ONLY rollouts actually fired (cache hits cost nothing) toward budget.
@@ -185,7 +206,8 @@ def _eval_minibatch(
     result.cost_usd, result.tokens, result.seconds = run_cost, run_tokens, elapsed
     run_dir.log_event("minibatch", tag=tag, ids=list(task_ids),
                       reward=result.reward, fired=n_called,
-                      cached=len(task_ids) - n_called)
+                      cached=len(task_ids) - n_called,
+                      **({"workers": workers} if workers > 1 else {}))
     return result
 
 
@@ -460,6 +482,8 @@ def gepa_loop(
     seed: int = 0,
     store=None,
     resume: bool = False,
+    protected_patterns=None,
+    ctx: OptimizerContext | None = None,
 ) -> dict:
     """Run GEPA's sample-efficient reflective Pareto loop.
 
@@ -482,6 +506,7 @@ def gepa_loop(
     highest-val pool member; the test split is never touched.
     """
     gate_kwargs = dict(gate_kwargs or {})
+    ctx = ctx or OptimizerContext()   # the SAME read-context assembly as its siblings
     rejected, history, store = _init_memory_store(run_dir, store)
     cache = EvalCache(run_dir.root / "eval_cache.json")
     rng = random.Random(seed)
@@ -563,10 +588,27 @@ def gepa_loop(
             comp_cursor += 1
         else:
             focus = None  # 'all'
+        # The shared optimizer read-context (capability skill(s) natively + under
+        # ./guidance/, the diagnose method, sources, the optimizer features ref). The
+        # trajectories are tagged with THIS parent's minibatch eval — gepa's parent is a
+        # frontier member, not the run's best, so the untruncated traces behind
+        # REFLECTION.md are the ones to hand over.
+        ctx.inject(adapter, run_dir, workdir, split="train", tag=f"mb_p_{n:04d}")
         refl_summary = _write_reflection(workdir, parent_mb)
         focus_label = _write_focus(workdir, comps, focus)
-        instructions = _instructions(refl_summary, focus_label, mb)
-        instructions = _augment_instructions(instructions, workdir, run_dir, rejected, history)
+        instructions = ctx.instructions(
+            parent_mb, mb, f"GEPA minibatch of {len(mb)} train tasks, component focus "
+                           f"{focus_label}",
+            algorithm="gepa", parent_dir=parent_dir,
+            extra=_instructions(refl_summary, focus_label, mb))
+        instructions = ctx.augment_instructions(instructions, workdir, run_dir)
+
+        # Seal the eval surface for this child. GEPA runs the optimizer itself rather
+        # than via ``harness.run_step``, so it needs the same two calls. None = off.
+        manifest = (integrity.snapshot(workdir, protected_patterns)
+                    if protected_patterns else None)
+        if manifest is not None:
+            integrity.set_readonly(workdir, manifest)
 
         opt_error = None
         opt_cost_usd, opt_tokens = 0.0, 0
@@ -581,6 +623,28 @@ def gepa_loop(
             run_dir.log_event("optimizer_error", candidate=cid, error=opt_error[:500])
         run_dir.update_spent(optimizer_seconds=time.time() - _t0, optimizer_usd=opt_cost_usd,
                              optimizer_tokens=opt_tokens)
+
+        # Verify BEFORE the child minibatch eval — the first rollout spend of this
+        # iteration. A tampered child is INDECISIVE: no reward is recorded (not even
+        # the minibatch one), it never enters the pool or the rejected memory, and
+        # ``accepted=None`` leaves the stall counter untouched.
+        if manifest is not None:
+            report = integrity.verify(manifest, workdir)
+            if not report.ok:
+                run_dir.log_event("tamper_detected", candidate=cid, parent=parent["id"],
+                                  report=report.to_dict(), reason=report.reason)
+                _reason = "indecisive (integrity): " + report.reason
+                record_iteration(run_dir, workdir, cid, parent_id=parent["id"],
+                                 accepted=False, reason=_reason, indecisive=True,
+                                 memory_skill=ctx.memory_skill)
+                run_dir.log_event("step_indecisive", candidate=cid, reason=_reason)
+                steps.append({"candidate_id": cid, "parent_id": parent["id"], "minibatch": mb,
+                              "accepted": False, "candidate_val": None,
+                              "tamper": report.to_dict(), "optimizer_error": opt_error,
+                              "focus": focus_label, "workdir": str(workdir)})
+                run_dir.record_spend_warnings()
+                _save()
+                continue
 
         # 6. eval child on the SAME minibatch; cheap LOCAL gate sum(child)>sum(parent).
         child_mb = _eval_minibatch(adapter, workdir, mb, run_dir=run_dir,
@@ -598,8 +662,13 @@ def gepa_loop(
         }
 
         if not local_pass:
-            # Cheap rejection — no full-val spend. Record it for memory + audit.
-            run_dir.update_spent(iterations=1, accepted=False)
+            # Cheap rejection — no full-val spend, so ``val`` stays None: the minibatch
+            # reward is NOT a val number and must never be written into that field.
+            record_iteration(run_dir, workdir, cid, parent_id=parent["id"], accepted=False,
+                             reason="local minibatch gate: sum(child) <= sum(parent)",
+                             parent_val=parent["result"].reward, focus=focus_label,
+                             memory_skill=ctx.memory_skill,
+                             mb_child=child_mb.reward, mb_parent=parent_mb.reward)
             rejected.add(cid, f"candidate {cid} (mb {child_mb.reward:.3f} vs parent "
                               f"{parent_mb.reward:.3f})",
                          "local minibatch gate: sum(child) <= sum(parent)", child_mb.reward)
@@ -616,16 +685,17 @@ def gepa_loop(
             adapter, run_dir=run_dir, workdir=workdir, parent_result=parent_result,
             cid=cid, n_trials=n_trials, gate_kwargs=gate_kwargs,
             no_regression=no_regression, parent_id=parent["id"],
+            memory_skill=ctx.memory_skill,
         )
         step["decision"] = decision_dict
         step["candidate_val"] = cand_val.to_dict()
         step["accepted"] = accepted
-        run_dir.update_spent(iterations=1, accepted=accepted)
+        # NB: the iteration was charged inside ``_full_val_gate`` (record_iteration).
 
         summary = (f"candidate {cid} (val {cand_val.reward:.3f}, "
                    f"Δ {cand_val.reward - parent_result.reward:+.3f})")
         if accepted:
-            run_dir.snapshot(cid, workdir)
+            run_dir.snapshot(cid, workdir, ignore=_SNAPSHOT_IGNORE)
             child_dir = run_dir.candidate_dir(cid)
             pool.append(_entry(cid, child_dir, cand_val, parent=parent["id"]))
             lineage[cid] = parent["id"]
@@ -647,7 +717,7 @@ def gepa_loop(
                 mb_size=minibatch_size, rng=rng, n_trials=n_trials,
                 gate_kwargs=gate_kwargs, no_regression=no_regression,
                 store=store, history=history, rejected=rejected, train_ids=train_ids,
-                idx=step_offset + len(steps), seed=seed,
+                idx=step_offset + len(steps), seed=seed, ctx=ctx,
             )
             if merge_step is not None:
                 steps.append(merge_step)
@@ -685,7 +755,7 @@ def _sample_minibatch(train_ids: list[str], size: int, rng: random.Random) -> li
 def _full_val_gate(
     adapter, *, run_dir: RunDir, workdir: Path, parent_result: SplitResult,
     cid: str, n_trials: int, gate_kwargs: dict, no_regression: bool,
-    parent_id: str | None = None,
+    parent_id: str | None = None, memory_skill: str | None = None,
 ) -> tuple[dict, bool, SplitResult]:
     """Full-val eval + the honest significance gate (the same path ``run_step``
     uses, replicated WITHOUT bypassing gate/seal).
@@ -708,21 +778,32 @@ def _full_val_gate(
     )
     accepted = decision.accept
     if accepted and no_regression:
-        eps = 1e-9
         # Compare only tasks BOTH sides actually measured: an unscored candidate
         # task is missing data, and reading its 0.0 as "broke a task the parent
         # passed" would let one image-pull failure veto a genuinely better edit.
-        pr = {pt["task_id"]: pt.get("reward", 0.0) for pt in parent_result.per_task
-              if has_valid_trials(pt)}
-        cr = {pt["task_id"]: pt.get("reward", 0.0) for pt in cand_val.per_task
-              if has_valid_trials(pt)}
-        regressions = sorted(t for t, v in pr.items() if t in cr and cr[t] < v - eps)
+        # The drop must also clear 2*SE of its own per-task measurement
+        # (``harness.move_is_resolved``): this veto REJECTS a gate-passing candidate, so a
+        # single flipped rollout out of ten must not be able to do it.
+        pr = {pt["task_id"]: pt for pt in parent_result.per_task if has_valid_trials(pt)}
+        cr = {pt["task_id"]: pt for pt in cand_val.per_task if has_valid_trials(pt)}
+        regressions = sorted(
+            t for t, pt in pr.items()
+            if t in cr
+            and (cr[t].get("reward", 0.0) or 0.0) < (pt.get("reward", 0.0) or 0.0)
+            and move_is_resolved(pt.get("reward", 0.0) or 0.0,
+                                 cr[t].get("reward", 0.0) or 0.0,
+                                 pt.get("stderr") or 0.0, cr[t].get("stderr") or 0.0))
         if regressions:
             accepted = False
             decision.reason += f"; REJECTED by no-regression gate (broke {regressions})"
-    run_dir.log_event("gepa_val_gate", candidate=cid, accept=accepted,
-                      reason=decision.reason, val=cand_val.reward,
-                      parent=parent_id, parent_val=parent_result.reward)
+    # The iteration record + journal reconcile, through the ONE shared step (#216/#224).
+    # Both callers (the main loop and ``_try_merge``) end their iteration here, so
+    # neither charges the budget itself.
+    record_iteration(run_dir, workdir, cid, parent_id=parent_id, accepted=accepted,
+                     reason=decision.reason, val=cand_val.reward,
+                     parent_val=parent_result.reward, memory_skill=memory_skill,
+                     runner_seconds=round(cand_val.seconds, 2),
+                     cost_usd=cand_val.cost_usd, tokens=cand_val.tokens)
     return decision.to_dict(), accepted, cand_val
 
 
@@ -730,7 +811,7 @@ def _try_merge(
     adapter, *, run_dir: RunDir, pool: list[dict], lineage: dict[str, str | None],
     cache: EvalCache, mb_size: int, rng: random.Random, n_trials: int,
     gate_kwargs: dict, no_regression: bool, store, history, rejected,
-    train_ids: list[str], idx: int, seed: int,
+    train_ids: list[str], idx: int, seed: int, ctx: "OptimizerContext | None" = None,
 ) -> dict | None:
     """Find a complementary frontier pair, build a component-wise merge, minibatch-
     gate it (>= max(parents) on the minibatch), then full-val + standard gate.
@@ -781,15 +862,15 @@ def _try_merge(
     decision_dict, accepted, cand_val = _full_val_gate(
         adapter, run_dir=run_dir, workdir=workdir, parent_result=base_parent["result"],
         cid=mid, n_trials=n_trials, gate_kwargs=gate_kwargs, no_regression=no_regression,
-        parent_id=base_parent["id"],
+        parent_id=base_parent["id"], memory_skill=(ctx.memory_skill if ctx else None),
     )
     step["decision"] = decision_dict
     step["candidate_val"] = cand_val.to_dict()
     step["accepted"] = accepted
-    run_dir.update_spent(iterations=1, accepted=accepted)
+    # NB: the iteration was charged inside ``_full_val_gate`` (record_iteration).
     summary = f"merge {mid} of {a['id']}+{b['id']} (val {cand_val.reward:.3f})"
     if accepted:
-        run_dir.snapshot(mid, workdir)
+        run_dir.snapshot(mid, workdir, ignore=_SNAPSHOT_IGNORE)
         pool.append(_entry(mid, run_dir.candidate_dir(mid), cand_val, parent=base_parent["id"]))
         lineage[mid] = base_parent["id"]
         history.add(mid, summary, cand_val.reward)

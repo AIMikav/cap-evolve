@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="python">
   <img src="https://img.shields.io/badge/runtime%20deps-0%20(stdlib)-success" alt="deps">
   <img src="https://img.shields.io/badge/license-Apache--2.0-informational" alt="license">
-  <img src="https://img.shields.io/badge/agent%20skills-20-7c5cff" alt="skills">
+  <img src="https://img.shields.io/badge/agent%20skills-22-7c5cff" alt="skills">
 </p>
 
 **cap-evolve improves an AI agent's prompts, tools, and skills by learning from failed
@@ -23,10 +23,17 @@ diagnose the failures → propose an edit → keep it only if it beats a held-ou
 significant margin → commit — and reports one honest number. It optimizes what your agent
 *reads*, not its weights.
 
+<!-- A linked poster, not a <video> tag: GitHub's README sanitizer only honors <video> for
+     its own attachment hosts, so an external src renders as an empty gap. The thumbnail
+     opens GitHub's own player. The site embeds the real <video> — Pages serves it as
+     video/mp4, which raw.githubusercontent does not. -->
 <p align="center">
-  <img src="site/assets/dash-overview.png" alt="cap-evolve dashboard — a real tau2-bench airline run" width="900"/>
+  <a href="https://github.com/skillberry-ai/cap-evolve/blob/main/docs/assets/demo/cap-evolve-demo.mp4">
+    <img src="site/assets/demo-poster.jpg" alt="Play the 85-second cap-evolve demo — the CLI, four real dashboard tabs, and both benchmark results" width="900"/>
+  </a>
   <br/>
-  <sub>A real τ²-bench airline run in the live dashboard — baseline → best, accepted vs rejected candidates, cost, and the fitness stair.</sub>
+  <sub>▶︎ <a href="https://github.com/skillberry-ai/cap-evolve/blob/main/docs/assets/demo/cap-evolve-demo.mp4">Watch
+  the 85-second demo</a> · <a href="https://skillberry-ai.github.io/cap-evolve/#demo-video">plays inline on the site</a></sub>
 </p>
 
 <p align="center">
@@ -75,6 +82,80 @@ baseline_val 0.0  ->  test_reward 1.0   (gate-accepted, test sealed) + dashboard
 Open the printed `dashboard.html` in any browser. Full walkthrough:
 [Getting started](docs/GETTING_STARTED.md).
 
+## The CLI
+
+Start with no arguments — `cap-evolve` prints a branded home screen with the golden path and
+every command grouped by what it's for.
+
+```bash
+cap-evolve                         # home: the 3-step path + all commands
+cap-evolve init                    # scaffold a project and write capevolve.yaml
+cap-evolve doctor                  # readiness check: what's missing + the command that fixes it
+cap-evolve algorithms              # the five algorithms and the exact spec lines to pick one
+cap-evolve help <command>          # full help with copy-paste examples
+```
+
+`doctor` is the one to run before spending anything. Every failing row names the fix:
+
+<p align="center">
+  <img src="docs/assets/screenshots/cli_doctor.png" alt="cap-evolve doctor — readiness check with a fix command under each failing row" width="820"/>
+</p>
+
+### See what actually changed
+
+Every candidate is a snapshot, so you can read the edit that moved the number — unified below
+120 columns, side-by-side above:
+
+```bash
+cap-evolve diff --best             # seed → the winning candidate
+cap-evolve diff cand_0003          # against its parent
+cap-evolve diff cand_0003 --stat   # just the per-file +/- counts
+```
+
+### Watch a run, live
+
+```bash
+cap-evolve watch                   # live view of the newest run
+cap-evolve replay --demo           # no API key, no config — replays a bundled recording
+cap-evolve run --tui               # the live view instead of the line log
+cap-evolve watch --diff            # …and show what each accepted candidate changed
+```
+
+<p align="center">
+  <img src="docs/assets/screenshots/cli_live_view.png" alt="cap-evolve live terminal view — identity masthead, cumulative-best chart, candidate lineage with gate reasons, per-task heatmap, and spend split by role" width="960"/>
+  <br/>
+  <sub>The live view. The masthead answers <em>is this the run I meant to launch?</em> — resolved
+  spec, algorithm and mode, split sizes, gate bar. Then the cumulative-best stair, the lineage
+  with the paired-gate reason behind every accept (<code>✓</code>), reject (<code>✗</code>) and
+  <strong>indecisive</strong> (<code>~</code>) step, a per-task heatmap that marks
+  <em>not&nbsp;evaluated</em> distinctly from <em>failed</em>, and spend split into
+  runner / optimizer / intake.</sub>
+</p>
+
+## The dashboard
+
+```bash
+cap-evolve dashboard                        # live, over a base dir of runs
+```
+
+Every run gets the same tabs whatever algorithm produced it — Overview, Candidates, Gate,
+Tasks, Cost, Logs, Diffs, Trajectories, Memory, Files — and an algorithm that has extra signal
+gets an extra tab rather than a different dashboard. GEPA's minibatch-vs-full-val gates and
+Pareto selection, SkillOpt's epochs and edit-budget schedule, and
+`agent-optimize`'s free-form rounds are all read from events the engine already emitted.
+
+<p align="center">
+  <img src="docs/assets/screenshots/dash_wide_logs.png" alt="cap-evolve dashboard, Logs tab — every event with phase, kind, candidate and detail, filterable and searchable" width="900"/>
+  <br/>
+  <sub>Logs: every line of <code>events.jsonl</code>, phase-tagged and filterable — including the
+  optimizer's own stderr and each budget warning. Model- and subprocess-authored text is
+  sanitized and rendered as text nodes only, so a log line can never drive the page.</sub>
+</p>
+
+The dashboard and the terminal are the same projection (`events.jsonl` → `reduce_run`), so they
+cannot disagree about what happened. `run` also writes a self-contained `dashboard.html` that
+needs no server.
+
 ## Choose your path
 
 | Path | Use it when | Start |
@@ -99,16 +180,44 @@ Combine them, e.g. `[system-prompt, tools]`. See [Architecture](docs/ARCHITECTUR
 
 ## Results
 
-Numbers are cross-checked against committed run artifacts; each is labeled **fit metric**
-(no holdout) or **held-out** (test scored once on ids the optimizer never saw). Full detail,
-models, task/trial counts, commits, and costs: **[docs/RESULTS.md](docs/RESULTS.md)**.
+Each result is labeled **fit metric** (no holdout) or **held-out** (test scored once on ids
+the optimizer never saw). Full detail, models, task/trial counts, commits, and costs:
+**[docs/RESULTS.md](docs/RESULTS.md)**. Every row is cross-checked against a committed run
+artifact **except RH-SWE-bench**, whose artifact is not in this repo — see the caveats in
+[docs/RESULTS.md](docs/RESULTS.md#rh-swe-bench-swe-bench-verified-via-harbor-fit-metric-no-committed-artifact)
+before quoting it.
 
 | Benchmark | Split | Baseline → Optimized | Gain |
 |---|---|---|---|
+| **RH-SWE-bench** (skill-package + system-prompt, Harbor) | val — *fit metric* (119 tasks) | `0.580 → 0.765` | **+0.185 / +31.9%** |
 | **toy_calc** (zero-API) | sealed test | `0.0 → 1.0` | deterministic proof |
 | **τ²-bench airline** (policy + tools) | val — *fit metric* | `0.536 → 0.712` | **+0.176 / +32.8%** |
 | **τ²-bench airline**, held-out 30(=val)/20 | sealed **test** | `30.0 → 47.5` | **+17.5 pp / +58.3%** |
 | **SkillsBench** (skill package) | sealed **test** (held-out) | `0.556 → 0.667` | **+0.111 / +20.0%** |
+
+<p align="center">
+  <img src="site/assets/rh_swe_bench.png" alt="RH SWE-Bench scores by model and harness: cap-evolve-optimized Sonnet 4.6 at 73.1, Opus 4.6 at 63.3, Sonnet 4.6 at 55.7, and three RedHatAI/NVIDIA-Nemotron rows at 30.8, 22.4 and 21.6" width="800"/>
+  <br/>
+  <sub>RH SWE-Bench by model and harness: a cap-evolve-optimized Sonnet 4.6 (73.1) scores
+  above an unoptimized Opus 4.6 (63.3) and its own unoptimized baseline (55.7).
+  <br/>
+  <em>This chart's numbers are a different measurement from the 58.0 → 76.5 fit-metric run in
+  the table above, and the relationship between the two is unresolved — see
+  <a href="docs/RESULTS.md#rh-swe-bench-swe-bench-verified-via-harbor-fit-metric-no-committed-artifact">the caveats</a>.</em></sub>
+</p>
+
+**At a glance — baseline → optimized across all benchmarks:**
+
+```
+reward × 100
+─────────────────────────────────────────────────────────────────────
+RH-SWE-bench (119 tasks, fit metric)    ●────────────●  58.0 → 76.5  +18.5 pp / +31.9%
+τ²-bench airline (50 tasks, fit metric) ●──────────●    53.6 → 71.2  +17.6 pp / +32.8%
+τ²-bench airline (20 tasks, held-out)   ●──────────●    30.0 → 47.5  +17.5 pp / +58.3%
+SkillsBench (3 tasks, held-out)         ●──────●        55.6 → 66.7  +11.1 pp / +20.0%
+─────────────────────────────────────────────────────────────────────
+○ = baseline (seed)   ● = optimized (best candidate)
+```
 
 *Not an apples-to-apples leaderboard.* For how the held-out τ²-bench result sits next to
 external tool-optimization work ([EvoTool](https://arxiv.org/abs/2603.04900) on the
@@ -166,7 +275,7 @@ SkillsBench) and switch providers with a one-line env change:
 | Example | What it shows | Needs | Run |
 |---|---|---|---|
 | [`toy_calc`](examples/toy_calc) | The full loop, deterministically | nothing | `bash examples/toy_calc/run.sh` |
-| [`tau2_airline`](examples/tau2_airline) | Onboard a real benchmark from one prompt; optimize policy **+ tool code** | RITS creds, Claude Code | `bash examples/tau2_airline/setup.sh && bash examples/tau2_airline/run.sh` |
+| [`tau2_airline`](examples/tau2_airline) | Onboard a real benchmark from one prompt; optimize policy **+ tool code** | gateway creds, Claude Code | `bash examples/tau2_airline/setup.sh && bash examples/tau2_airline/run.sh` |
 | [`skillsbench`](examples/skillsbench) | Optimize a **skill package**; agent runs in Docker | Docker, `uv`, Claude creds | `bash examples/skillsbench/setup.sh && bash examples/skillsbench/run.sh` |
 
 Each example's paste-to-agent brief is its `PROMPT.md`, its narrative is `DEMO.md`, and its
@@ -193,6 +302,7 @@ from zero: [tau2](docs/REPRODUCE_tau2.md) · [SkillsBench](docs/REPRODUCE_skills
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Installation or a run failed |
 | [Roadmap](docs/ROADMAP.md) | You want planned work |
 | [How-to guides](docs/how-to/cap-evolve-with-exgentic-tau2.md) | You want a specific harness + benchmark recipe |
+| [Docker/Podman on CCC](docs/how-to/ccc/CCC_PODMAN_SETUP.md) | You are running on a cluster with no root, no `sudo`, no subuid range (IBM CCC), or submitting cap-evolve through LSF |
 
 ## Project status and support
 

@@ -100,10 +100,19 @@ you want intake to ask):
 - max_optimizer_usd:    <cumulative optimizer-only $ cap; 0 = unlimited>
 - optimizer_usd_per_iter: <PER-ITERATION $ cap enforced by the optimizer CLI itself, e.g. claude `--max-budget-usd N`>
 - optimizer_max_turns:  <per-iteration WORK cap passed to the agent CLI, e.g. claude `--max-turns N`>
-- gate:                 <significant (k_se) | strict | threshold>
-                        # significant: accept only if Δ > k_se · SE — k_se is how many standard errors
-                        # the val gain must clear (e.g. 0.2 = lenient, 1.0 = strict) so noise isn't mistaken for progress
+- gate_mode:            <paired (default) | significant | threshold | strict>
+- gate_k_se:            <how many standard errors the val gain must clear (0.2 = lenient, 1.0 = strict)>
+                        # paired: accept only if mean(per-task Δ) > gate_k_se · SE(Δ) over the SAME val
+                        # tasks. The bar is Δ > k·SE and not Δ > 0 because search amplifies noise — with
+                        # enough candidates the best-looking one is best by luck. See docs/HONEST_EVAL.md.
 - stall:                <stop after N consecutive rejects; 0 = run all max_iterations>
+- stop_at_reward:       <stop as soon as the best val reward reaches this; 0 = off. Fires
+                        # before iteration 1 if the seed is already saturated. The sealed
+                        # test split is still scored at finalize, so the held-out number
+                        # is never lost. Trusts a single raw val measurement with no
+                        # regard for num_trials, so templates with num_trials=1 (best_val's
+                        # stderr is 0 without being meaningful) ship this at 0.0; only the
+                        # multi-trial tau2_bench template ships it at 1.0.>
 - store:                git          # versions every iteration as a commit for an inspectable process
 ```
 
@@ -142,7 +151,7 @@ resolves the name via `skills/optimizers/registry.yaml`:
 ```yaml
 capabilities:    [system-prompt, tools]   # any of: system-prompt | tools | mcp-tool | skill-package
 optimizer_skill: claude-code              # ← swap: codex | gemini-cli | opencode | cursor | droid | copilot | kimi | pi | antigravity | openclaw | ibm-bob | generic | mock
-algorithm_skill: hill-climb               # hill-climb (--focus all|cyclic|hardest-first) | gepa | skillopt | agent-optimize | evograph (last two REQUIRE orchestration_mode: agent)
+algorithm_skill: hill-climb               # hill-climb (--focus all|cyclic|hardest-first) | gepa | skillopt | agent-optimize (REQUIRES orchestration_mode: agent). evograph is deprecated.
 num_trials: 4
 store: git                                # versions every iteration
 ```

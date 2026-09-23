@@ -3,7 +3,7 @@
     "agent-optimize": {
       "component": "algorithm",
       "path": "algorithms/agent-optimize",
-      "summary": "Fully-agentic, free-form optimization loop the conversational agent owns end to end \u2014 it understands the benchmark/inputs first, proposes capability edits itself, evaluates task subsets for cheap triage, and accepts only on a full-val significance gate, all bounded by a free-text stop_condition it re-reads with the run-dir spend. Agent-mode only (orchestration_mode agent).",
+      "summary": "Fully-agentic, free-form optimization loop the conversational agent owns end to end \u2014 it understands the benchmark/inputs first, proposes capability edits itself (serially, or several siblings in parallel working copies with unique rollout tags), kills bad candidates cheaply on a deterministic, seeded, informative SUBSET of val (a promotion ladder that can only kill, never accept), and accepts only on a full-val PAIRED significance gate plus a no-regression veto \u2014 all bounded by a free-text stop_condition parsed into re-checkable predicates and re-read from the run dir every round, and finished with one honest train/val/sealed-test measurement. Agent-mode only (orchestration_mode agent).",
       "entry": "scripts/run.py",
       "abstract": "scripts/abstract.py",
       "check": "scripts/check.py",
@@ -29,7 +29,7 @@
     "evograph": {
       "component": "algorithm",
       "path": "algorithms/evograph",
-      "summary": "evo-graph as a cap-evolve algorithm (AGENT MODE ONLY) \u2014 a collaborative weakness-graph optimizer that clusters train failures into a shared markdown wiki, dispatches one solver per weakness in its own worktree scoped to that weakness's frozen affected_tasks, merges verified improvements, reverts a whole round on regression, and seals the test once via finalize. Writes a run-dir wiki + custom_view.json so its weakness-graph dashboard tab renders.",
+      "summary": "DEPRECATED (agent mode only) \u2014 the evo-graph weakness-graph algorithm. Do not select it for new runs: its one-solver-per-weakness fan-out is agent-optimize's sibling fan-out done behind the val significance gate evograph never applied, and its clustering, rejected-edit memory and stop-condition handling live in agent-optimize + phases/diagnose. Kept so an existing evograph run dir stays readable and the run-dir wiki/ format the dashboard's Weakness-graph tab reads still has an owner. Use agent-optimize (agent mode) or hill-climb | gepa | skillopt (deterministic).",
       "entry": "scripts/run.py",
       "abstract": "scripts/abstract.py",
       "check": "scripts/check.py",
@@ -55,7 +55,7 @@
     "gepa": {
       "component": "algorithm",
       "path": "algorithms/gepa",
-      "summary": "Real GEPA \u2014 sample-efficient reflective Pareto optimization with a cheap minibatch local gate in front of the honest full-val gate, trace-based reflective dataset, per-instance frontier parent sampling, round-robin component focus, and system-aware merge.",
+      "summary": "GEPA \u2014 sample-efficient reflective Pareto optimization: a cheap train-minibatch local gate in front of the honest full-val gate, a trace-based reflective dataset, per-instance frequency-weighted parent sampling, round-robin component focus, and system-aware merge.",
       "entry": "scripts/run.py",
       "abstract": "scripts/abstract.py",
       "check": "scripts/check.py",
@@ -82,7 +82,7 @@
     "hill-climb": {
       "component": "algorithm",
       "path": "algorithms/hill-climb",
-      "summary": "Global hill-climb on the val gate with a selectable focus schedule (--focus all|cyclic|hardest-first); parent is always the current best.",
+      "summary": "Global hill-climb on the val gate with a selectable focus schedule (--focus all|cyclic|hardest-first) over the val tasks; parent is always the current best.",
       "entry": "scripts/run.py",
       "abstract": "scripts/abstract.py",
       "check": "scripts/check.py",
@@ -108,7 +108,7 @@
     "skillopt": {
       "component": "algorithm",
       "path": "algorithms/skillopt",
-      "summary": "SkillOpt single-lineage climb over epochs x mini-batches with a textual learning rate (integer edit budget on a constant|linear|cosine schedule), a within-epoch rejected-edit buffer, and a gated epoch-boundary slow/meta update.",
+      "summary": "SkillOpt single-lineage climb over epochs x mini-batches with a textual learning rate (integer edit budget on a constant|linear|cosine schedule) and a gated epoch-boundary consolidation step. Parent is always the current best; acceptance is the val significance gate.",
       "entry": "scripts/run.py",
       "abstract": "scripts/abstract.py",
       "check": "scripts/check.py",
@@ -156,7 +156,7 @@
     "skill-package": {
       "component": "capability",
       "path": "capabilities/skill-package",
-      "summary": "Optimize an Agent Skill package (SKILL.md + references + scripts) under skill-creator authoring rules.",
+      "summary": "Optimize a WHOLE Agent Skill package \u2014 SKILL.md, references, and bundled scripts \u2014 under the skill-creator authoring rules.",
       "entry": "scripts/run.py",
       "abstract": "scripts/abstract.py",
       "check": "scripts/check.py",
@@ -219,6 +219,49 @@
         ]
       }
     },
+    "spa": {
+      "component": "intervention",
+      "path": "interventions/llm-proxies/spa",
+      "summary": "Deliver the optimized capability through the Skillberry proxy stack (store + proxy-agent) instead of handing files to the runner \u2014 provision, run, deploy, stop and clean that stack.",
+      "entry": "scripts/run.py",
+      "abstract": null,
+      "check": "scripts/check.py",
+      "prompt": null,
+      "inputs": null,
+      "needs": [],
+      "provides": [],
+      "compatible_with": {
+        "capabilities": [
+          "*"
+        ],
+        "optimizers": [
+          "*"
+        ],
+        "algorithms": [
+          "*"
+        ]
+      }
+    },
+    "wiki": {
+      "component": "memory",
+      "path": "memory/wiki",
+      "summary": "Cross-iteration memory as a weakness graph (weakness nodes + solution cards), extracted from the deprecated evograph algorithm. Select via memory_skill: wiki in capevolve.yaml.",
+      "entry": "scripts/run.py",
+      "abstract": null,
+      "check": "scripts/check.py",
+      "prompt": null,
+      "inputs": null,
+      "needs": [],
+      "provides": [],
+      "compatible_with": {
+        "optimizers": [
+          "*"
+        ],
+        "algorithms": [
+          "*"
+        ]
+      }
+    },
     "run-optimizer": {
       "component": "optimizer",
       "path": "optimizers/run-optimizer",
@@ -271,18 +314,14 @@
     "using-cap-evolve": {
       "component": "orchestrate",
       "path": "orchestrate/using-cap-evolve",
-      "summary": "Session-start router \u2014 turns \"optimize <X>\" into the cap-evolve pipeline; routes to intake and documents the standalone phase chain and the automatic `cap-evolve run` path.",
+      "summary": "Session-start router \u2014 turns an \"optimize this\" request into the cap-evolve pipeline; resolves the on-disk state and names the next command (intake, the check gate, a resumed run, or a new run reusing a sealed baseline).",
       "entry": "scripts/run.py",
       "abstract": "scripts/abstract.py",
       "check": "scripts/check.py",
       "prompt": null,
       "inputs": null,
-      "needs": [
-        "project"
-      ],
-      "provides": [
-        "report"
-      ],
+      "needs": [],
+      "provides": [],
       "compatible_with": {
         "capabilities": [
           "*"

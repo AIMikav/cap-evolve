@@ -1,9 +1,9 @@
-"""Project adapter — optimize tau2-bench AIRLINE (system-prompt POLICY + TOOLS) via IBM RITS.
+"""Project adapter — optimize tau2-bench AIRLINE (system-prompt POLICY + TOOLS) via the ETE gateway.
 
 Wires cap-evolve to the tau2 airline domain:
 
   * ``tasks``      -> all 50 airline tasks (stable, non-empty for every split).
-  * ``run_batch``  -> tau2's own batch runner (``run_tasks``) with a RITS-backed
+  * ``run_batch``  -> tau2's own batch runner (``run_tasks``) with a gateway-backed
                       ``TextRunConfig``; maps each ``SimulationRun`` to a ``Rollout``.
   * ``run_target`` -> thin wrapper over ``run_batch`` for one task.
   * ``score``      -> tau2's own reward in [0,1] (deterministic given a rollout);
@@ -16,21 +16,126 @@ Wires cap-evolve to the tau2 airline domain:
                       always resets to a pristine snapshot before applying.
 
 ``cap-evolve check`` does NO live LLM call: ``tasks``/``score``/``materialize`` are
-network-free, and RITS endpoint resolution is lazy (only on a real ``run_batch``).
+network-free, and gateway credential resolution is lazy (only on a real ``run_batch``).
 """
 
 from __future__ import annotations
 
 import importlib.util
+import os
+import re
 import sys
+import time
 from pathlib import Path
 
-# Make sibling helper modules (rits.py) importable regardless of caller cwd.
+# Make sibling helper modules (gateway.py) importable regardless of caller cwd.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from cap_evolve import CapabilityAdapter, Rollout, Score, Task
 
 DOMAIN = "airline"
+
+# docs/TAU2_SUMMARY.md row 7: the tau2-bench user simulator sometimes emits ``###STOP###``
+# in the SAME message as reasoning that explicitly plans to continue ("we must wait for
+# agent's third message. Continue."), in 15/27 observed task-7 failures — ~4.2% of all
+# rollouts lost to a simulator artifact that measures nothing about agent skill. tau2-bench
+# is an external package (cloned at setup time, not vendored here), so the fix lives on our
+# side of the boundary: detect the leak from the message trace and mark the rollout as
+# infra noise, matching the existing ``rollout.error`` path below rather than scoring the
+# agent down for a bug that is not the agent's.
+_STOP_LEAK_RE = re.compile(
+    r"###\s*stop\s*###.{0,400}\b(?:continue|continuing|wait\s+for|must\s+wait|"
+    r"keep\s+(?:going|talking)|not\s+(?:done|finished)\s+yet)\b"
+    r"|\b(?:continue|continuing|wait\s+for|must\s+wait|"
+    r"keep\s+(?:going|talking)|not\s+(?:done|finished)\s+yet)\b.{0,400}###\s*stop\s*###",
+    re.I | re.S,
+)
+
+
+def _leaked_stop_continuation(messages) -> bool:
+    """True iff a user-simulator turn emits ``###STOP###`` alongside leaked reasoning that
+    explicitly plans to continue the conversation. Only ``user``-role turns are checked —
+    that is the simulator's own voice, not the agent's."""
+    for m in messages or []:
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, str) and _STOP_LEAK_RE.search(content):
+            return True
+    return False
+
+
+_cost_unpriced_warned = False
+
+
+def _cost_and_tokens(sim) -> tuple[float, int, dict]:
+    """Cost and token usage for one simulation, plus metadata saying how solid the cost is.
+
+    ``sim.agent_cost``/``sim.user_cost`` come from tau2's ``get_cost``, which is
+    ALL-OR-NOTHING: it returns ``None`` the moment ANY non-tool message lacks a
+    per-message ``cost``. The previous ``sim.agent_cost or 0.0`` therefore collapsed
+    "the provider did not price this" into "$0.00" — every RITS/proxy run (the
+    ``aws/gpt-oss-120b`` target model included) reported $0.0000 of eval spend despite
+    real rollouts, so a genuinely free run was indistinguishable from an unpriced one.
+
+    What this does about it:
+      * TOKENS are always recovered via tau2's ``get_token_usage`` (skips messages
+        without usage instead of nulling the whole run) rather than hardcoding
+        ``tokens=0`` and discarding real usage.
+      * COST falls back to summing the per-message ``cost`` values that ARE present,
+        which beats zero when only a few messages are unpriced.
+      * It deliberately does NOT price tokens from a public rate table here — the
+        proxy/RITS endpoint's real rates are not knowable from this adapter, and a
+        fabricated dollar figure next to measured ones is worse than an absent one.
+      * ``cost_source``/``messages_missing_cost`` record which case happened, so a
+        0.0 reads as "unpriced" rather than "free" (``Rollout.cost_usd`` is a
+        non-optional float that coerces ``None`` to ``0.0``).
+    """
+    global _cost_unpriced_warned
+
+    agent_cost, user_cost = sim.agent_cost, sim.user_cost
+    try:
+        messages = list(sim.get_messages())
+    except Exception:  # noqa: BLE001
+        messages = []
+
+    try:
+        from tau2.utils.llm_utils import get_token_usage
+
+        usage = get_token_usage(messages) or {}
+        tokens = int(usage.get("prompt_tokens", 0)) + int(usage.get("completion_tokens", 0))
+    except Exception:  # noqa: BLE001
+        tokens = 0
+    missing_usage = sum(1 for m in messages if getattr(m, "usage", None) is None)
+
+    if agent_cost is not None or user_cost is not None:
+        return (
+            float(agent_cost or 0.0) + float(user_cost or 0.0),
+            tokens,
+            {"cost_source": "tau2", "messages_missing_cost": 0, "messages_missing_usage": missing_usage},
+        )
+
+    # tau2 gave up on the whole run: salvage whatever the provider did price.
+    priced = [m for m in messages if getattr(m, "cost", None) is not None]
+    missing = len(messages) - len(priced)
+    partial = float(sum(m.cost for m in priced))
+    if priced:
+        source = "partial_messages"
+    else:
+        source = "unpriced"
+        if not _cost_unpriced_warned:
+            _cost_unpriced_warned = True
+            print(
+                "tau2: the provider returned no per-message cost for this target model, "
+                "so eval spend cannot be measured for this run; reporting tokens instead. "
+                "Rollout cost_usd will read 0.0 with metadata cost_source='unpriced'.",
+                file=sys.stderr,
+            )
+    return partial, tokens, {
+        "cost_source": source,
+        "messages_missing_cost": missing,
+        "messages_missing_usage": missing_usage,
+    }
 
 
 def _shown_metrics(reward: float, reward_info: dict, rollout) -> list:
@@ -134,6 +239,16 @@ def _read_candidate_policy(candidate_dir: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _native_sims_enabled() -> bool:
+    """Whether to keep tau2's OWN results.json for this eval (default: yes).
+
+    These are the traces `tau2 view` reads, and reading them is how you learn WHY a
+    candidate scored what it scored. A flag you must set to get the feature is a flag
+    nobody sets, so the default is ON.
+    """
+    return str(os.environ.get("CAPEVOLVE_NATIVE_SIMS", "")).strip().lower() not in {
+        "0", "false", "no", "off"}
+
 class Adapter(CapabilityAdapter):
 
     # Snapshot of the pristine airline env constructor (set on first apply).
@@ -168,16 +283,89 @@ class Adapter(CapabilityAdapter):
 
         return {str(t.id): t for t in airline_get_tasks(None)}
 
+    # ---- tau2's OWN simulation records -----------------------------------
+    # ONE path format, byte-identical in EVERY tau2 adapter in this repo (this one, the
+    # skillberry_benchmarks direct + spa arms, and templates/adapters/tau2_bench):
+    #
+    #     <run_dir>/native_sims/<tag>/<split>/results_<YYYYmmdd_HHMMSS>_<pid>.json
+    #
+    # Identical on purpose: `tau2 view --dir` takes the same shape whatever arm produced
+    # the run, and a trace is attributable without knowing which adapter wrote it. The
+    # duplication is deliberate — each adapter ships as ONE self-contained file copied
+    # into a project's adapters/, so a shared import would break that.
+
+    def _split_of(self, ctx, task_ids: list[str]) -> str:
+        """Which split this batch is, read from the run's own ``splits.json``.
+
+        ``run_batch``/``run_trials`` are not told the split, and the sims of one split
+        must not land in another's directory. With a pinned no-holdout split every split
+        holds the same ids, so ties resolve in val's favour — val is the split the
+        optimizer reads.
+        """
+        try:
+            import json  # noqa: PLC0415
+
+            c = Path(ctx)
+            splits = json.loads((c.parent.parent / "splits.json").read_text(encoding="utf-8"))
+            want = set(task_ids)
+            for name in ("val", "train", "test"):
+                ids = {str(i) for i in (splits.get(name) or [])}
+                if ids and want <= ids:
+                    return name
+        except Exception:  # noqa: BLE001 — an unreadable splits.json must not break the eval
+            pass
+        return "eval"
+
+    def _sim_save_path(self, ctx, split: str):
+        """``<run_dir>/native_sims/<tag>/<split>/results_<ts>_<pid>.json``, or ``None``.
+
+        Without a save path tau2 builds ``SimulationResults`` in memory, we convert each
+        sim to a ``Rollout``, and the native object is dropped — so `tau2 view` has
+        nothing to show even though tau2 closes every run by recommending it.
+
+        The TAG comes free from ``ctx``, the dir the harness passes — under EITHER of the
+        two names it uses: ``<run_dir>/candidates/<tag>`` for the baseline and the finalize
+        (tag ``seed``, or the winning ``cand_NNNN``), and ``<run_dir>/work/<tag>`` for an
+        iteration eval (tag ``cand_0001``). Accepting only ``candidates`` is why candidate
+        evals used to write nothing at all — the run dir is ``parent.parent`` either way,
+        so one name in the guard is the whole difference. The PHASE ITSELF is not available — no
+        argument or env var tells an adapter whether this is the baseline, an iteration or
+        the finalize — so ``<split>`` stands in for it: the baseline is the seed on val,
+        the finalize is the seed on test.
+
+        WHY the timestamp+pid and not a bare ``results.json``: the same ``<tag>/<split>``
+        pair IS written more than once (the seed at baseline and again at finalize), and a
+        path tau2 has already written is one it tries to RESUME — it prompts on stdin,
+        which an eval does not have. The stamp is unique per (second, process), so there is
+        no collision and no suffix walk.
+
+        Returns ``None`` when saving is off or the layout is neither ``candidates/<tag>``
+        nor ``work/<tag>`` — native traces are a convenience and must never be the thing
+        that breaks a run. tau2 creates the parent dirs itself, so nothing is created here.
+        """
+        if not _native_sims_enabled():
+            return None
+        try:
+            cand = Path(ctx)
+            if cand.parent.name not in ("candidates", "work"):
+                return None
+            stamp = f"{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+            return (cand.parent.parent / "native_sims" / cand.name / str(split)
+                    / f"results_{stamp}.json")
+        except Exception:  # noqa: BLE001 — never let an optional artifact break the eval
+            return None
+
+
     def run_batch(self, tasks: list[Task], ctx, *, seed: int = 0) -> dict:
         """Run a batch of airline tasks through tau2's own batch runner.
 
-        Builds a RITS-backed ``TextRunConfig`` and calls ``run_tasks`` with
+        Builds a gateway-backed ``TextRunConfig`` and calls ``run_tasks`` with
         ``num_trials=1`` (cap-evolve owns trials) and ``seed=int(seed)`` so each
         cap-evolve trial is an independent draw. Returns ``{task_id: Rollout}``.
         """
         import os
 
-        import rits  # sibling module
+        import gateway  # sibling module
         from tau2.data_model.simulation import TextRunConfig
         from tau2.runner import run_tasks
 
@@ -194,18 +382,18 @@ class Adapter(CapabilityAdapter):
         if not tau2_tasks:
             return results
 
-        agent_m = rits.agent_model()
-        user_m = rits.user_model()
+        agent_m = gateway.agent_model()
+        user_m = gateway.user_model()
         max_concurrency = int(os.environ.get("TAU2_MAX_CONCURRENCY", "100"))
 
         config = TextRunConfig(
             domain=DOMAIN,
             agent="llm_agent",
             llm_agent=agent_m,
-            llm_args_agent=rits.llm_args_for(agent_m),
+            llm_args_agent=gateway.llm_args_for(agent_m),
             user="user_simulator",
             llm_user=user_m,
-            llm_args_user=rits.llm_args_for(user_m),
+            llm_args_user=gateway.llm_args_for(user_m),
             num_trials=1,
             max_steps=100,
             max_errors=10,
@@ -219,12 +407,18 @@ class Adapter(CapabilityAdapter):
         import contextlib
         import sys
         with contextlib.redirect_stdout(sys.stderr):
+            sim_save = self._sim_save_path(
+                ctx, self._split_of(ctx, [t.id for t in tasks]))
             sim_results = run_tasks(
                 config,
                 tau2_tasks,
-                save_path=None,
+                save_path=sim_save,
                 console_display=False,
             )
+            if sim_save is not None:
+                # tau2 closes with a bare "run: tau2 view", which looks in
+                # data/simulations and finds nothing — these sims live in the run dir.
+                print(f"tau2 view --dir {sim_save.parent}", file=sys.stderr)
 
         for sim in sim_results.simulations:
             rollout = self._sim_to_rollout(sim)
@@ -262,8 +456,7 @@ class Adapter(CapabilityAdapter):
             if reward_info is not None and reward_info.reward is not None
             else 0.0
         )
-        agent_cost = sim.agent_cost or 0.0
-        user_cost = sim.user_cost or 0.0
+        cost_usd, tokens, cost_meta = _cost_and_tokens(sim)
         term = sim.termination_reason
         error = None
         if term in infra_reasons:
@@ -274,6 +467,14 @@ class Adapter(CapabilityAdapter):
         except Exception:
             messages = None
 
+        if error is None and reward < 1.0 and _leaked_stop_continuation(messages):
+            error = (
+                "tau2 user-simulator emitted ###STOP### alongside leaked reasoning that "
+                "explicitly planned to continue the conversation (documented artifact, "
+                "docs/TAU2_SUMMARY.md row 7) — treated as uncontrollable noise, not an "
+                "agent policy/tool failure."
+            )
+
         reward_info_dump = (
             reward_info.model_dump(mode="json") if reward_info is not None else None
         )
@@ -282,14 +483,15 @@ class Adapter(CapabilityAdapter):
             task_id=task_id,
             output=messages,
             trace=messages,
-            cost_usd=float(agent_cost) + float(user_cost),
-            tokens=0,
+            cost_usd=cost_usd,
+            tokens=tokens,
             error=error,
             metadata={
                 "domain": DOMAIN,
                 "tau2_reward": reward,
                 "tau2_reward_info": reward_info_dump,
                 "termination_reason": str(term),
+                **cost_meta,
             },
         )
 
@@ -308,7 +510,7 @@ class Adapter(CapabilityAdapter):
         """
         import os
 
-        import rits  # sibling module
+        import gateway  # sibling module
         from tau2.data_model.simulation import TextRunConfig
         from tau2.runner import run_tasks
 
@@ -330,18 +532,18 @@ class Adapter(CapabilityAdapter):
         if not tau2_tasks or n_trials <= 0:
             return results
 
-        agent_m = rits.agent_model()
-        user_m = rits.user_model()
+        agent_m = gateway.agent_model()
+        user_m = gateway.user_model()
         max_concurrency = int(os.environ.get("TAU2_MAX_CONCURRENCY", "125"))
 
         config = TextRunConfig(
             domain=DOMAIN,
             agent="llm_agent",
             llm_agent=agent_m,
-            llm_args_agent=rits.llm_args_for(agent_m),
+            llm_args_agent=gateway.llm_args_for(agent_m),
             user="user_simulator",
             llm_user=user_m,
-            llm_args_user=rits.llm_args_for(user_m),
+            llm_args_user=gateway.llm_args_for(user_m),
             num_trials=n_trials,
             max_steps=100,
             max_errors=10,
@@ -354,12 +556,18 @@ class Adapter(CapabilityAdapter):
         import contextlib
         import sys
         with contextlib.redirect_stdout(sys.stderr):
+            sim_save = self._sim_save_path(
+                ctx, self._split_of(ctx, [t.id for t in tasks]))
             sim_results = run_tasks(
                 config,
                 tau2_tasks,
-                save_path=None,
+                save_path=sim_save,
                 console_display=False,
             )
+            if sim_save is not None:
+                # tau2 closes with a bare "run: tau2 view", which looks in
+                # data/simulations and finds nothing — these sims live in the run dir.
+                print(f"tau2 view --dir {sim_save.parent}", file=sys.stderr)
 
         # Group each SimulationRun into its task's per-trial slot by sim.trial.
         for sim in sim_results.simulations:

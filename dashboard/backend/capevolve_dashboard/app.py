@@ -5,10 +5,9 @@ import asyncio
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from . import compare, runs, trajectories
-from . import custom_view as _custom_view
 from . import memory as _memory
 from . import stream as _stream
 from . import files as _files
@@ -61,11 +60,6 @@ def create_app(base_dir: Path, static_dir: Path | None = None) -> FastAPI:
     def get_memory(run_id: str):
         return _memory.read_memory(_resolve_or_404(run_id))
 
-    @app.get("/api/runs/{run_id}/custom-view")
-    def get_custom_view(run_id: str):
-        # Optional algorithm-shipped view; {} when the run declares none.
-        return _custom_view.read_custom_view(_resolve_or_404(run_id))
-
     @app.get("/api/runs/{run_id}/candidate/{candidate}/files")
     def get_candidate_files(run_id: str, candidate: str):
         return _memory.list_candidate_files(_resolve_or_404(run_id), candidate)
@@ -85,6 +79,16 @@ def create_app(base_dir: Path, static_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="path escapes run dir")
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="file not found")
+
+    @app.get("/api/runs/{run_id}/process-html")
+    def get_process_html(run_id: str):
+        """The optimizer's own self-rendered ``dashboard.html`` (see cli's ``dashboard
+        --export``) -- served raw so it renders as a real document in an iframe, not
+        truncated/escaped through the generic (256KB-capped, text-only) ``/file`` route."""
+        path = _resolve_or_404(run_id) / "dashboard.html"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="no process html for this run")
+        return HTMLResponse(path.read_text(encoding="utf-8"))
 
     @app.get("/api/runs/{run_id}/git/log")
     def get_git_log(run_id: str):
@@ -128,6 +132,27 @@ def create_app(base_dir: Path, static_dir: Path | None = None) -> FastAPI:
 
     if static_dir is not None and Path(static_dir).is_dir():
         from fastapi.staticfiles import StaticFiles
-        app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+
+        class _Spa(StaticFiles):
+            """StaticFiles that falls back to index.html for client-side routes.
+
+            ``html=True`` only serves index.html for DIRECTORY requests, so every
+            BrowserRouter path (``/runs/<id>``, ``/compare``) returned a bare 404 JSON
+            body: deep links and plain page refreshes both broke, and only in-app
+            navigation worked. A 404 for a real missing ASSET must stay a 404, or a typo'd
+            bundle path would silently serve HTML and surface as a confusing parse error --
+            so only extensionless paths fall through to the app.
+            """
+
+            async def get_response(self, path, scope):
+                try:
+                    return await super().get_response(path, scope)
+                except StarletteHTTPException as exc:
+                    if exc.status_code == 404 and not Path(path).suffix:
+                        return await super().get_response("index.html", scope)
+                    raise
+
+        app.mount("/", _Spa(directory=str(static_dir), html=True), name="static")
 
     return app

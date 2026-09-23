@@ -51,6 +51,19 @@ jobs:
           test -f site/index.html || { echo "no site/index.html"; exit 1; }
           ls -la site/
 
+      # The demo video is committed ONCE, at docs/assets/demo/, and folded into the Pages
+      # artifact here — the same trick this workflow already uses for benchmark-history.
+      # Committing a second 15 MB copy under site/ just to serve it would double the repo
+      # cost of every future re-render. Fail loudly rather than deploy a page whose <video>
+      # 404s: a missing hero video is not a cosmetic problem.
+      - name: Fold the demo video into site/
+        run: |
+          test -f docs/assets/demo/cap-evolve-demo.mp4 || {
+            echo "docs/assets/demo/cap-evolve-demo.mp4 is missing — site/index.html embeds it"; exit 1; }
+          mkdir -p site/assets/demo
+          cp docs/assets/demo/cap-evolve-demo.mp4 site/assets/demo/
+          ls -la site/assets/demo/
+
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
@@ -72,6 +85,22 @@ jobs:
           if [ -d _bench_history/runs ]; then
             cp -R _bench_history/runs site/benchmark-ui/runs
           fi
+
+      # skillsbench-history's summaries, heatmaps and per-task reports are rendered
+      # at deploy time by scripts/build_skillsbench_site.py — see that script's
+      # docstring for the design. site/skillsbench/index.html is the one file in
+      # this tree that's hand-authored and committed on main; everything else here
+      # is generated fresh from the branch on every deploy.
+      - name: Fold in skillsbench-history (rendered)
+        run: |
+          rm -rf _sbh
+          git clone --depth 1 --branch skillsbench-history \
+            "https://github.com/${{ github.repository }}.git" _sbh || {
+              echo "skillsbench-history branch not found — deploying without it"; exit 0; }
+          pip install --quiet markdown
+          python3 scripts/build_skillsbench_site.py --src _sbh --out site/skillsbench
+          test -f site/skillsbench/ui/heatmap.html || {
+            echo "site/skillsbench/ui/heatmap.html missing after render — failing loudly"; exit 1; }
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
