@@ -13,11 +13,22 @@
 #
 # REAL models, real $ → NOT part of always-on CI. Runs ONLY when requested:
 #   * manually  — Actions → "Benchmarks" → Run workflow (pick a benchmark), or
-#   * on a PR   — add the `benchmark-test` label.
+#   * on a PR   — add a `benchmark-<tier>-<bench>` label (e.g. benchmark-smoke-tau2).
 #
 # REQUIRES a SELF-HOSTED runner on the IBM network (the gateway is VPC-internal;
 # GitHub-hosted runners cannot reach it). See ci/benchmarks/README.md +
-# ci/benchmarks/runner/arm-runner.sh. Repo secrets: ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN.
+# ci/benchmarks/runner/arm-runner.sh.
+#
+# Three model-gateway providers are wired into this workflow, each behind its own
+# IBM_<NAME>_API_BASE / IBM_<NAME>_API_KEY secret pair (see resolve_provider.sh for the
+# full prefix scheme):
+#   - ibm-ete-int/<model>       IBM_ETE_INT_API_BASE / IBM_ETE_INT_API_KEY
+#   - ibm-ete/<model>           IBM_ETE_API_BASE / IBM_ETE_API_KEY
+#   - ibm-rits/<vendor>/<model> IBM_RITS_API_BASE / IBM_RITS_API_KEY
+# Every agent_model/optimizer_model dropdown entry below carries one of these three
+# prefixes. ibm-ete currently ships with zero seeded options — its catalog is
+# budget-capped and unverified; sync-model-lists.yml populates real entries once it's
+# queryable, so no guessed model-id spellings ever land in the dropdown by hand.
 # ============================================================================
 
 name: Benchmarks
@@ -28,90 +39,119 @@ on:
       benchmark:
         description: "Which benchmark to run"
         type: choice
-        default: all
-        options: [all, tau2, swebench, skillsbench, spreadsheetbench, rfe-creator, tau2-custom]
+        default: tau2
+        options: [tau2, swebench, skillsbench, spreadsheetbench, rfe-creator, tau2-custom]
       intervention:
         description: "How the candidate reaches the model."
         type: choice
         default: direct
-        options: [direct, spa]
+        options: [direct, blackbox]
       tier:
-        description: "Which tier (default smoke; pilot is a small cost/runtime measurement rig — its rewards are NOT comparable; full is the whole benchmark and is expensive). A tier only runs for benchmarks that populate it."
+        description: "Which tier. smoke (default) is a few tasks per benchmark. full is a benchmark's whole/original task set. full_verified is a benchmark's verified/curated re-release, where upstream publishes one. pilot is a cost/runtime measurement rig whose rewards are NOT comparable to anything. full and full_verified are both expensive and run only when named, never under `all`. A tier only runs for benchmarks that populate it — see ci/benchmarks/<bench>/README.md for what each tier means for that benchmark."
         type: choice
         default: smoke
-        options: [all, smoke, pilot, full]
+        options: [all, smoke, pilot, full, full_verified]
       iterations:
-        description: "Optimizer iterations. LEAVE BLANK for the tier default (smoke 3, everything else 10). Set a value to override deliberately — including on smoke, where more rounds are how you watch a per-iteration curve rather than a single step."
+        description: "Optimizer iterations. LEAVE BLANK for the tier default (smoke 3, everything else 10). Set a value to override deliberately — including on smoke, where more rounds are how you watch a per-iteration curve rather than a single step. WHAT ONE ITERATION BUYS DEPENDS ON THE ALGORITHM: on the hill-climb (deterministic) path it is one optimizer call; under agent-optimize it is one CANDIDATE taken to a gate decision, so a wave of three parallel siblings spends three iterations at once. Budget accordingly — 3 under agent-optimize can mean a single wave and no iteration at all."
         type: string
         default: ""
       trials:
-        description: "Trials per task per eval. LEAVE BLANK for the tier default (smoke 3, everything else 10). Set a value only to override deliberately — on a 5-task binary tier, 1 trial cannot separate signal from noise, which is why blank does not mean 1."
+        description: "Trials per task per eval. LEAVE BLANK for the tier default: smoke 3, the whole-set tiers (full, full_verified) 1, everything else 10. The whole-set tiers default to 1 because at 10 they plan more rollouts than the job's 24h timeout can absorb, and because task count dominates the noise there anyway — grow.py buys extra trials per candidate when one looks promising. Set a value only to override deliberately: on a 5-task binary tier 1 trial cannot separate signal from noise, which is why blank does not mean 1 everywhere."
         type: string
         default: ""
       agent_model:
-        description: "Evaluation model — the agent under test (litellm_proxy alias on the ete-litellm gateway)"
+        description: "Evaluation model — the agent under test. \"ibm-ete-int/<model>\" or \"ibm-ete/<model>\" = one of the two ete-litellm gateways; \"ibm-rits/<vendor>/<model>\" = RITS via skillberry-1's lite-rits proxy (see resolve_provider.sh). Independent of optimizer_model — any pairing is valid."
         type: choice
-        default: "aws/gpt-oss-120b"
+        default: "ibm-ete-int/aws/gpt-oss-120b"
         options:
-          - "aws/claude-haiku-4-5"
-          - "aws/claude-opus-4-7"
-          - "aws/claude-opus-4-8"
-          - "aws/claude-opus-5"
-          - "aws/claude-sonnet-4-6"
-          - "aws/claude-sonnet-5"
-          - "aws/gpt-oss-120b"
-          - "Azure/gpt-5-mini-2025-08-07"
-          - "azure/gpt-5.4"
-          - "azure/gpt-5.5"
-          - "azure/gpt-5.6-luna"
-          - "azure/gpt-5.6-sol"
-          - "azure/gpt-5.6-terra"
-          - "Azure/o4-mini"
-          - "claude-haiku-4-5-20251001"
-          - "claude-opus-4-6"
-          - "claude-opus-4-8"
-          - "claude-sonnet-4-6"
-          - "gcp/gemini-3-pro-preview"
-          - "gcp/gemini-3.1-pro-preview"
-          - "gcp/gemini-3.5-flash-lite"
-          - "gcp/gemini-3.6-flash"
-          - "gemini-2.5-flash"
-          - "gemini-2.5-pro"
-          - "rits/google/gemma-4-31B"
+          - "ibm-ete-int/aws/claude-haiku-4-5"
+          - "ibm-ete-int/aws/claude-opus-4-7"
+          - "ibm-ete-int/aws/claude-opus-4-8"
+          - "ibm-ete-int/aws/claude-opus-5"
+          - "ibm-ete-int/aws/claude-sonnet-4-6"
+          - "ibm-ete-int/aws/claude-sonnet-5"
+          - "ibm-ete-int/aws/gpt-oss-120b"
+          - "ibm-ete-int/Azure/gpt-5-mini-2025-08-07"
+          - "ibm-ete-int/azure/gpt-5.4"
+          - "ibm-ete-int/azure/gpt-5.5"
+          - "ibm-ete-int/azure/gpt-5.6-luna"
+          - "ibm-ete-int/azure/gpt-5.6-sol"
+          - "ibm-ete-int/azure/gpt-5.6-terra"
+          - "ibm-ete-int/Azure/o4-mini"
+          - "ibm-ete-int/claude-haiku-4-5-20251001"
+          - "ibm-ete-int/claude-opus-4-6"
+          - "ibm-ete-int/claude-opus-4-8"
+          - "ibm-ete-int/claude-sonnet-4-6"
+          - "ibm-ete-int/gcp/gemini-3-pro-preview"
+          - "ibm-ete-int/gcp/gemini-3.1-pro-preview"
+          - "ibm-ete-int/gcp/gemini-3.5-flash-lite"
+          - "ibm-ete-int/gcp/gemini-3.6-flash"
+          - "ibm-ete-int/gemini-2.5-flash"
+          - "ibm-ete-int/gemini-2.5-pro"
+          # ---- RITS (skillberry-1 lite-rits proxy) — see resolve_provider.sh ----
+          # Curated from the live rits.json catalog (105 models), granite family excluded on
+          # request. Only gemma-4-31B-it is a genuine match to the WikiSkill paper's model
+          # axis (arXiv 2608.27454v1: Qwen-3.5-4B/9B, Qwen-3.6-27B, Gemma-4-31B, Gemini-3.5-
+          # Flash) — RITS carries no small Qwen or Gemini, so the other 8 are a general-
+          # purpose spread across vendor/size rather than a reproduction of that paper's axis.
+          - "ibm-rits/google/gemma-4-31B-it"
+          - "ibm-rits/Qwen/Qwen3-8B"
+          - "ibm-rits/Qwen/Qwen2.5-72B-Instruct"
+          - "ibm-rits/Qwen/Qwen3-30B-A3B-Thinking-2507"
+          - "ibm-rits/meta-llama/llama-3-3-70b-instruct"
+          - "ibm-rits/mistralai/Mistral-Small-3.2-24B-Instruct-2506"
+          - "ibm-rits/deepseek-ai/DeepSeek-V3.2"
+          - "ibm-rits/openai/gpt-oss-120b-a100"
+          - "ibm-rits/moonshotai/Kimi-K2.7-Code"
       optimizer_model:
-        description: "Optimization model — the Claude Code optimizer's model (litellm_proxy alias on the ete-litellm gateway)"
+        description: "Optimization model — the Claude Code optimizer's model. \"ibm-ete-int/<model>\" or \"ibm-ete/<model>\" = one of the two ete-litellm gateways; \"ibm-rits/<vendor>/<model>\" = RITS via skillberry-1's lite-rits proxy (see resolve_provider.sh), UNVERIFIED whether lite-rits speaks the Anthropic Messages API shape the claude-code CLI expects."
         type: choice
-        default: "claude-opus-4-8"
+        default: "ibm-ete-int/claude-opus-4-8"
         options:
-          - "aws/claude-haiku-4-5"
-          - "aws/claude-opus-4-7"
-          - "aws/claude-opus-4-8"
-          - "aws/claude-opus-5"
-          - "aws/claude-sonnet-4-6"
-          - "aws/claude-sonnet-5"
-          - "aws/gpt-oss-120b"
-          - "Azure/gpt-5-mini-2025-08-07"
-          - "azure/gpt-5.4"
-          - "azure/gpt-5.5"
-          - "azure/gpt-5.6-luna"
-          - "azure/gpt-5.6-sol"
-          - "azure/gpt-5.6-terra"
-          - "Azure/o4-mini"
-          - "claude-haiku-4-5-20251001"
-          - "claude-opus-4-6"
-          - "claude-opus-4-8"
-          - "claude-sonnet-4-6"
-          - "gcp/gemini-3-pro-preview"
-          - "gcp/gemini-3.1-pro-preview"
-          - "gcp/gemini-3.5-flash-lite"
-          - "gcp/gemini-3.6-flash"
-          - "gemini-2.5-flash"
-          - "gemini-2.5-pro"
-          - "rits/google/gemma-4-31B"
+          - "ibm-ete-int/aws/claude-haiku-4-5"
+          - "ibm-ete-int/aws/claude-opus-4-7"
+          - "ibm-ete-int/aws/claude-opus-4-8"
+          - "ibm-ete-int/aws/claude-opus-5"
+          - "ibm-ete-int/aws/claude-sonnet-4-6"
+          - "ibm-ete-int/aws/claude-sonnet-5"
+          - "ibm-ete-int/aws/gpt-oss-120b"
+          - "ibm-ete-int/Azure/gpt-5-mini-2025-08-07"
+          - "ibm-ete-int/azure/gpt-5.4"
+          - "ibm-ete-int/azure/gpt-5.5"
+          - "ibm-ete-int/azure/gpt-5.6-luna"
+          - "ibm-ete-int/azure/gpt-5.6-sol"
+          - "ibm-ete-int/azure/gpt-5.6-terra"
+          - "ibm-ete-int/Azure/o4-mini"
+          - "ibm-ete-int/claude-haiku-4-5-20251001"
+          - "ibm-ete-int/claude-opus-4-6"
+          - "ibm-ete-int/claude-opus-4-8"
+          - "ibm-ete-int/claude-sonnet-4-6"
+          - "ibm-ete-int/gcp/gemini-3-pro-preview"
+          - "ibm-ete-int/gcp/gemini-3.1-pro-preview"
+          - "ibm-ete-int/gcp/gemini-3.5-flash-lite"
+          - "ibm-ete-int/gcp/gemini-3.6-flash"
+          - "ibm-ete-int/gemini-2.5-flash"
+          - "ibm-ete-int/gemini-2.5-pro"
+          # ---- RITS (skillberry-1 lite-rits proxy) — see resolve_provider.sh and the
+          # agent_model list above for the same catalog note. ----
+          - "ibm-rits/google/gemma-4-31B-it"
+          - "ibm-rits/Qwen/Qwen3-8B"
+          - "ibm-rits/Qwen/Qwen2.5-72B-Instruct"
+          - "ibm-rits/Qwen/Qwen3-30B-A3B-Thinking-2507"
+          - "ibm-rits/meta-llama/llama-3-3-70b-instruct"
+          - "ibm-rits/mistralai/Mistral-Small-3.2-24B-Instruct-2506"
+          - "ibm-rits/deepseek-ai/DeepSeek-V3.2"
+          - "ibm-rits/openai/gpt-oss-120b-a100"
+          - "ibm-rits/moonshotai/Kimi-K2.7-Code"
       optimizer_usd_per_iter:
-        description: "Per-iteration $ cap on the optimizer (default unlimited — 0 disables the native --max-budget-usd cap entirely; set e.g. 4.0 to bound spend)"
+        description: "Per-iteration $ cap on the optimizer. LEAVE BLANK for the tier default: smoke $50/iteration, every other tier unlimited. 0 disables the cap explicitly; set e.g. 4.0 to bound spend. In agent-optimize mode the whole loop is one agent process, so the per-iteration cap becomes a whole-loop ceiling of cap x iterations."
         type: string
-        default: "0"
+        # MUST stay empty. A non-empty default is TRUTHY in the `||` chain below (only the
+        # empty string is falsy — '0' is not), which made every tier fallback unreachable:
+        # smoke's $50 cap was dead code and a blank dispatch ran with no dollar ceiling at
+        # all. Same rule NUM_TRIALS/iterations follow — see
+        # core/tests/test_benchmarks_optimizer_budget.py.
+        default: ""
       optimizer_max_turns:
         description: "Per-iteration turn cap on the optimizer (default 80)"
         type: string
@@ -148,16 +188,20 @@ jobs:
     # Trust guard: run PR code from ANY repo (same-repo or a fork) on the self-hosted
     # runner only when the PR author is a known collaborator — never for outside/
     # first-time contributors, who could otherwise run arbitrary code with secrets.
-    # PR trigger: any label containing 'benchmark-smoke' or 'benchmark-full'
-    # (an all-label or a per-bench one); the step below picks the exact tier×bench.
+    # PR trigger: any label CONTAINING 'benchmark-' — this is a substring test over the
+    # comma-joined label list, not a per-label prefix test, so an unrelated label that merely
+    # embeds the string (`no-benchmark-needed`) also admits the PR. That is deliberate here:
+    # over-admitting costs only a cheap planner run, and narrowing an authorization guard to
+    # sharpen a diagnostic would be the wrong trade. The planner applies the precise prefix
+    # test, so those PRs select nothing and exit 0 rather than being failed.
+    # The step below picks the exact tier×bench.
     # Guarding `plan` (not just `bench`) means an untrusted PR never even reaches the
     # planner, and `bench` inherits the guard transitively via `needs`.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) &&
-        (contains(join(github.event.pull_request.labels.*.name, ','), 'benchmark-smoke') ||
-         contains(join(github.event.pull_request.labels.*.name, ','), 'benchmark-full')))
+        contains(join(github.event.pull_request.labels.*.name, ','), 'benchmark-'))
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       # An empty matrix is an error to GitHub, not a no-op, so `bench` keys its own `if:`
@@ -177,7 +221,7 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           TIER_SEL: ${{ github.event.inputs.tier || 'smoke' }}
-          BENCH_SEL: ${{ github.event.inputs.benchmark || 'all' }}
+          BENCH_SEL: ${{ github.event.inputs.benchmark || 'tau2' }}
           INTERVENTION_SEL: ${{ github.event.inputs.intervention || 'direct' }}
           # toJSON (not a ','-join) so labels stay exactly comparable: label names may
           # themselves contain commas, and the PR gate below is an exact-match test.
@@ -190,31 +234,36 @@ jobs:
           # literal `matrix.tier` / `matrix.bench` lists).
           # tier is a first-class dimension. full runs the whole/representative benchmark
           # (frozen baselines under <bench>/full/); it no-ops until that tier is populated.
-          TIERS = ["smoke", "pilot", "full"]
-          # tau2_custom_direct / _spa are the DELIVERY ARMS of the tau2 airline benchmark:
+          # full_verified is the GENERIC name for a benchmark's verified/curated re-release, so
+          # any bench that gains one uses the same tier rather than inventing a name with its
+          # own task count baked in. Sizes, datasets and costs differ per benchmark and are
+          # documented under ci/benchmarks/<bench>/ — never here.
+          TIERS = ["smoke", "pilot", "full", "full_verified"]
+          # tau2_custom_direct / _blackbox are the DELIVERY ARMS of the tau2 airline benchmark:
           # same tasks and tiers, candidate delivered in-process versus through the Skillberry
           # Store + Proxy-Agent. They stay separate legs so each keeps its own tier task lists,
           # its own history row and its own concurrency group.
           BENCHES = ["tau2", "swebench", "skillsbench", "spreadsheetbench", "rfe-creator",
-                     "tau2_custom_direct", "tau2_custom_spa"]
+                     "tau2_custom_direct", "tau2_custom_blackbox"]
 
           # `tau2-custom` is the picker's name for "the arms"; `intervention` chooses which one.
           # A benchmark token is what the rest of the pipeline keys off — tasks.json paths, the
           # work dirs, the history rows — so resolve it here, once.
           CUSTOM = "tau2-custom"
-          ARM_OF = {"direct": "tau2_custom_direct", "spa": "tau2_custom_spa"}
+          ARM_OF = {"direct": "tau2_custom_direct", "blackbox": "tau2_custom_blackbox"}
           # Both arms are one benchmark on disk: ci/benchmarks/tau2_custom/<arm>/<tier>/.
           BENCH_DIR = {v: "tau2_custom/" + k for k, v in ARM_OF.items()}
-          # `all` sweeps both arms regardless of `intervention`: it means every leg, and the two
-          # arms are the comparison they exist for.
-
           # Tiers that `tier=all` must NOT sweep in — they only run when named explicitly.
           # `pilot` is a cost/runtime measurement rig: its splits are sized for measurement,
           # so its rewards are not comparable to anything, and the aggregate job publishes
           # EVERY leg to benchmark-history. Letting "all" pick it up would put meaningless
-          # numbers on the benchmarks page. A `benchmark-pilot` label still works, because
-          # that names the tier deliberately.
-          EXPLICIT_ONLY_TIERS = {"pilot"}
+          # numbers on the benchmarks page. A `benchmark-pilot-<bench>` label still works,
+          # because that names both the tier and the bench deliberately.
+          # `full_verified` is a REAL comparison tier, unlike pilot — it is excluded for COST,
+          # not for honesty. A benchmark populating both whole-set tiers would put two of them
+          # in every `all` dispatch, and each is a full-length run on its own. Run it by name:
+          # `tier=full_verified`, or a `benchmark-full_verified-<bench>` label.
+          EXPLICIT_ONLY_TIERS = {"pilot", "full_verified"}
 
           # Is the repository actually checked out here? See the fail-open note below.
           tree_present = os.path.isdir("ci/benchmarks")
@@ -224,7 +273,7 @@ jobs:
 
           event = os.environ["EVENT"]
           tier_sel = os.environ.get("TIER_SEL") or "smoke"
-          bench_sel = os.environ.get("BENCH_SEL") or "all"
+          bench_sel = os.environ.get("BENCH_SEL") or "tau2"
           intervention = (os.environ.get("INTERVENTION_SEL") or "direct").strip().lower()
           labels = set(json.loads(os.environ.get("LABELS") or "[]") or [])
 
@@ -239,10 +288,9 @@ jobs:
                   if event == "workflow_dispatch":
                       tier_ok = (tier_sel == tier
                                  or (tier_sel == "all" and tier not in EXPLICIT_ONLY_TIERS))
-                      run = tier_ok and bench_sel in ("all", bench)
+                      run = tier_ok and bench_sel == bench
                   else:
-                      # pull_request: benchmark-<tier> (all of tier) OR benchmark-<tier>-<bench>
-                      run = f"benchmark-{tier}" in labels or f"benchmark-{tier}-{bench}" in labels
+                      run = f"benchmark-{tier}-{bench}" in labels
                   # A tier only exists for a benchmark that populates it. run_suite.sh already
                   # no-ops on a missing tasks.json, but emitting the leg anyway claims a slot on
                   # the single serialized self-hosted runner just to warn and exit — precisely
@@ -266,6 +314,35 @@ jobs:
           # stdout fails the whole step with "Invalid format", which took down every
           # dispatch and every labelled PR (the legs were selected correctly; only the
           # reporting was wrong).
+          # ZERO LEGS IS A FAILURE, not a quiet success. `has_legs=false` skips the `bench`
+          # job, so without this the whole workflow reports green having measured nothing —
+          # the failure mode run 30682558719 was, and the one removing `all` makes reachable
+          # again: `all` used to mask a selection that matched nothing by running everything.
+          #
+          # Keyed on the OUTCOME, not on how the request arrived: a dispatch that names a
+          # tier the benchmark does not populate (tier=pilot + bench=tau2) selects nothing
+          # just as surely as a retired bare label does, and dispatch is now the only route
+          # to the benches that have no per-bench label.
+          #
+          # `requested` exists so an ordinary PR is never failed by this. The trust gate above
+          # is a SUBSTRING test on the joined label list, so it also admits a PR whose labels
+          # merely contain "benchmark-" somewhere (`no-benchmark-needed`). Those reach the
+          # planner, select nothing correctly, and must exit 0 — the prefix test here is what
+          # separates "asked for benchmarks and got none" from "never asked".
+          requested = (event == "workflow_dispatch"
+                       or any(l.startswith("benchmark-") for l in labels))
+          if not legs and requested:
+              how = (f"tier={tier_sel!r} benchmark={bench_sel!r}"
+                     if event == "workflow_dispatch" else f"labels={sorted(labels)}")
+              print(
+                  f"::error::no legs selected for {how} — nothing would run. Check that the "
+                  f"benchmark populates that tier (ci/benchmarks/<bench>/<tier>/tasks.json), "
+                  f"and that a PR label names a bench: benchmark-<tier>-<bench>, "
+                  f"e.g. benchmark-smoke-tau2.",
+                  file=sys.stderr, flush=True,
+              )
+              sys.exit(1)
+
           print("matrix=" + json.dumps(legs))
           print("has_legs=" + ("true" if legs else "false"))
           print(f"selected {len(legs)} leg(s): {json.dumps(legs)}", file=sys.stderr, flush=True)
@@ -279,9 +356,10 @@ jobs:
     # 'benchmark-smoke-typo' label), which would otherwise be an empty-matrix error.
     if: needs.plan.outputs.has_legs == 'true'
     runs-on: [self-hosted, ibm-vpc]
-    # GitHub's default 360min job timeout is too tight for full/spreadsheetbench (912
-    # tasks x trials x iterations, one Docker container per task); self-hosted runners
-    # aren't GH-minute-billed, so a generous ceiling just prevents a silent mid-run kill.
+    # GitHub's default 360min job timeout is too tight for a whole-set tier (a benchmark's
+    # full task list x trials x iterations, and some benchmarks run a container per task);
+    # self-hosted runners aren't GH-minute-billed, so a generous ceiling just prevents a
+    # silent mid-run kill. Per-benchmark run shapes live in ci/benchmarks/<bench>/README.md.
     timeout-minutes: 1440
     # Repo default token is read-only; the "Comment results on the PR" step needs write.
     permissions:
@@ -297,8 +375,17 @@ jobs:
       group: benchmarks-${{ matrix.tier }}-${{ matrix.bench }}-${{ github.ref }}
       cancel-in-progress: false
     env:
-      ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+      IBM_ETE_INT_API_BASE: ${{ secrets.IBM_ETE_INT_API_BASE }}
+      IBM_ETE_INT_API_KEY: ${{ secrets.IBM_ETE_INT_API_KEY }}
+      # A second, separate ete-litellm gateway — a DIFFERENT auth domain from
+      # IBM_ETE_INT_* (a key valid on one is unrecognized on the other). Used only for an
+      # "ibm-ete/*" agent_model/optimizer_model id; see resolve_provider.sh.
+      IBM_ETE_API_BASE: ${{ secrets.IBM_ETE_API_BASE }}
+      IBM_ETE_API_KEY: ${{ secrets.IBM_ETE_API_KEY }}
+      # lite-rits proxy on skillberry-1 — the same box this self-hosted runner is on.
+      # Used only for an "ibm-rits/*" agent_model/optimizer_model id; see resolve_provider.sh.
+      IBM_RITS_API_BASE: ${{ secrets.IBM_RITS_API_BASE }}
+      IBM_RITS_API_KEY: ${{ secrets.IBM_RITS_API_KEY }}
       # Smoke DEFAULTS to 3 iterations (cheap, fast regression) but an explicit dispatch value
       # now wins, exactly as it does for NUM_TRIALS below and for the same reason: the input's
       # own default is "" so "user asked for 10" is distinguishable from "user asked for
@@ -321,9 +408,16 @@ jobs:
       # default is "" rather than "10" precisely so the two cases are distinguishable — with a
       # non-empty default there is no way to tell "user asked for 10" from "user asked for
       # nothing", and smoke would silently get 10 instead of its intended 3.
-      NUM_TRIALS: ${{ github.event.inputs.trials || (matrix.tier == 'smoke' && '3') || '10' }}
-      AGENT_MODEL: ${{ github.event.inputs.agent_model || 'aws/gpt-oss-120b' }}
-      OPTIMIZER_MODEL: ${{ github.event.inputs.optimizer_model || 'claude-opus-4-8' }}
+      # Tier-sized, because a blank dispatch must produce a run the job can FINISH. The
+      # whole-set tiers get 1: at 10 they plan 22,790 (full) and 10,000 (full_verified)
+      # rollouts, which is ~167h and ~73h at the measured rate against timeout-minutes: 1440
+      # — and both tiers' READMEs already quote their cost at trials=1. Task count, not
+      # trials, is the dominant noise term (val SE 0.158 at 10 tasks x 3 vs ~0.079 at 40 x 1),
+      # and `grow.py` exists to buy replication only where a candidate looks promising.
+      # Input FIRST, as with ITERATIONS: a tier pin that leads short-circuits the dispatch.
+      NUM_TRIALS: ${{ github.event.inputs.trials || (matrix.tier == 'smoke' && '3') || ((matrix.tier == 'full' || matrix.tier == 'full_verified') && '1') || '10' }}
+      AGENT_MODEL: ${{ github.event.inputs.agent_model || 'ibm-ete-int/aws/gpt-oss-120b' }}
+      OPTIMIZER_MODEL: ${{ github.event.inputs.optimizer_model || 'ibm-ete-int/claude-opus-4-8' }}
       # Smoke defaults to a $50/iteration cap (fast regression, generous headroom);
       # full stays unlimited by default. An explicit `optimizer_usd_per_iter`
       # dispatch input overrides this for whichever tier(s) run in that dispatch.
@@ -365,15 +459,19 @@ jobs:
 
       - name: Stop live snapshot poller
         if: always()
+        # Best-effort cleanup must never be able to outlive the work it cleans up after. With no
+        # bound it inherits this job's `timeout-minutes: 1440`, and in run 36304767214 it sat
+        # `in_progress` for 20+ minutes on a job whose real work had failed after 3 -- holding a
+        # runner that serves one leg at a time, and holding back the step logs, which GitHub does
+        # not serve until the job ends (#547). This is only the backstop: a step KILLED here is a
+        # FAILED step, so live_push.sh bounds every git call well inside this budget and the
+        # `::warning::` below is what a cleanup failure is allowed to cost.
+        timeout-minutes: 3
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          pidfile="$RUNNER_TEMP/live_push_${{ matrix.tier }}_${{ matrix.bench }}.pid"
-          if [ -f "$pidfile" ]; then
-            kill "$(cat "$pidfile")" 2>/dev/null || true
-            rm -f "$pidfile"
-          fi
           bash ci/benchmarks/lib/live_push.sh --cleanup "${{ github.run_id }}" "${{ matrix.tier }}-${{ matrix.bench }}" \
+            "$RUNNER_TEMP/live_push_${{ matrix.tier }}_${{ matrix.bench }}.pid" \
             || echo "::warning::live cleanup push failed (best-effort, no action needed)"
 
       - name: Export CapEvolve UI snapshot
@@ -413,8 +511,11 @@ jobs:
             exit 0
           fi
           run_dir="$GITHUB_WORKSPACE/ci/benchmarks/.work/suite_${{ matrix.tier }}_${{ matrix.bench }}_proj/.capevolve/run_suite"
+          # A deliberate iterations=0 dispatch (evaluate the seed only, e.g. a no-skill control)
+          # runs no optimizer step, so requiring one would fail a run that completed.
+          min_it=1; [ "${ITERATIONS:-}" = "0" ] && min_it=0
           "${CAPEVOLVE_PY:-python3}" ci/benchmarks/lib/assert_run.py "$run_dir" \
-            --min-iterations 1 --allow-regression
+            --min-iterations "$min_it" --allow-regression
 
       - name: Write run metadata
         if: always()
@@ -460,11 +561,12 @@ jobs:
             "date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "iterations": ${ITERATIONS:-3},
             "trials": ${NUM_TRIALS:-10},
-            "agent_model": "${AGENT_MODEL:-aws/gpt-oss-120b}",
-            "optimizer_model": "${OPTIMIZER_MODEL:-claude-opus-4-8}",
+            "agent_model": "${AGENT_MODEL:-ibm-ete-int/aws/gpt-oss-120b}",
+            "optimizer_model": "${OPTIMIZER_MODEL:-ibm-ete-int/claude-opus-4-8}",
             "gate_k_se": ${GATE_K_SE:-1.0},
             "algorithm": "${ALGORITHM:-hill-climb-all}",
             "warm_seed": $warm_json,
+            "reward_metric": "$(cat "$out/reward_metric" 2>/dev/null)",
             "conclusion": "${{ job.status }}"
           }
           JSON
@@ -502,7 +604,9 @@ jobs:
             }
 
   # Collect each run's per-(run x bench) record onto the benchmark-history branch (single
-  # writer → no push races) and regenerate benchmarks.json for the Pages history page.
+  # writer → no push races). benchmarks.json/meta.json are no longer committed here — they're
+  # regenerated from records/ at Pages-deploy time (pages.yml) to avoid an ever-growing file
+  # being rewritten in full on every run.
   # Runs on a GitHub-hosted runner (JSON + git only; no VPC access needed).
   aggregate:
     name: aggregate history
@@ -601,10 +705,8 @@ jobs:
               mkdir -p _hist/runs
               cp -R _hist_runs/. _hist/runs/
             fi
-            python3 ci/benchmarks/lib/record.py aggregate _hist/records \
-              --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out _hist
             cd _hist
-            git add records benchmarks.json meta.json
+            git add records
             [ -d runs ] && git add runs
             git commit -m "bench: record run ${{ github.run_id }}" || { echo "nothing to commit"; exit 0; }
             if git push origin benchmark-history; then echo "pushed"; exit 0; fi

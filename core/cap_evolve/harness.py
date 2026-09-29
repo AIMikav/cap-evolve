@@ -30,6 +30,7 @@ from . import footprint as footprint_mod
 from . import gate as gate_mod
 from . import graph as graph_mod
 from . import integrity
+from .cache import hash_candidate_dir
 from .memory import MemorySkill
 from .loop import SplitResult, aggregate_scores, has_valid_trials
 from .rundir import RunDir, _atomic_write
@@ -634,6 +635,30 @@ def baseline(adapter, seed_dir: Path, *, run_dir: RunDir, n_trials: int = 1, ks=
     return result
 
 
+def _prior_seed_test(prior: Path) -> dict | None:
+    """The seed's test SplitResult dict from a prior run's final.json, or None if it has none."""
+    try:
+        final = json.loads((prior / "final.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    seed_test = (final.get("seed") or {}).get("test")
+    if not seed_test and final.get("baseline_id") == "seed":
+        seed_test = final.get("test_baseline")
+    return seed_test or None
+
+
+def reused_seed_test(run_dir: RunDir) -> dict | None:
+    """The seed's test result carried over by ``reuse_baseline``, if the seed is still those bytes."""
+    p = run_dir.root / "reused_seed_test.json"
+    if not p.exists():
+        return None
+    rec = json.loads(p.read_text(encoding="utf-8"))
+    if rec.get("seed_hash") != hash_candidate_dir(run_dir.candidate_dir("seed")):
+        run_dir.log_event("reused_seed_test_ignored", reason="seed candidate changed since reuse")
+        return None
+    return rec
+
+
 def reuse_baseline(prior_run_dir: Path, *, run_dir: RunDir) -> SplitResult:
     """Reuse a PRIOR run's baseline instead of recomputing it.
 
@@ -677,6 +702,26 @@ def reuse_baseline(prior_run_dir: Path, *, run_dir: RunDir) -> SplitResult:
         if dst.exists():
             shutil.rmtree(dst)
         shutil.copytree(prior_val_rollouts, dst)
+
+    # The seed's TRAIN rollouts too: finalize's bookend and diagnose read them by tag, so with
+    # them on disk neither re-evaluates the seed on train.
+    prior_train = prior / "rollouts" / "train"
+    if prior_train.is_dir():
+        dst = run_dir.rollouts / "train"
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in prior_train.glob("*__seed__t*.json"):
+            shutil.copy2(f, dst / f.name)
+
+    # And the seed's sealed TEST score, as a RESULT rather than as rollouts: test rollouts on disk
+    # would trip begin_test_attempt's second-look guard. finalize uses it only if the seed bytes
+    # still match (reused_seed_test).
+    seed_test = _prior_seed_test(prior)
+    if seed_test is not None:
+        _atomic_write(run_dir.root / "reused_seed_test.json", json.dumps({
+            "prior_run_dir": str(prior),
+            "seed_hash": hash_candidate_dir(run_dir.candidate_dir("seed")),
+            "test": seed_test,
+        }, indent=2))
 
     run_dir.set_best("seed")
 
@@ -1198,9 +1243,33 @@ def _candidate_task_impact(run_dir: RunDir, cid: str, split: str = "val",
     shared = [t for t in cand if t in par]
     if not shared:
         return None
-    eps = 1e-9
     cand_se = _per_task_stderr(run_dir, cid, split)
     par_se = _per_task_stderr(run_dir, parent_id, split)
+    delta = sum(cand[t] - par[t] for t in shared) / len(shared)
+    return {**_classify_moves(par, cand, par_se, cand_se, shared),
+            "delta": delta, "parent": parent_id}
+
+
+def _classify_moves(par: dict, cand: dict, par_se: dict, cand_se: dict,
+                    shared) -> dict:
+    """Sort ``shared`` task ids into ``broke`` / ``fixed`` / ``unresolved``. THE rule.
+
+    Takes four ``{task_id: float}`` maps — the two sides' per-task rewards and their per-task
+    SEs — so the two callers can reach it from different evidence and still be unable to
+    disagree: ``_candidate_task_impact`` rebuilds them from persisted rollouts (for LEDGER.md
+    and the journal RESULT stamp) and ``movement`` reads them off the ``SplitResult`` rows the
+    gate already has in hand (for the gate's own step record). A run whose ledger says its
+    accepted candidate broke nothing while its step record names a task is worse than either
+    being wrong alone — and the comment on ``move_is_resolved`` is the history of what four
+    copies of one bar does.
+
+    ``broke`` requires the parent to have scored a FULL 1.0: "measured-and-passed, now
+    doesn't". ``fixed`` is the mirror. A sub-``2·SE`` mover is ``unresolved`` — it moved, the
+    measurement cannot say the edit did it, and asserting causality either way is the thing
+    that poisoned three rounds of reasoning on run_finalrun6. Callers that must not count
+    MISSING data as movement filter by ``has_valid_trials`` before calling (see ``movement``).
+    """
+    eps = 1e-9
     broke, fixed, unresolved = [], [], []
     for t in sorted(shared):
         d = cand[t] - par[t]
@@ -1212,9 +1281,53 @@ def _candidate_task_impact(run_dir: RunDir, cid: str, split: str = "val",
             broke.append(t)
         elif par[t] < 1.0 - eps and cand[t] >= 1.0 - eps:
             fixed.append(t)
-    delta = sum(cand[t] - par[t] for t in shared) / len(shared)
-    return {"broke": broke, "fixed": fixed, "unresolved": unresolved,
-            "delta": delta, "parent": parent_id}
+    return {"broke": broke, "fixed": fixed, "unresolved": unresolved}
+
+
+def movement(parent_per_task, cand_per_task) -> dict:
+    """Which val tasks a candidate BROKE and FIXED versus its parent, at gate time.
+
+    Returns ``{"broke": [...], "fixed": [...], "unresolved": [...], "n_shared": int}`` from
+    the two sides' ``SplitResult.per_task`` rows — the data the gate already holds, so this
+    costs nothing and needs no rollout re-read. ``n_shared`` is how many tasks BOTH sides
+    validly measured, which is what separates "measured, broke nothing" from "there was
+    nothing to compare"; a caller must not publish ``broke: []`` for the second.
+
+    This exists because the gate decides on the MEAN and therefore accepts a candidate that
+    TRADES tasks whenever the net is positive. That is not a hypothetical: run 36175707483's
+    champion was accepted on a positive net while breaking a task against BOTH concurrent
+    controls, and on the sealed 280-task split it came out 54 improved / 17 regressed with
+    every sampled regression a 1.000 → 0.000. The signal existed at accept time and reached
+    only LEDGER.md and the journal — never the ``step`` record the rest of the framework
+    reads, so a mid-run trade was invisible unless you read the agent's prose.
+
+    A task with NO VALID TRIAL on either side is DROPPED, not counted as broke. That is the
+    same rule ``_paired_deltas`` applies and it exists for the same reason: an unscored task
+    the parent passed looks exactly like the largest regression a candidate could cause, and
+    a Docker Hub 429 storm once produced ``paired Δ̄=-0.6400`` out of infrastructure rather
+    than content. Counting one as broke would hand ``gate_max_broke`` that failure mode —
+    vetoing a good candidate while naming a task nobody ever ran.
+    """
+    par_rows = {str(pt.get("task_id")): pt for pt in (parent_per_task or [])
+                if has_valid_trials(pt)}
+    cand_rows = {str(pt.get("task_id")): pt for pt in (cand_per_task or [])
+                 if has_valid_trials(pt)}
+    shared = [t for t in cand_rows if t in par_rows]
+    if not shared:
+        return {"broke": [], "fixed": [], "unresolved": [], "n_shared": 0}
+
+    def _r(rows, t):
+        return float(rows[t].get("reward", 0.0) or 0.0)
+
+    def _se(rows, t):
+        return float(rows[t].get("stderr") or 0.0)
+
+    moves = _classify_moves({t: _r(par_rows, t) for t in shared},
+                            {t: _r(cand_rows, t) for t in shared},
+                            {t: _se(par_rows, t) for t in shared},
+                            {t: _se(cand_rows, t) for t in shared},
+                            shared)
+    return {**moves, "n_shared": len(shared)}
 
 
 def _journal_tail(workdir: Path) -> str:
@@ -2350,6 +2463,11 @@ def _tamper_step(run_dir: RunDir, *, cid: str, parent_id, workdir: Path,
         "parent_val": current_val.to_dict(),
         detail_key: report.to_dict(),
         "regressions": [],
+        # An unmeasured step has no composition to report. The keys exist so every
+        # ``run_step`` return has ONE shape, and are empty because nothing was scored —
+        # not because the candidate was measured and traded nothing.
+        "broke": [],
+        "fixed": [],
         "optimizer_seconds": optimizer_seconds,
         "optimizer_usd": opt_cost_usd,
         "optimizer_tokens": opt_tokens,
@@ -2400,6 +2518,9 @@ def _eval_error_step(run_dir: RunDir, *, cid: str, parent_id, workdir: Path, err
         "parent_val": current_val.to_dict(),
         "eval_error": error,
         "regressions": [],
+        # See ``_tamper_step``: shape parity, and empty because nothing was scored.
+        "broke": [],
+        "fixed": [],
         "optimizer_seconds": optimizer_seconds,
         "optimizer_usd": opt_cost_usd,
         "optimizer_tokens": opt_tokens,
@@ -2597,10 +2718,17 @@ def run_step(
             run_dir, cid, parent_id or "seed", fp, len(paired_deltas)))
     if "mode" not in gate_kwargs and paired_deltas is not None:
         gate_kwargs["mode"] = "paired"
+    # The COMPOSITION behind the mean, over the FULL val split — deliberately not restricted
+    # to ``fp``. The footprint exists to keep tasks the edit cannot reach out of the SE; a task
+    # that measurably went 1.0 → 0.0 did so whether or not the footprint expected it to, and
+    # under-including here would hide exactly the trade this records. It never touches the
+    # verdict unless the caller set ``gate_max_broke`` in ``gate_kwargs``.
+    mv = movement(current_val.per_task, cand_val.per_task)
     decision = gate_mod.decide(
         current_val.reward, cand_val.reward, split="val",
         candidate_stderr=cand_val.stderr, current_stderr=current_val.stderr,
         paired_deltas=paired_deltas, coverage=cand_val.coverage, run_dir=run_dir,
+        broke=mv["broke"], fixed=mv["fixed"],
         **gate_kwargs,
     )
 
@@ -2646,6 +2774,15 @@ def run_step(
     _step_extra = {}
     if isinstance(opt_report, dict):
         _step_extra["optimizer_report"] = opt_report
+    # What this candidate TRADED, on the canonical step record — so an accepted step carries
+    # its composition and not only a reward. Every downstream consumer reads this event
+    # (LEDGER/RUNMAP, the dashboard graph, the TUI, ci/benchmarks/lib/metrics.py), and until
+    # now none of them could see that an accept had broken a previously-solved task.
+    # Only when both sides actually shared a measured task: an empty ``broke`` must mean
+    # "measured, broke nothing", never "there was nothing to compare".
+    if mv["n_shared"]:
+        _step_extra.update(broke=mv["broke"], fixed=mv["fixed"],
+                           n_broke=len(mv["broke"]), n_fixed=len(mv["fixed"]))
     # Charge the budget, write the iteration record, fold the JOURNAL — the shared step
     # every algorithm routes through (see ``record_iteration``).
     record_iteration(run_dir, workdir, cid, parent_id=parent_id, accepted=accepted,
@@ -2696,6 +2833,12 @@ def run_step(
         "candidate_val": cand_val.to_dict(),
         "parent_val": current_val.to_dict(),
         "regressions": regressions,
+        # The composition of the change, always — distinct from ``regressions``, which is
+        # populated only when the ``no_regression`` dual gate is on and uses a wider "any
+        # measurable drop" rule for vetoing. These are the shared broke/fixed lists LEDGER.md
+        # publishes (``movement``), recorded whether or not any veto is enabled.
+        "broke": mv["broke"],
+        "fixed": mv["fixed"],
         "optimizer_seconds": optimizer_seconds,
         "optimizer_usd": opt_cost_usd,
         "optimizer_tokens": opt_tokens,
@@ -3816,14 +3959,28 @@ def finalize(adapter, *, run_dir: RunDir, best_dir: Path, n_trials: int = 1, ks=
     algorithm-specific — instead of prompted behaviour that a run can skip.
     """
     run_dir.begin_test_attempt()
-    result = evaluate_candidate(adapter, best_dir, run_dir=run_dir, split="test",
-                                n_trials=n_trials, ks=ks, tag="FINAL")
+    # A seed test score carried over by reuse_baseline (same seed bytes, same frozen split) stands
+    # in for re-scoring the seed on test — the test rollouts of the seed are the costliest eval.
+    reused = reused_seed_test(run_dir)
+    best_is_seed = run_dir.best_id == "seed"
+    if reused and best_is_seed:
+        result = SplitResult.from_dict(reused["test"])
+    else:
+        result = evaluate_candidate(adapter, best_dir, run_dir=run_dir, split="test",
+                                    n_trials=n_trials, ks=ks, tag="FINAL")
     payload = {"test": result.to_dict(), "best_id": run_dir.best_id}
+    if reused:
+        payload["seed_test_reused_from"] = reused["prior_run_dir"]
+        run_dir.log_event("seed_test_reused", prior_run_dir=reused["prior_run_dir"],
+                          reward=reused["test"].get("reward"))
 
     # Baseline-on-test: the honest held-out comparison (optimized skills vs seed skills).
     if baseline_dir is not None and Path(baseline_dir).resolve() != Path(best_dir).resolve():
-        base = evaluate_candidate(adapter, baseline_dir, run_dir=run_dir, split="test",
-                                  n_trials=n_trials, ks=ks, tag="FINAL_seed")
+        if reused:
+            base = SplitResult.from_dict(reused["test"])
+        else:
+            base = evaluate_candidate(adapter, baseline_dir, run_dir=run_dir, split="test",
+                                      n_trials=n_trials, ks=ks, tag="FINAL_seed")
         payload["test_baseline"] = base.to_dict()
         payload["baseline_id"] = "seed"
         payload["test_delta"] = round(result.reward - base.reward, 6)

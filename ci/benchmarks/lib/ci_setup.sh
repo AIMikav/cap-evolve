@@ -151,10 +151,10 @@ case "$BENCH" in
   tau2)
     [ -d "$CACHE/tau2-bench/.git" ] || git clone --depth 1 https://github.com/sierra-research/tau2-bench "$CACHE/tau2-bench"
     uv pip install -p "$CAPEVOLVE_PY" -q $IDX -e "$CACHE/tau2-bench" ;;
-  tau2_custom_direct|tau2_custom_spa)
+  tau2_custom_direct|tau2_custom_blackbox)
     # A DIFFERENT tau2 build from the `tau2` leg above. Both arms are onboarded against
     # skillberry-ai/skillberry-benchmarks at a PINNED commit. ONE build for both arms is what keeps
-    # a direct-vs-spa comparison meaningful;
+    # a direct-vs-blackbox comparison meaningful;
     #
     # The pin is the SAME default the arms own setup.sh scripts use, so a CI number and a
     # local `bash examples/.../run.sh` number refer to the same benchmark code. 
@@ -178,30 +178,30 @@ case "$BENCH" in
     # arms' committed specs use a project-relative '../../vendor/skillberry-benchmarks', which
     # would resolve to nothing under ci/benchmarks/.work/.
     echo "skillberry-benchmarks @ $(git -C "$SB_DIR" rev-parse HEAD)"
-    if [ "$BENCH" = "tau2_custom_spa" ]; then
-      # Put the stack's clones in the CACHE, not the checkout. spa_env defaults its vendor dir
+    if [ "$BENCH" = "tau2_custom_blackbox" ]; then
+      # Put the stack's clones in the CACHE, not the checkout. blackbox_env defaults its vendor dir
       # to <repo>/vendor, and actions/checkout wipes untracked files in the workspace — so the
       # default would re-clone and re-install BOTH services on every single run (minutes each),
       # unlike every other cached dependency here. $CACHE survives between jobs.
       export SPA_VENDOR_DIR="$CACHE/spa-vendor"
       mkdir -p "$SPA_VENDOR_DIR"
       # PROVISION ONLY (clone + venv + install the Store and the Proxy-Agent), never start:
-      # starting belongs to the run, as in the arm's own setup.sh. spa_env is the same module the
+      # starting belongs to the run, as in the arm's own setup.sh. blackbox_env is the same module the
       # example uses, so CI and a local run provision an identical stack — including the log
       # rotation it patches into each clone, so nothing here needs to bound a log.
       ( cd "$REPO" && CAPEVOLVE_SKILLS_DIR="$REPO/skills" "$CAPEVOLVE_PY" - <<'PYEOF'
 import json, sys
-sys.path.insert(0, "skills/interventions/llm-proxies/spa/scripts")
-import spa_env
-print("  " + json.dumps(spa_env.provision()))
-print(f"  store ref {spa_env.STORE_REF} @ {spa_env.store_dir()}")
-print(f"  agent ref {spa_env.AGENT_REF[:7]} @ {spa_env.agent_dir()}")
+sys.path.insert(0, "skills/interventions/llm-proxies/blackbox/scripts")
+import blackbox_env
+print("  " + json.dumps(blackbox_env.provision()))
+print(f"  store ref {blackbox_env.STORE_REF} @ {blackbox_env.store_dir()}")
+print(f"  agent ref {blackbox_env.AGENT_REF[:7]} @ {blackbox_env.agent_dir()}")
 PYEOF
-      ) || { echo "::error:: Skillberry stack provisioning failed — the spa arm cannot run"; exit 1; }
+      ) || { echo "::error:: Skillberry stack provisioning failed — the blackbox arm cannot run"; exit 1; }
     fi
     if [ -n "${GITHUB_ENV:-}" ]; then
       echo "SKILLBERRY_BENCH_DIR=$SB_DIR" >> "$GITHUB_ENV"
-      # MUST reach the "Run suite" step: spa_env recomputes its vendor dir from the environment
+      # MUST reach the "Run suite" step: blackbox_env recomputes its vendor dir from the environment
       # in that process too, and a run that disagreed with setup about where the stack lives
       # would re-provision from scratch mid-leg.
       if [ -n "${SPA_VENDOR_DIR:-}" ]; then echo "SPA_VENDOR_DIR=$SPA_VENDOR_DIR" >> "$GITHUB_ENV"; fi
@@ -218,8 +218,14 @@ PYEOF
       echo "::warning:: LibreOffice not found — formula-only cells won't be recalculated before scoring"
     fi
     SB_VARIANT="sample_200"
-    # pilot's tasks are drawn from full's train split, so it needs the 912-task dataset too.
-    case "${TIER:-smoke}" in full|pilot) SB_VARIANT="full_912";; esac
+    case "${TIER:-smoke}" in
+      # pilot's tasks are drawn from full's train split, so it needs the 912-task dataset too.
+      full|pilot) SB_VARIANT="full_912" ;;
+      # full_verified evaluates the VERIFIED 400-task re-release, which is a different download
+      # and a different on-disk layout — not a subset of the 912 archive (see fetch_data.sh).
+      # Giving it full_912's data would silently score the old benchmark under the new tier's name.
+      full_verified) SB_VARIANT="verified_400" ;;
+    esac
     SPREADSHEETBENCH_DATA_DIR="$(SPREADSHEETBENCH_VARIANT="$SB_VARIANT" "$REPO/ci/benchmarks/spreadsheetbench/fetch_data.sh" "$CACHE/spreadsheetbench-data")" ;;
   rfe-creator)
     # Clones opendatahub-io/rfe-creator + opendatahub-io/agent-eval-harness (both public,
@@ -269,52 +275,211 @@ echo "claude-code optimizer: $(command -v claude) ($(claude --version 2>/dev/nul
 # `aws/gpt-oss-120b` instead of the models the run actually selected, and only hard-failed on
 # HTTP 429 budget_exceeded — so a `team not allowed to access model` rejection printed
 # "(not budget-blocked)" and sailed straight through.
-if [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] && command -v curl >/dev/null; then
-  PF_AGENT="${AGENT_MODEL:-aws/gpt-oss-120b}"
-  PF_OPTIMIZER="${OPTIMIZER_MODEL:-claude-opus-4-8}"
+# Two providers can be selected (see resolve_provider.sh): the ETE gateway, entitlement- and
+# budget-checked below exactly as before, and RITS via skillberry-1's lite-rits proxy, which
+# has neither concept — it's a single-tenant proxy scraping IBM RITS's own catalog, so there
+# is no per-team allowlist to drift out of sync with the dropdown and no shared budget to
+# exhaust. Its `/v1/models` is ALSO always empty by design (it builds routes dynamically per
+# request instead of publishing a static model_list), so running check_models.py against it
+# would be a guaranteed false failure, not a weaker check — skip straight to a completion
+# probe, which is the only signal lite-rits can actually give.
+if command -v curl >/dev/null; then
+  PF_AGENT="${AGENT_MODEL:-ibm-ete-int/aws/gpt-oss-120b}"
+  PF_OPTIMIZER="${OPTIMIZER_MODEL:-ibm-ete-int/claude-opus-4-8}"
+  # shellcheck source=ci/benchmarks/lib/resolve_provider.sh
+  . "$LIB_DIR/resolve_provider.sh"
 
-  # 1. ENTITLEMENT — is each SELECTED model served to this key at all?
-  # /models is an `llm_api_routes` call. The richer /model/info and /key/info are NOT: these
-  # virtual keys are route-scoped and answer both with 403 "not allowed to call this route",
-  # which is also the real reason the old preflight logged a mystery HTTP 403.
-  models=/tmp/capevolve_models.$$.json
-  mcode="$(curl -sS -m 30 -o "$models" -w '%{http_code}' \
-    "$ANTHROPIC_BASE_URL/models" \
-    -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" 2>/dev/null || echo 000)"
-  if [ "$mcode" = "200" ]; then
-    if ! "$CAPEVOLVE_PY" "$LIB_DIR/check_models.py" "$models" \
-        --require agent="$PF_AGENT" --require optimizer="$PF_OPTIMIZER"; then
-      rm -f "$models"; exit 1
+  classify_provider() {
+    case "$1" in
+      ibm-ete-int/*) echo "ibm-ete-int" ;;
+      ibm-ete/*)     echo "ibm-ete" ;;
+      ibm-rits/*)    echo "ibm-rits" ;;
+      *) echo "ci_setup: '$1' has no recognized provider prefix (expected ibm-ete-int/, ibm-ete/, or ibm-rits/)" >&2; exit 1 ;;
+    esac
+  }
+  PF_AGENT_PROVIDER="$(classify_provider "$PF_AGENT")"
+  PF_OPTIMIZER_PROVIDER="$(classify_provider "$PF_OPTIMIZER")"
+
+  # 1. ENTITLEMENT — is each SELECTED *gateway* model served to this key at all? Only
+  # gateway-routed models are checkable this way; an "ibm-rits/*" model has no /models listing
+  # to confirm against, so it is simply skipped (its absence from a gateway's list is expected,
+  # not a fault).
+  # NB: check_models.py takes a pre-fetched /models JSON file plus --require ROLE=MODEL_ID
+  # pairs (see check_models.py's own docstring); it has no --base/--key mode. check_entitlement
+  # below still does its own curl fetch per provider, preserving the exact behavior the old
+  # single-gateway block had, just parameterized over which provider's base/key to hit and
+  # which role(s) actually resolved to it.
+  check_entitlement() {
+    local provider="$1" base="$2" key="$3"
+    shift 3
+    local require_args=()
+    for spec in "$@"; do require_args+=(--require "$spec"); done
+    echo "::group::Entitlement check — $provider"
+    # /models is an `llm_api_routes` call. The richer /model/info and /key/info are NOT: these
+    # virtual keys are route-scoped and answer both with 403 "not allowed to call this route",
+    # which is also the real reason the old preflight logged a mystery HTTP 403.
+    local models="/tmp/capevolve_models_${provider}.$$.json"
+    local mcode
+    mcode="$(curl -sS -m 30 -o "$models" -w '%{http_code}' \
+      "$base/models" \
+      -H "Authorization: Bearer $key" 2>/dev/null || echo 000)"
+    if [ "$mcode" = "200" ]; then
+      if ! "$CAPEVOLVE_PY" "$LIB_DIR/check_models.py" "$models" "${require_args[@]}"; then
+        rm -f "$models"; echo "::endgroup::"; exit 1
+      fi
+    else
+      echo "::warning:: $provider /models returned HTTP $mcode — cannot verify model entitlement"
     fi
-  else
-    echo "::warning:: gateway /models returned HTTP $mcode — cannot verify model entitlement"
-  fi
-  rm -f "$models"
+    rm -f "$models"
+    echo "::endgroup::"
+  }
 
-  # 2. BUDGET + call-time entitlement — one real completion with the SELECTED agent model.
-  # Listing a model is necessary but not sufficient: the team check happens at call time.
+  # Dedupe first (agent and optimizer may share a provider) so each provider's
+  # ::group::/::endgroup:: block is emitted exactly once and stays contiguous — piping the
+  # loop's output through `sort -u` instead would reorder lines WITHIN a block and corrupt
+  # the group markers, so dedupe the provider list, not the output.
+  providers_seen=""
+  for provider in "$PF_AGENT_PROVIDER" "$PF_OPTIMIZER_PROVIDER"; do
+    case " $providers_seen " in *" $provider "*) continue ;; esac
+    providers_seen="$providers_seen $provider"
+    require_args=()
+    # WIRE ids, not the CI aliases. The gateway's own `GET /models` listing spells models the
+    # way it serves them, so requiring "ibm-ete-int/aws/claude-opus-5" made every ibm-ete*
+    # model look unserved and aborted preflight (run 36300445911). wire_model does the same
+    # rewrite the completion probe already relies on, without needing the provider's secrets.
+    [ "$PF_AGENT_PROVIDER" = "$provider" ] && require_args+=("agent=$(wire_model "$PF_AGENT")")
+    [ "$PF_OPTIMIZER_PROVIDER" = "$provider" ] && require_args+=("optimizer=$(wire_model "$PF_OPTIMIZER")")
+    case "$provider" in
+      ibm-ete-int) check_entitlement ibm-ete-int "$IBM_ETE_INT_API_BASE" "$IBM_ETE_INT_API_KEY" "${require_args[@]}" ;;
+      ibm-ete)     check_entitlement ibm-ete     "$IBM_ETE_API_BASE"     "$IBM_ETE_API_KEY"     "${require_args[@]}" ;;
+      ibm-rits) : ;;  # lite-rits's /v1/models is always empty by design — never entitlement-listed
+    esac
+  done
+
+  # 2. BUDGET/ENTITLEMENT at call time — one real completion per SELECTED model, against
+  # whichever provider actually serves it. Listing a gateway model is necessary but not
+  # sufficient (the team check happens at call time), and RITS has no listing step at all, so
+  # this probe is the only check it gets.
   # `max_completion_tokens` (not `max_tokens`) is used because the Azure reasoning
   # deployments reject the latter outright, and a probe that 400s on its own parameters
   # would be a false alarm.
-  probe=/tmp/capevolve_budget_probe.$$.json
-  code="$(curl -sS -m 60 -o "$probe" -w '%{http_code}' \
-    "$ANTHROPIC_BASE_URL/chat/completions" \
-    -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" -H 'Content-Type: application/json' \
-    -d "{\"model\":\"$PF_AGENT\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_completion_tokens\":16}" \
-    2>/dev/null || echo 000)"
-  if [ "$code" = "429" ] && grep -qi 'budget' "$probe" 2>/dev/null; then
-    echo "::error:: model gateway is OVER BUDGET (HTTP 429 budget_exceeded) — aborting."
-    echo "::error:: every rollout would score 0.000 as INFRASTRUCTURE_ERROR. Raise/reset the gateway budget."
-    head -c 300 "$probe" 2>/dev/null; echo; rm -f "$probe"; exit 1
-  fi
-  if grep -qi 'not allowed to access model' "$probe" 2>/dev/null; then
-    echo "::error:: gateway REFUSED agent model '$PF_AGENT' at call time (HTTP $code):"
-    echo "::error:: the key's team is not entitled to it, so every rollout would fail and the"
-    echo "::error:: suite would publish a fake 0.000. Pick a model this key can call."
-    head -c 600 "$probe" 2>/dev/null; echo; rm -f "$probe"; exit 1
-  fi
-  rm -f "$probe"
-  echo "gateway preflight: agent='$PF_AGENT' optimizer='$PF_OPTIMIZER' entitled; completion probe HTTP $code (not budget-blocked)"
+  probe_model() {
+    local role="$1" model="$2"
+    # Graceful skip, not a hard abort: resolve_provider's ibm-ete-int/ibm-ete branches each do a
+    # hard `:?` on their own IBM_<NAME>_API_BASE/IBM_<NAME>_API_KEY, which would otherwise kill
+    # this WHOLE script (set -uo pipefail; no outer `if` catches a `:?` failure) for a run that
+    # never asked for that gateway at all — e.g. a local/laptop run of an ibm-rits-only
+    # dispatch, or one with the other role on a different provider and this role's gateway
+    # secrets simply not exported. Before this check existed, the only gate was
+    # `[ -n "${ANTHROPIC_BASE_URL:-}" ] && ... && command -v curl` around the ENTIRE preflight
+    # block above; narrowing that to `command -v curl` (so RITS-only dispatches still get
+    # probed) reintroduced exactly the failure mode it used to prevent for the gateway case.
+    case "$model" in
+      ibm-ete-int/*)
+        if [ -z "${IBM_ETE_INT_API_BASE:-}" ] || [ -z "${IBM_ETE_INT_API_KEY:-}" ]; then
+          echo "::warning:: IBM_ETE_INT_API_BASE/IBM_ETE_INT_API_KEY not set — skipping $role model preflight probe for '$model'"
+          return 0
+        fi
+        ;;
+      ibm-ete/*)
+        if [ -z "${IBM_ETE_API_BASE:-}" ] || [ -z "${IBM_ETE_API_KEY:-}" ]; then
+          echo "::warning:: IBM_ETE_API_BASE/IBM_ETE_API_KEY not set — skipping $role model preflight probe for '$model'"
+          return 0
+        fi
+        ;;
+      ibm-rits/*)
+        if [ -z "${IBM_RITS_API_BASE:-}" ] || [ -z "${IBM_RITS_API_KEY:-}" ]; then
+          echo "::warning:: IBM_RITS_API_BASE/IBM_RITS_API_KEY not set — skipping $role model preflight probe for '$model'"
+          return 0
+        fi
+        ;;
+    esac
+    resolve_provider "$model"
+    local probe="/tmp/capevolve_budget_probe.$$_${role}.json"
+    # RETRY, but only what is plausibly TRANSIENT. A single `curl -m 60` killed two whole
+    # dispatches before any work started (runs 36259218074 and 36297602993, both dying at
+    # exactly 60s with HTTP 000) while the endpoint was in fact healthy: /health and /v1/models
+    # answered 200 minutes later and a real completion answered 200 in 1s one day and 200 in 6s
+    # another. An endpoint whose own good answers vary 6x cannot be judged by one shot.
+    #
+    # The budget is bounded so the WORST case never exceeds the old single-attempt 60s: each
+    # attempt gets 25s, backoff is 5s then 15s, and the loop refuses an attempt that could not
+    # finish inside probe_deadline. Three instant failures therefore cost ~20s (the backoffs)
+    # and three hung ones stop at two attempts rather than spending 95s. A healthy endpoint
+    # answers on attempt 1 and pays nothing, which is the normal case.
+    local probe_attempts="${CAPEVOLVE_PROBE_ATTEMPTS:-3}"
+    local probe_timeout="${CAPEVOLVE_PROBE_TIMEOUT:-25}"
+    local probe_deadline=60
+    # shellcheck disable=SC2206  # deliberate word split: "5 15" -> per-attempt backoffs
+    local backoffs=( ${CAPEVOLVE_PROBE_BACKOFFS:-5 15} )
+    local started_at code attempt=1 backoff_s elapsed
+    started_at="$(date +%s)"
+    while :; do
+      # NB: curl's own `-w '%{http_code}'` already prints 000 on a connect failure/timeout, so
+      # the old `|| echo 000` fallback CONCATENATED a second one — that is where the mystifying
+      # "HTTP 000000" in run 36259218074 came from. Capture the status separately and normalize
+      # anything that is not a plain code to 000 instead.
+      code="$(curl -sS -m "$probe_timeout" -o "$probe" -w '%{http_code}' \
+        "$RESOLVED_API_BASE/chat/completions" \
+        -H "Authorization: Bearer $RESOLVED_API_KEY" -H 'Content-Type: application/json' \
+        -d "{\"model\":\"$RESOLVED_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_completion_tokens\":16}" \
+        2>/dev/null)" || true
+      case "$code" in ''|*[!0-9]*) code=000 ;; esac
+      echo "$role model probe attempt $attempt/$probe_attempts -> HTTP $code ($RESOLVED_API_BASE)"
+      # DEFINITIVE answers, decided on the FIRST response and never retried: a live service has
+      # already told us the run cannot work. Retrying would burn the backoff to reach the same
+      # conclusion and, worse, would dress a decision up as flakiness.
+      if [ "$code" = "429" ] && grep -qi 'budget' "$probe" 2>/dev/null; then
+        echo "::error:: $role model gateway ($RESOLVED_API_BASE) is OVER BUDGET (HTTP 429 budget_exceeded) — aborting."
+        echo "::error:: every rollout would score 0.000 as INFRASTRUCTURE_ERROR. Raise/reset the gateway budget."
+        head -c 300 "$probe" 2>/dev/null; echo; rm -f "$probe"; exit 1
+      fi
+      if grep -qi 'not allowed to access model' "$probe" 2>/dev/null; then
+        echo "::error:: gateway REFUSED $role model '$model' at call time (HTTP $code):"
+        echo "::error:: the key's team is not entitled to it, so every rollout would fail and the"
+        echo "::error:: suite would publish a fake 0.000. Pick a model this key can call."
+        head -c 600 "$probe" 2>/dev/null; echo; rm -f "$probe"; exit 1
+      fi
+      [ "$code" = "200" ] && break
+      # 000 = connect failure or timeout, 5xx = the upstream itself stumbling. Everything else
+      # (any other 4xx) is a definitive answer from a live service — stop and report it.
+      case "$code" in
+        000|5??) : ;;
+        *) break ;;
+      esac
+      [ "$attempt" -lt "$probe_attempts" ] || break
+      backoff_s="${backoffs[$((attempt-1))]:-}"
+      [ -n "$backoff_s" ] || backoff_s=15
+      elapsed=$(( $(date +%s) - started_at ))
+      if [ $(( elapsed + backoff_s + probe_timeout )) -gt "$probe_deadline" ]; then
+        echo "::warning:: $role model probe: HTTP $code after ${elapsed}s — no room left in the ${probe_deadline}s preflight budget for another attempt"
+        break
+      fi
+      echo "::warning:: $role model probe: HTTP $code from $RESOLVED_API_BASE looks transient — retrying in ${backoff_s}s"
+      sleep "$backoff_s"
+      attempt=$(( attempt + 1 ))
+    done
+    if [ "$code" != "200" ] && [ "$RESOLVED_PROVIDER" = "ibm-rits" ]; then
+      echo "::error:: RITS probe for $role model '$model' failed (HTTP $code) against $RESOLVED_API_BASE:"
+      echo "::error:: lite-rits may be down, or this model id is not in its scraped rits.json."
+      echo "::error:: gave up after $attempt attempt(s); last observed HTTP $code."
+      head -c 600 "$probe" 2>/dev/null; echo; rm -f "$probe"; exit 1
+    fi
+    echo "gateway preflight: $role='$model' -> $RESOLVED_API_BASE; completion probe HTTP $code (attempt $attempt/$probe_attempts)"
+    rm -f "$probe"
+  }
+  # Run both probes concurrently — each hits a different role's endpoint (often a
+  # different provider entirely, gateway vs. RITS) and neither depends on the other's
+  # result, so the worst-case wall time is one 60s timeout instead of two. Backgrounding a
+  # shell function still lets `exit 1` inside it end just that subshell; `wait "$pid"`
+  # below recovers that as a normal nonzero status, so a probe failure still aborts this
+  # script exactly as it did when the calls were sequential.
+  probe_model agent "$PF_AGENT" & pid_agent=$!
+  probe_model optimizer "$PF_OPTIMIZER" & pid_optimizer=$!
+  fail=0
+  wait "$pid_agent" || fail=1
+  wait "$pid_optimizer" || fail=1
+  [ "$fail" = 0 ] || exit 1
 fi
 
 # Export for later workflow steps (no-op locally).

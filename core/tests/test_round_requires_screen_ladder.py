@@ -70,10 +70,16 @@ def _staged_run_dir(tmp_path, *, n=24):
     return run_dir, project, work
 
 
+# N<3 sibling candidates now needs a recorded reason (round.py's own MIN_SIBLINGS guard) — a
+# fixed constant here so every single-candidate call in this file states the SAME reason, kept
+# out of the way of the screen-ladder guard these tests actually exercise.
+_JUSTIFY = ["--single-candidate-justification", "screen-ladder test: single candidate by design"]
+
+
 def test_round_refuses_an_unscreened_candidate(tmp_path):
     run_dir, project, work = _staged_run_dir(tmp_path)
     p = _run([str(SCRIPTS / "round.py"), "--run-dir", str(run_dir.root),
-              "--project", str(project), "--candidates", "cand_1", "--n-trials", "1"])
+              "--project", str(project), "--candidates", "cand_1", "--n-trials", "1", *_JUSTIFY])
     assert p.returncode != 0, f"round.py ran full val on an unscreened candidate: {p.stdout}"
     assert "screen.py" in p.stdout
 
@@ -82,10 +88,27 @@ def test_skip_screen_ladder_records_the_deliberate_override(tmp_path):
     run_dir, project, work = _staged_run_dir(tmp_path)
     p = _run([str(SCRIPTS / "round.py"), "--run-dir", str(run_dir.root),
               "--project", str(project), "--candidates", "cand_1", "--n-trials", "1",
-              "--skip-screen-ladder"])
+              "--skip-screen-ladder", *_JUSTIFY])
     assert p.returncode == 0, f"--skip-screen-ladder did not override the guard: {p.stdout}"
     out = json.loads(p.stdout)
     assert [x["tag"] for x in out.get("candidates") or []] == ["cand_1"]
+
+
+def test_skip_screen_justification_records_the_reason_on_the_compliance_event(tmp_path):
+    run_dir, project, work = _staged_run_dir(tmp_path)
+    p = _run([str(SCRIPTS / "round.py"), "--run-dir", str(run_dir.root),
+              "--project", str(project), "--candidates", "cand_1", "--n-trials", "1",
+              "--skip-screen-justification", "break-even unreachable on this split size",
+              *_JUSTIFY])
+    assert p.returncode == 0, f"--skip-screen-justification did not override the guard: {p.stdout}"
+    out = json.loads(p.stdout)
+    assert [x["tag"] for x in out.get("candidates") or []] == ["cand_1"]
+
+    events = [json.loads(ln) for ln in
+              run_dir.events_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    compliance = [e for e in events if e.get("kind") == "agent_optimize_compliance"]
+    assert compliance and compliance[0]["screened_before_fullval"] is False
+    assert compliance[0]["skip_justification"] == "break-even unreachable on this split size"
 
 
 def test_round_proceeds_once_the_candidate_has_a_screen_record(tmp_path):
@@ -95,7 +118,7 @@ def test_round_proceeds_once_the_candidate_has_a_screen_record(tmp_path):
     (screens / "cand_1__screen1.json").write_text(json.dumps({"decision": "promote"}),
                                                   encoding="utf-8")
     p = _run([str(SCRIPTS / "round.py"), "--run-dir", str(run_dir.root),
-              "--project", str(project), "--candidates", "cand_1", "--n-trials", "1"])
+              "--project", str(project), "--candidates", "cand_1", "--n-trials", "1", *_JUSTIFY])
     assert p.returncode == 0, f"round.py refused a screened candidate: {p.stdout}"
 
 
@@ -107,7 +130,7 @@ def test_round_records_max_parallel_and_warns_on_drift(tmp_path):
                                                   encoding="utf-8")
     p1 = _run([str(SCRIPTS / "round.py"), "--run-dir", str(run_dir.root),
                "--project", str(project), "--candidates", "cand_1", "--n-trials", "1",
-               "--max-parallel", "2"])
+               "--max-parallel", "2", *_JUSTIFY])
     assert p1.returncode == 0, p1.stdout
     out1 = json.loads(p1.stdout)
     assert out1["measurement_max_parallel"] == 2
@@ -125,7 +148,7 @@ def test_round_records_max_parallel_and_warns_on_drift(tmp_path):
                                                   encoding="utf-8")
     p2 = _run([str(SCRIPTS / "round.py"), "--run-dir", str(run_dir.root),
                "--project", str(project), "--candidates", "cand_2", "--n-trials", "1",
-               "--max-parallel", "4"])
+               "--max-parallel", "4", *_JUSTIFY])
     assert p2.returncode == 0, p2.stdout
     out2 = json.loads(p2.stdout)
     assert out2["measurement_max_parallel"] == 4

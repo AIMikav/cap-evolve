@@ -2,7 +2,7 @@
 
 Triggerable, real-model optimization regression over **tau2 · swebench · skillsbench ·
 spreadsheetbench · rfe-creator**, plus the two tau2-airline **delivery arms**
-(**tau2_custom_direct · tau2_custom_spa**),
+(**tau2_custom_direct · tau2_custom_blackbox**),
 built on the [adapter templates](../../templates/adapters/). Each benchmark runs a curated
 set of **representative** tasks (calibrated for headroom — nonzero but not saturated at
 baseline) and reports **reward / latency / cost** base→opt from a single run, plus the
@@ -84,51 +84,56 @@ repo → Settings → Actions → Runners with the `ibm-vpc` label.
 
 ## The two tau2-airline delivery arms
 
-`tau2_custom_direct` and `tau2_custom_spa` are one benchmark measured twice, not two
+`tau2_custom_direct` and `tau2_custom_blackbox` are one benchmark measured twice, not two
 benchmarks. Both run the **same** airline task ids with the **same** tools-only capability
 surface, sourced from [`examples/tau2_custom/`](../../examples/tau2_custom/);
 the only difference is how a candidate reaches the agent:
 
-| | `tau2_custom_direct` | `tau2_custom_spa` |
+| | `tau2_custom_direct` | `tau2_custom_blackbox` |
 |---|---|---|
 | delivery | the runner imports the candidate tools in its own process | the Skillberry **Store** serves the candidate skill and the **Proxy-Agent** uses it |
 | tau2 agent model | the gateway model itself | the `ibm/skillberry-local` sentinel, which routes through the proxy to that same model |
 | services started by the run | none | tau2 Environment Manager (`:8004`) + Store + Proxy-Agent, torn down on exit |
 | rollout concurrency | 10 | 4 |
 
-Pick them with **`benchmark: tau2-custom`** plus **`intervention: direct | spa`**, which maps
+Pick them with **`benchmark: tau2-custom`** plus **`intervention: direct | blackbox`**, which maps
 straight onto the spec key of the same name. `intervention` is ignored by every other benchmark —
 they all run direct. Internally each arm stays its own leg (`tau2_custom_direct` /
-`tau2_custom_spa`) so it keeps its own tier task lists, history row and concurrency group, and
-`benchmark=all` sweeps both regardless of `intervention`.
+`tau2_custom_blackbox`) so each keeps its own tier task lists, history row and concurrency group.
 
 Their rewards are comparable **to each other**, and *not* to the plain `tau2` leg: that one
 also optimizes `policy.md` and installs the public `sierra-research/tau2-bench`, while the arms
 install `skillberry-ai/skillberry-benchmarks` at the pin their own `setup.sh` uses (a test
-asserts the two pins stay equal). The `spa` arm additionally needs that build's
+asserts the two pins stay equal). The `blackbox` arm additionally needs that build's
 `airline_skillberry` domain, which the public checkout does not have.
 
 Cheapest way to exercise an arm: **Integration tests** → Run workflow → `bench` =
-`tau2_custom_spa`. One task, 1 iteration, 1 trial.
+`tau2_custom_blackbox`. One task, 1 iteration, 1 trial.
 
 ## Trigger the suite
 
-Runs come in two **tiers** (a first-class dimension in the workflow, same workflow + history page):
+Runs come in several **tiers** (a first-class dimension in the workflow, same workflow + history page):
 - **`smoke`** — a few representative tasks per benchmark (fast regression; the default).
 - **`full`** — the whole/representative benchmark per bench (thorough; expensive). Its tasks
   live under `ci/benchmarks/<bench>/full/tasks.json`; a bench with an empty list simply runs
-  zero tasks until populated (see below). `tau2/full/tasks.json` is already populated (50
-  tasks); `spreadsheetbench/full/tasks.json` is populated with the real 912-task set (fetched
-  separately from `smoke`'s 200-task sample via `SPREADSHEETBENCH_VARIANT=full_912` — see
-  `ci/benchmarks/spreadsheetbench/fetch_data.sh`), matching the population SpreadsheetBench's
-  self-reported leaderboard is computed over; `swebench` and `skillsbench` are not yet.
-  `rfe-creator/full/tasks.json` covers all 25 curated cases; a full run there costs real
-  money (~$235 for 3 iterations x 25 tasks x 3 trials, measured) — dispatch deliberately,
-  not routinely.
-  A 912-task run is long — the `bench` job has a 1440min (`24h`) `timeout-minutes` and
-  `full` defaults `SPREADSHEETBENCH_CONCURRENCY` to `8` (vs. smoke's `4`; override either
-  via the env var / workflow input if the runner's Docker headroom can't take it — each
-  container is ~8GB RAM / 2 CPU).
+  zero tasks until populated (see below). Not every benchmark populates it yet. A whole-set run
+  is long and can cost real money, so dispatch it deliberately, not routinely — the `bench` job
+  carries a 1440min (`24h`) `timeout-minutes` for that reason.
+- **`full_verified`** — a benchmark's **verified/curated re-release**, where upstream publishes
+  one. Generic by design: any bench that gains such a release populates
+  `ci/benchmarks/<bench>/full_verified/` and uses this same tier, rather than a name with that
+  benchmark's task count baked in. Like `pilot` it runs only when named
+  (`tier=full_verified`, or a `benchmark-full_verified-<bench>` label), never under `tier=all`
+  — but unlike `pilot` that exclusion is about **cost**, not about the numbers being
+  meaningless: a `full_verified` result is a real held-out number.
+- **`pilot`** — a cost/runtime measurement rig whose reward numbers are **not comparable to
+  anything**. Explicit dispatch only.
+
+> Tier **sizes, datasets, splits, turn budgets and costs are per-benchmark** and are documented
+> in `ci/benchmarks/<bench>/README.md`. They deliberately do not appear here: a tier is a
+> dimension of the suite, not a property of whichever benchmark needed it first. Which
+> benchmarks populate which tier is likewise not listed here — it is exactly the set of
+> `ci/benchmarks/<bench>/<tier>/tasks.json` files, which is what the planner reads.
 
   **`spreadsheetbench` runner prerequisites** (installed on `skillberry-1`):
   - **LibreOffice** (`sudo dnf install libreoffice-calc`). Scoring uses it to recalculate
@@ -145,16 +150,18 @@ Runs come in two **tiers** (a first-class dimension in the workflow, same workfl
     (public, unlicensed — see `ci/benchmarks/rfe-creator/utils/fetch_data.sh`) and installs
     `agent-eval-harness` editable into the shared venv. Neither is vendored, so an air-gapped
     runner needs its own mirror.
-  - Same gateway/entitlement preflight as every other bench (`ANTHROPIC_BASE_URL` /
-    `ANTHROPIC_AUTH_TOKEN`); no extra credentials (the eval runs `--dry-run`, no Jira).
+  - Same gateway/entitlement preflight as every other bench (whichever provider's secret pair
+    the selected model's prefix resolves to — see "Populate the full tier" above); no extra
+    credentials (the eval runs `--dry-run`, no Jira).
 
 The tier surfaces everywhere: PR checks read **`<tier> / <bench>`** (e.g. `smoke / tau2`,
-`full / swebench`), the report header reads **`## <Tier> suite — <bench>`**, and the history page
-has a **Type** column + filter.
+`full / swebench`), the report header reads **`## <Tier> suite — <bench>`**, and the history
+page has a **Type** column + filter.
 
-- **Manually:** Actions → **Benchmarks** → Run workflow → pick the **benchmark** (`all` / one) and
-  **tier** (`smoke` default / `full` / `all`), plus any of these knobs (all optional, sensible
-  defaults):
+- **Manually:** Actions → **Benchmarks** → Run workflow → pick the **benchmark** (one of:
+  `tau2` / `swebench` / `skillsbench` / `spreadsheetbench` / `rfe-creator` / `tau2-custom`)
+  and **tier** (`smoke` default / `full` / `all` / `pilot` / `full_verified`), plus any of these knobs
+  (all optional, sensible defaults):
 
   | input | default | applies to |
   |---|---|---|
@@ -203,11 +210,9 @@ Two consequences worth knowing before you compare numbers:
 `runmeta.json` records the `algorithm`, so the history page never compares a hill-climb number
 against an agent-optimize one as though they were the same run type.
 - **On a PR — labels:**
-  - **`benchmark-smoke`** / **`benchmark-full`** → run every benchmark of that tier, the two
-    delivery arms included.
   - **`benchmark-smoke-<bench>`** / **`benchmark-full-<bench>`** (`tau2` · `swebench` ·
     `skillsbench` · `spreadsheetbench` · `rfe-creator` · `tau2_custom_direct` ·
-    `tau2_custom_spa`) → run just that one (combine labels to run a subset).
+    `tau2_custom_blackbox`) → run just that one (combine labels to run a subset).
 
   (The tau2 pipeline regression is the **`integration-test`** label / **Integration tests**
   workflow — the same `run_suite.sh` path as above, scoped to a single-task `integration`
@@ -224,7 +229,72 @@ No baseline-freezing step — `run_suite.sh` computes the baseline fresh, in the
 whatever ids are listed. Pick ids with headroom (baseline not already saturated) by running
 `run_suite.sh` against a candidate list and checking the report.
 
-Repo secrets required: `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`.
+Requires `IBM_ETE_INT_API_BASE`/`IBM_ETE_INT_API_KEY` (and, for an `ibm-ete/*` or
+`ibm-rits/*` model, that provider's own pair — see below) set as repo secrets.
+
+### ibm-rits (skillberry-1 lite-rits proxy)
+
+A second provider, reached only through an `ibm-rits/<vendor>/<model>` model id in either
+dropdown. `resolve_provider.sh` strips the CI-only `ibm-rits/` prefix, rewrites it to the
+`rits/<vendor>/<model>` wire-format lite-rits itself expects, and resolves it to
+the `IBM_RITS_API_BASE`/`IBM_RITS_API_KEY` secrets — a LiteLLM proxy (`lite-rits`) running on
+skillberry-1 itself (`http://localhost:4000`), talking directly to IBM RITS's own API. Since
+the `ibm-vpc` self-hosted runner IS skillberry-1, this needs no new network path.
+
+- **Repo secrets required:** `IBM_RITS_API_BASE` (`http://localhost:4000`), `IBM_RITS_API_KEY`.
+- **Model ids** are the bare `<vendor>/<model>` strings in lite-rits's own scraped catalog
+  (e.g. `google/gemma-4-31B-it`), prefixed with `ibm-rits/` for the dropdown only —
+  `resolve_provider.sh` sends `rits/<vendor>/<model>` on the wire.
+  `agent_model`/`optimizer_model` resolve independently, so a RITS agent with a
+  gateway optimizer (or vice versa) is a normal, deliberate combination.
+- **`agent_model`/`optimizer_model`'s curated RITS entries** are a general-purpose spread
+  across lite-rits's catalog, granite family excluded on request. Only
+  `ibm-rits/google/gemma-4-31B-it` is a genuine match to the WikiSkill paper's
+  (arXiv 2608.27454v1) SpreadsheetBench model axis (Qwen-3.5-4B/9B, Qwen-3.6-27B,
+  Gemma-4-31B, Gemini-3.5-Flash) — RITS carries no small Qwen or Gemini, so the rest of the
+  list is not a reproduction of that axis.
+- **Preflight:** `ci_setup.sh`'s gateway preflight is provider-aware — it skips the
+  ete-litellm `/models` entitlement check for an `ibm-rits/*` model (lite-rits's own
+  `/v1/models` is always empty by design: it builds routes dynamically per request rather
+  than publishing a static `model_list`) and instead runs the same completion probe against
+  `IBM_RITS_API_BASE`/`IBM_RITS_API_KEY`.
+- **Caveat:** `OPTIMIZER_MODEL: ibm-rits/*` points the `claude-code` CLI's
+  `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` at lite-rits. It is UNVERIFIED whether
+  lite-rits speaks the Anthropic Messages API shape the CLI expects — a RITS
+  `agent_model` with a gateway (Claude) `optimizer_model` is the combination actually
+  exercised so far.
+
+### ibm-ete (second ete-litellm gateway)
+
+A second, separate ete-litellm gateway (`https://ete-litellm.ai-models.vpc.res.ibm.com`)
+from the one `ibm-ete-int` uses — a different auth domain; an `IBM_ETE_INT_API_KEY` is not
+recognized here and vice versa. Serves models `ibm-ete-int` doesn't (e.g. GLM), subject to
+the team's LiteLLM budget on IBM's side.
+
+Requires `IBM_ETE_API_BASE`/`IBM_ETE_API_KEY` as repo secrets. Use an `ibm-ete/<model>`
+id in `agent_model`/`optimizer_model` — `resolve_provider.sh` strips the `ibm-ete/` prefix
+and sends `<model>` on the wire verbatim.
+
+The `agent_model`/`optimizer_model` dropdowns ship with **zero seeded `ibm-ete/*`
+options** — the catalog isn't reliably queryable yet (currently budget-capped), and
+hand-typing a guessed model-id spelling risks the exact prefix/case-drift failure
+`check_models.py`'s docstring documents. `sync-model-lists.yml` populates real entries
+automatically the first time it successfully polls this gateway; until then, dispatching
+an `ibm-ete/*` model requires typing the exact id `workflow_dispatch` will still accept
+only if it's already one of the enumerated `options:` — i.e. not at all, until the sync
+workflow adds it.
+
+### Adding a fourth provider
+
+Every provider follows the same shape: a CI-only dropdown prefix (e.g. `ibm-newprovider/`),
+a secret pair named `IBM_<NAME>_API_BASE`/`IBM_<NAME>_API_KEY`, and a case arm in
+`resolve_provider.sh` (`ci/benchmarks/lib/resolve_provider.sh`) that strips the prefix (or
+rewrites it, if the provider needs a different wire-level id shape than its CI prefix, the
+way `ibm-rits/*` does) and returns that provider's credentials. `ci_setup.sh`'s
+`classify_provider`/`check_entitlement` and `sync_models.py`'s `--models PREFIX=PATH`
+polling both key off this same prefix, so a new provider needs no changes to their
+matching logic — only a new case arm and, if it should be polled automatically, a new
+`fetch_one` call in `sync-model-lists.yml`.
 
 > **Note:** GitHub only exposes `workflow_dispatch` (and evaluates `pull_request`
 > workflows) from the **default branch**, so `benchmarks.yml` becomes triggerable
@@ -254,17 +324,19 @@ directly (id + tag + agent, same shape across `smoke`/`full`/`integration`) and 
 ## Benchmark history page
 
 Every run appends a per-`(run×bench)` record to the **`benchmark-history`** orphan branch
-(`records/<run_id>__<bench>.json`) and regenerates `benchmarks.json` + `meta.json` there
-(single-writer `aggregate` job → no races). The Pages page `site/benchmarks.html` fetches
-`benchmarks.json` at load and renders a sortable/filterable table (rollup rows expand to
-per-task detail). Bootstrap the branch once:
+(`records/<run_id>__<bench>.json`) via the single-writer `aggregate` job (no races). That job no
+longer commits `benchmarks.json`/`meta.json` to the branch — an aggregate over every run ever
+recorded rewritten in full on every single run would grow that file's git history quadratically.
+Instead, `.github/workflows/pages.yml` clones this branch and runs `record.py aggregate` against
+its `records/` **at deploy time**, rendering `benchmarks.json`/`meta.json` straight into the Pages
+artifact (never committed to git). The Pages page `site/benchmarks.html` fetches that same-origin
+`benchmarks.json` at load and renders a sortable/filterable table (rollup rows expand to per-task
+detail). Bootstrap the branch once:
 
 ```bash
 git switch --orphan benchmark-history
 mkdir -p records && : > records/.gitkeep
-echo '[]' > benchmarks.json
-echo '{"count":0,"runs":0,"updated":null}' > meta.json
-git add records/.gitkeep benchmarks.json meta.json
+git add records/.gitkeep
 git commit -m "chore: init benchmark-history branch" && git push origin benchmark-history
 ```
 

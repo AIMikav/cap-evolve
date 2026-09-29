@@ -87,6 +87,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
@@ -132,6 +133,139 @@ def _backgrounding_near_misses(permission_denials) -> list[dict]:
     if not isinstance(permission_denials, list):
         return []
     return [d for d in permission_denials if _looks_like_a_detach_attempt(d)]
+
+
+#: The concurrent-background-task cap the driver prompt asks the agent to respect (see the
+#: briefing's "Unattended" section). Kept as a name here, not just a literal, so the detector
+#: below and the number stated in the briefing cannot drift apart silently.
+_BACKGROUND_CONCURRENCY_CAP = 2
+
+#: ``task_updated``/``task_notification`` status values that mean the background task was
+#: evicted rather than finishing or being stopped deliberately one at a time.
+_KILLED_STATUSES = {"killed", "stopped", "cancelled", "canceled"}
+
+#: Keys, in preference order, that might carry an event's timestamp across CLI versions —
+#: schema-tolerant like ``_looks_like_a_detach_attempt`` above, rather than committing to one.
+_TS_KEYS = ("timestamp", "ts", "time", "t")
+
+#: Real ``claude-code`` stream-json wraps these as ``type: "system", subtype: "task_updated"``
+#: (see core/tests/test_budget_cost.py) — not a bare ``type: "task_updated"``. Accept both so a
+#: future/alternate CLI shape that DOES put it on ``type`` still matches.
+_TASK_LIFECYCLE_SUBTYPES = ("task_updated", "task_notification")
+
+#: Simultaneous kills a few ms apart (processing order, not the same tick of the clock) are
+#: still the same eviction instant, not coincidence — group anything within this window.
+_MASS_KILL_CLUSTER_MS = 50
+
+
+def _is_task_lifecycle_event(ev: dict) -> bool:
+    t = ev.get("type")
+    if t in _TASK_LIFECYCLE_SUBTYPES:
+        return True
+    return t == "system" and ev.get("subtype") in _TASK_LIFECYCLE_SUBTYPES
+
+
+def _event_timestamp(ev: dict):
+    for key in _TS_KEYS:
+        if key in ev:
+            return ev[key]
+    return None
+
+
+def _event_status(ev: dict) -> str:
+    # ``patch`` is where the real CLI puts ``task_updated``'s status
+    # (core/tests/test_budget_cost.py); the rest are schema-tolerant fallbacks.
+    for holder in (ev, ev.get("patch"), ev.get("task"), ev.get("data")):
+        if isinstance(holder, dict) and holder.get("status"):
+            return str(holder["status"]).lower()
+    return ""
+
+
+def _timestamp_to_epoch_ms(ts):
+    """Normalize a timestamp of unknown shape (ISO string, epoch seconds, epoch ms) to a
+    single comparable scale so near-simultaneous events can be clustered by real elapsed time
+    instead of by exact value.
+    """
+    if isinstance(ts, bool):
+        return None
+    if isinstance(ts, (int, float)):
+        # Epoch seconds vs epoch ms are ambiguous from the number alone; ms-scale epoch
+        # values are always > 1e12 for any real timestamp, seconds-scale never are.
+        return float(ts) if abs(ts) >= 1e12 else float(ts) * 1000
+    if isinstance(ts, str):
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000
+        except ValueError:
+            return None
+    return None
+
+
+def _mass_kill_events(transcript_path: Path, *, cap: int = _BACKGROUND_CONCURRENCY_CAP
+                       ) -> list[dict]:
+    """Background ``task_updated``/``task_notification`` events killed at the SAME instant.
+
+    Confirmed live on a real run: 5 simultaneous background tasks (a diagnose fan-out, one per
+    failure cluster — exactly the pattern SKILL.md's "Diagnosis fans out freely" line
+    encouraged before this fix) were all evicted, and their `task_updated`/`task_notification`
+    events carried the identical millisecond timestamp. That is a session-level ceiling on
+    concurrent background tasks, not a per-task timeout and not a network failure (independently
+    verified healthy at the time) — tasks cannot all finish naturally at the same millisecond, so
+    more than `cap` of them dying at nearly the same instant is the fingerprint of that eviction
+    rather than coincidence. Timestamps are clustered within `_MASS_KILL_CLUSTER_MS` rather than
+    compared for bit-identical equality, because harness-recorded timestamps for one eviction can
+    differ by a few ms depending on write order.
+
+    The driver prompt already tells the agent to stay under the cap; this makes the violation
+    detectable after the fact too, because a prompt instruction to a headless agent is not a
+    guarantee it was followed.
+    """
+    if not transcript_path.is_file():
+        return []
+    seen: list = []  # (epoch_ms, raw_ts, task_id)
+    try:
+        with transcript_path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except Exception:  # noqa: BLE001 — a torn line carries no task state
+                    continue
+                if not isinstance(ev, dict) or not _is_task_lifecycle_event(ev):
+                    continue
+                if _event_status(ev) not in _KILLED_STATUSES:
+                    continue
+                raw_ts = _event_timestamp(ev)
+                if raw_ts is None:
+                    continue
+                epoch_ms = _timestamp_to_epoch_ms(raw_ts)
+                if epoch_ms is None:
+                    continue
+                task_id = ev.get("task_id") or ev.get("id") or (ev.get("task") or {}).get("id")
+                seen.append((epoch_ms, raw_ts, task_id))
+    except OSError:
+        return []
+
+    seen.sort(key=lambda e: e[0])
+    clusters: list = []
+    for epoch_ms, raw_ts, task_id in seen:
+        if clusters and epoch_ms - clusters[-1][-1][0] <= _MASS_KILL_CLUSTER_MS:
+            clusters[-1].append((epoch_ms, raw_ts, task_id))
+        else:
+            clusters.append([(epoch_ms, raw_ts, task_id)])
+
+    out = []
+    for cluster in clusters:
+        # Dedupe by task_id: the same task can emit both a task_updated AND a
+        # task_notification for one kill, which must count as one task, not two.
+        ids = list(dict.fromkeys(tid for *_, tid in cluster if tid is not None))
+        unidentified = sum(1 for *_, tid in cluster if tid is None)
+        count = len(ids) + unidentified
+        if count > cap:
+            out.append({"timestamp": cluster[0][1], "count": count,
+                        "task_ids": ids + [None] * unidentified})
+    return out
 
 
 # 4h. Long enough for a full-val eval on the slowest benchmark in this repo
@@ -599,6 +733,18 @@ Three consequences worth being explicit about:
    turn that launched the work is still the turn that collects it**: stay blocked until the
    result is in your hands, read it, and act on it before that turn ends. Delegate the work,
    never the waiting.
+
+   **Cap concurrent background Bash calls at 2, for any purpose.** Diagnosis fanning out
+   across several failure clusters, a screen batch, a backgrounded eval — whatever put it
+   there, never have more than 2 `run_in_background` Bash calls in flight at the same time.
+   This is not advisory housekeeping: a real run's transcript showed 5 simultaneous
+   background tasks (a diagnose fan-out, one per failure cluster) whose `task_updated`/
+   `task_notification` events were ALL stamped `killed`/`stopped` at the identical millisecond
+   — a session-level ceiling on concurrent background tasks evicting everything
+   backgrounded at once, not a per-task timeout and not the network. When it fires, the
+   whole round's diagnostic work is destroyed and the run finalizes on `best_id=seed` with
+   real budget still unspent. Before starting background call #3, `TaskStop` one of the 2
+   already running or wait for one to finish first.
 
    Waiting is safe: one Bash call may run for {hours} hours, a ceiling raised for precisely
    this reason, so a long eval does not need backgrounding to survive. If something really
@@ -1324,6 +1470,7 @@ def main(argv=None) -> int:
         "context": context,
         "optimizer": payload,
         "backgrounding_near_misses": _backgrounding_near_misses(permission_denials),
+        "background_mass_kills": _mass_kill_events(prompt_path.parent / "transcript.jsonl"),
         **seal,
     }
     if proc is not None and proc.returncode != 0:
@@ -1341,6 +1488,18 @@ def main(argv=None) -> int:
               f"{[d.get('tool_name') for d in out['backgrounding_near_misses']]}) and was "
               "denied by the permission system — see backgrounding_near_misses in this run's "
               "output and the briefing's Unattended section", file=sys.stderr)
+    if out["background_mass_kills"]:
+        # The driver prompt already tells the agent to cap background Bash calls at
+        # _BACKGROUND_CONCURRENCY_CAP; this is what it looks like when that was violated
+        # anyway and the harness evicted everything at once. Distinct from both warnings
+        # above: nothing here was denied — the tasks ran, then died together mid-round.
+        worst = max(out["background_mass_kills"], key=lambda m: m["count"])
+        print("::warning::agent-optimize: the harness killed "
+              f"{worst['count']} background tasks at the identical timestamp "
+              f"({worst['timestamp']!r}) — a session-level concurrent-background-task "
+              "eviction, not a per-task timeout. The round's diagnostic/eval work in flight "
+              "was lost; see background_mass_kills in this run's output and the briefing's "
+              "background-concurrency-cap note", file=sys.stderr)
     # The run's worth is its sealed number, so that — not the agent's exit code — decides
     # ours. An agent that ran out of turns after three honest rounds produced a result; one
     # that exited 0 without sealing did not.

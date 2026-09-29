@@ -10,7 +10,7 @@
 # The `bench` dispatch input picks WHICH tau2 leg: the adapter template (`tau2`, the default
 # and what the PR label runs), or one of the two delivery arms from
 # examples/tau2_custom (`tau2_custom_direct` /
-# `tau2_custom_spa`). `integration` is not a tier benchmarks.yml can dispatch — its tier
+# `tau2_custom_blackbox`). `integration` is not a tier benchmarks.yml can dispatch — its tier
 # picker offers smoke/pilot/full — so this workflow is the only way to reach it, and it is the
 # cheap one-task check to run on an arm before spending a curated tier on it.
 # Passes when the run COMPLETES and the sealed test does not regress vs baseline
@@ -19,8 +19,13 @@
 # For the full reward/latency/cost suite over many curated tasks, see benchmarks.yml.
 #
 # REAL models / real $ → on-demand only: manual dispatch, or the `integration-test`
-# PR label. Needs a SELF-HOSTED runner on the IBM network (VPC gateway) + repo secrets
-# ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN. See ci/benchmarks/README.md.
+# PR label. Needs a SELF-HOSTED runner on the IBM network (VPC gateway). See
+# ci/benchmarks/README.md.
+#
+# Uses the same six IBM_<NAME>_API_BASE/IBM_<NAME>_API_KEY secrets benchmarks.yml does
+# (IBM_ETE_INT_*, IBM_ETE_*, IBM_RITS_*) — see resolve_provider.sh for the prefix scheme.
+# This workflow only exercises tau2 today, but gets all three provider's credentials so a
+# future dispatch against an ibm-ete/*or ibm-rits/* model isn't silently broken.
 # ============================================================================
 
 name: Integration tests
@@ -29,10 +34,10 @@ on:
   workflow_dispatch:
     inputs:
       bench:
-        description: "Which tau2 leg to run on task 9. tau2 = the adapter template (in-process, policy+tools). tau2_custom_direct / tau2_custom_spa = the two DELIVERY ARMS from examples/tau2_custom — same task, tools-only surface, delivered in-process vs through the Skillberry Store + Proxy-Agent. This is the cheap single-task check for an arm; benchmarks.yml runs the curated tiers."
+        description: "Which tau2 leg to run on task 9. tau2 = the adapter template (in-process, policy+tools). tau2_custom_direct / tau2_custom_blackbox = the two DELIVERY ARMS from examples/tau2_custom — same task, tools-only surface, delivered in-process vs through the Skillberry Store + Proxy-Agent. This is the cheap single-task check for an arm; benchmarks.yml runs the curated tiers."
         type: choice
         default: tau2
-        options: [tau2, tau2_custom_direct, tau2_custom_spa]
+        options: [tau2, tau2_custom_direct, tau2_custom_blackbox]
   pull_request:
     types: [labeled]
 
@@ -54,8 +59,12 @@ jobs:
       group: itest-tau2-${{ github.ref }}
       cancel-in-progress: true
     env:
-      ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+      IBM_ETE_INT_API_BASE: ${{ secrets.IBM_ETE_INT_API_BASE }}
+      IBM_ETE_INT_API_KEY: ${{ secrets.IBM_ETE_INT_API_KEY }}
+      IBM_ETE_API_BASE: ${{ secrets.IBM_ETE_API_BASE }}
+      IBM_ETE_API_KEY: ${{ secrets.IBM_ETE_API_KEY }}
+      IBM_RITS_API_BASE: ${{ secrets.IBM_RITS_API_BASE }}
+      IBM_RITS_API_KEY: ${{ secrets.IBM_RITS_API_KEY }}
       # A PR-label run has no inputs, so it keeps running tau2 exactly as before. Only a
       # deliberate dispatch selects an arm.
       BENCH: ${{ github.event.inputs.bench || 'tau2' }}

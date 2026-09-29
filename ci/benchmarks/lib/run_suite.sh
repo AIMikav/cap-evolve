@@ -14,7 +14,7 @@
 set -uo pipefail
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$LIB_DIR/../../.." && pwd)"
-BENCH="${1:?bench (tau2|swebench|skillsbench|spreadsheetbench|rfe-creator|parsec|tau2_custom_direct|tau2_custom_spa)}"
+BENCH="${1:?bench (tau2|swebench|skillsbench|spreadsheetbench|rfe-creator|parsec|tau2_custom_direct|tau2_custom_blackbox)}"
 PY="${CAPEVOLVE_PY:-$REPO/.venv-e2e/bin/python}"; [ -x "$PY" ] || PY="python3"
 TIER="${TIER:-smoke}"
 
@@ -29,10 +29,26 @@ BENCH_DIR="$BENCH"
 case "$BENCH" in tau2_custom_*) BENCH_DIR="tau2_custom/${BENCH#tau2_custom_}" ;; esac
 load_overrides "$REPO/ci/benchmarks/$BENCH_DIR/$TIER/overrides.env"
 
+# Remove a directory that may hold files a sandbox container created under ITS uid. Our account
+# cannot delete those (their parent dirs are the container's, mode 755), so a plain `rm -rf` stops
+# partway — which once left the kept-run slot half-deleted and blocked the swap after it. Renaming
+# needs write access only on the parent, which is ours, so the path is freed first and always;
+# the delete then falls back to a throwaway root container. Returns non-zero only if the rename fails.
+_discard_dir() {
+  local p="$1" t
+  [ -e "$p" ] || return 0
+  t="$p.discard-$$-$RANDOM"
+  mv "$p" "$t" || return 1
+  rm -rf "$t" 2>/dev/null \
+    || docker run --rm -v "$(dirname "$t"):/d" alpine rm -rf "/d/$(basename "$t")" >/dev/null 2>&1 \
+    || echo "::warning:: could not fully delete $t (files owned by the container's uid); remove it by hand" >&2
+  return 0
+}
+
 ITER="${ITERATIONS:-3}"
-AGENT_MODEL="${AGENT_MODEL:-aws/gpt-oss-120b}"
+AGENT_MODEL="${AGENT_MODEL:-ibm-ete-int/aws/gpt-oss-120b}"
 NUM_TRIALS="${NUM_TRIALS:-10}"
-OPTIMIZER_MODEL="${OPTIMIZER_MODEL:-claude-opus-4-8}"
+OPTIMIZER_MODEL="${OPTIMIZER_MODEL:-ibm-ete-int/claude-opus-4-8}"
 GATE_K_SE="${GATE_K_SE:-1.0}"
 # Raw native trajectories (tau2's own results.json, via adapter._sim_save_path). ON for the
 # tau2 legs, whose adapters write them and where a failed rollout is only readable from the
@@ -102,12 +118,33 @@ case "$ALGORITHM" in
     # tried a code-level guard, which its own reject note ("require calculate tool for all
     # money") had already identified as the right form. Rejections bound nothing; rounds and
     # spend do.
+    #
+    # The SIBLINGS clause below exists because gating a wave of candidates in parallel spends
+    # the whole round budget just as fast as gating them one at a time. On smoke run
+    # 35861572021 (iterations=3), a first wave of three edit-surface variants consumed all
+    # three rounds outright, and the clearest finding it produced — one surface beating another
+    # by 0.089 — had no round left to act on (the obvious next round, retesting the winning
+    # surface alone, was unavailable). That wave was exactly the shape references/algorithm.md's
+    # "Gating N Bucket-A siblings does not mean paying full val N times" rule already covers:
+    # screen every sibling first, merge_search.py the disjoint survivors, and gate only the
+    # merge — a path that costs zero extra rounds. The clause below is for when siblings truly
+    # are independent risks that must each be gated alone; it points back at that rule rather
+    # than duplicating or replacing it. Numbers specific to run 35861572021 stay in THIS
+    # comment, not in the derived text below, which spend.py/constraints.py parse for
+    # enforcement — a bare run id or reward delta there reads as an unrecognized constraint and
+    # trips the "ask the user before the loop starts" ambiguity check for no enforcement gain.
     STOP_CONDITION="Spend at most ${_rounds} rounds, where a round is one candidate taken to a\
  full-val gate decision (accepted or rejected) and booked with commit.py. Stop when spend.py's\
  recommendation is 'stop', or after ${_rounds} rounds.${_stop_usd} Do NOT stop early merely\
  because rounds were rejected: a rejection is the signal to change the edit FORM or the SURFACE\
- on the next round, not to finish. Use every round the budget allows. Gate every candidate on\
- FULL val at gate_k_se=${_k_se} over ${_trials} trial(s); never gate on a screen subset. Pass\
+ on the next round, not to finish. Use every round the budget allows over the course of the\
+ run — not all in one wave. SIBLINGS ARE NOT FREE: candidates gated in the same wave each\
+ consume a round. Before gating a wave on full val, confirm this is not a screen-then-merge\
+ case (screen every sibling first, merge the disjoint survivors, gate only the merge — see\
+ references/algorithm.md, 'Gating N Bucket-A siblings...') — that path costs zero extra rounds.\
+ When siblings truly are independent risks that must each be gated alone, keep a narrow first\
+ wave and hold rounds in RESERVE for the follow-up the evidence points at. Gate every candidate\
+ on FULL val at gate_k_se=${_k_se} over ${_trials} trial(s); never gate on a screen subset. Pass\
  --gate-against control on every round.py call: its default reference is the parent's reward as\
  measured in an EARLIER round, so that reward's drift since then sits inside every candidate\
  delta, while a control is a byte-identical replicate measured in the SAME round. Always\
@@ -145,8 +182,45 @@ mkdir -p "$OUT/optimized"
 
 [ -f "$BASE/tasks.json" ] || { echo "::warning::no tasks.json for $BENCH/$TIER — nothing to run"; echo "## ${TIER^} suite — $BENCH" > "$OUT/report.md"; echo "(no tasks defined for this tier)" >> "$OUT/report.md"; exit 0; }
 
-: "${ANTHROPIC_BASE_URL:?set ANTHROPIC_BASE_URL (IBM gateway)}"
-: "${ANTHROPIC_AUTH_TOKEN:?set ANTHROPIC_AUTH_TOKEN}"
+# Resolve AGENT_MODEL/OPTIMIZER_MODEL to their provider (ibm-ete-int, ibm-ete, or
+# ibm-rits — see resolve_provider.sh for the prefix scheme). Each is resolved
+# independently: dispatching an ibm-rits agent_model with an ibm-ete-int (or ibm-ete)
+# optimizer_model, or any other pairing, is a normal, deliberate combination, not an
+# error.
+# shellcheck source=ci/benchmarks/lib/resolve_provider.sh
+. "$LIB_DIR/resolve_provider.sh"
+resolve_provider "$AGENT_MODEL"
+AGENT_MODEL_WIRE="$RESOLVED_MODEL"; AGENT_API_BASE="$RESOLVED_API_BASE"; AGENT_API_KEY="$RESOLVED_API_KEY"
+resolve_provider "$OPTIMIZER_MODEL"
+OPTIMIZER_MODEL_WIRE="$RESOLVED_MODEL"; OPTIMIZER_API_BASE="$RESOLVED_API_BASE"; OPTIMIZER_API_KEY="$RESOLVED_API_KEY"
+# The `claude` CLI (optimizer_skill: claude-code, invoked further down by
+# `cap_evolve.cli run` / agent-optimize's host.py) reads ANTHROPIC_BASE_URL/
+# ANTHROPIC_AUTH_TOKEN from the process environment — overriding them here, once, before
+# either is invoked, is what makes an OPTIMIZER_MODEL on ibm-ete, or ibm-rits, actually
+# reach that provider rather than silently keep talking to the ibm-ete-int gateway with a
+# model id it doesn't recognise. NOT yet verified that lite-rits (ibm-rits) speaks the
+# Anthropic Messages API the CLI expects — see the PR description.
+#
+# This export is process-wide and OUTLIVES this block, which matters for the skillsbench/
+# rfe-creator arms below: their in-sandbox agent also ultimately shells out to `claude`,
+# and if it just inherited these same two vars it would silently run under the OPTIMIZER's
+# provider/model instead of AGENT_MODEL's. Those two arms instead pass the agent's own
+# credentials (AGENT_API_BASE/AGENT_API_KEY) through dedicated, adapter-specific vars
+# (SKILLSBENCH_AGENT_*/RFE_AGENT_*) that their adapters check BEFORE falling back to
+# ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN — see templates/adapters/skillsbench/adapter.py's
+# _gateway_env() and templates/adapters/rfe_creator/adapter.py's _harness_env().
+export ANTHROPIC_BASE_URL="$OPTIMIZER_API_BASE"
+export ANTHROPIC_AUTH_TOKEN="$OPTIMIZER_API_KEY"
+# NB: OPTIMIZER_MODEL itself is NEVER reassigned to the wire form here — it stays the
+# CI-facing "ibm-ete-int/…"/"ibm-ete/…"/"ibm-rits/…"-prefixed alias, used for the
+# progress line below and metrics.py's provenance display further down. resolve_provider
+# DOES strip that prefix into OPTIMIZER_MODEL_WIRE (unlike this comment used to claim —
+# resolve_provider.sh now rewrites the model id on purpose, see its own header comment).
+# Every call site below that hands a model id to a provider ON THE WIRE, not just into a
+# human-readable report, must use the _WIRE variant: capevolve.yaml's `optimizer_model:`
+# key and the agent-mode host.py invocation both pass this straight to the `claude` CLI's
+# own --model flag (core/cap_evolve/cli.py:711 and :902), so an un-stripped CI prefix
+# there is not provenance text, it's a broken subprocess argument.
 
 export PYTHONPATH="$REPO/core:$REPO"
 export CAPEVOLVE_SKILLS_DIR="$REPO/skills"
@@ -168,7 +242,7 @@ PY
 # dispatch is a normal, deliberate thing to do (that IS the benchmark), so a mismatch is
 # informational, never a "::warning::" — a same-every-time warning trains people to stop
 # reading warnings (#420 item 10).
-"$PY" - "$BASE/tasks.json" "$AGENT_MODEL" "$BENCH/$TIER" <<'PY'
+"$PY" - "$BASE/tasks.json" "$AGENT_MODEL_WIRE" "$BENCH/$TIER" <<'PY'
 import json,sys
 ts=json.load(open(sys.argv[1]))
 agents={t.get("agent") for t in ts if t.get("agent")}
@@ -212,26 +286,26 @@ case "$BENCH" in
     # briefing does it in host.py's `_surface_section`.
     CAPS="[system-prompt, tools]"
     cat > "$WORK/.env" <<ENV
-MODEL=litellm_proxy/$AGENT_MODEL
-LITELLM_PROXY_API_BASE=$ANTHROPIC_BASE_URL
-LITELLM_PROXY_API_KEY=$ANTHROPIC_AUTH_TOKEN
+MODEL=litellm_proxy/$AGENT_MODEL_WIRE
+LITELLM_PROXY_API_BASE=$AGENT_API_BASE
+LITELLM_PROXY_API_KEY=$AGENT_API_KEY
 MAX_TOKENS=8000
 TEMPERATURE=0.0
 ENV
     export TAU2_MAX_CONCURRENCY=10
     ;;
-  tau2_custom_direct|tau2_custom_spa)
+  tau2_custom_direct|tau2_custom_blackbox)
     # The two DELIVERY ARMS of the tau2 airline benchmark. Same 50 airline tasks as the `tau2`
     # leg above, same tier ids, but a different question: `tau2` asks "can the optimizer
     # improve the agent's prompt+tools", these ask "does the candidate still land when it is
     # delivered THIS way" — in the runner's own process (direct) or through the Skillberry
-    # Store + Proxy-Agent (spa). direct-vs-spa is the comparison; neither is comparable to the
+    # Store + Proxy-Agent (blackbox). direct-vs-blackbox is the comparison; neither is comparable to the
     # `tau2` leg, whose capability surface includes policy.md and whose tau2 build differs.
     #
     # The adapter comes from examples/, not templates/adapters/: a copy under templates/ would
     # duplicate ~700 lines per arm and be free to drift from the example a reviewer reads. The
     # tau2 leg already sources examples/tau2_airline/seed_capability, so this is the convention.
-    ARM="${BENCH#tau2_custom_}"                         # -> direct | spa
+    ARM="${BENCH#tau2_custom_}"                         # -> direct | blackbox
     ARM_DIR="$REPO/examples/tau2_custom/$ARM"
     [ -d "$ARM_DIR" ] || { echo "::error:: no such arm: $ARM_DIR"; exit 2; }
     cp "$ARM_DIR/adapters/adapter.py" "$ARM_DIR/adapters/gateway.py" "$PROJ/adapters/"
@@ -241,7 +315,7 @@ ENV
       && cp "$REPO/examples/tau2_custom/scoring.py" "$PROJ/adapters/"
     rm -rf "$PROJ/seed_capability"; cp -R "$ARM_DIR/seed_capability" "$PROJ/seed_capability"
     # The arm's own optimizer instructions, pinned ABSOLUTE. The generic template speaks of
-    # policy.md + tools.py; the direct arm has no policy surface and the spa arm's artifact is a
+    # policy.md + tools.py; the direct arm has no policy surface and the blackbox arm's artifact is a
     # skill package, so the shared text would send the optimizer looking for files that are not
     # there. Absolute because a relative value resolves against different cwds in check vs run
     # and can silently fall back to the generic template (#252).
@@ -260,7 +334,7 @@ ENV
       echo "::error:: Run the setup step for this bench first:"
       echo "::error::   bash ci/benchmarks/lib/ci_setup.sh $BENCH"
       echo "::error:: It clones the pinned benchmark, installs tau2-bench[skillberry] into the"
-      echo "::error:: cached venv, and (for the spa arm) provisions the Skillberry stack."
+      echo "::error:: cached venv, and (for the blackbox arm) provisions the Skillberry stack."
       exit 1; }
     # Credentials. The arms' gateway.py reads OPENAI_BASE_URL / OPENAI_API_KEY (litellm's
     # `openai/` route), not the LITELLM_PROXY_* names the tau2 leg uses; the ete-litellm gateway
@@ -274,55 +348,55 @@ OPENAI_API_KEY=$ANTHROPIC_AUTH_TOKEN
 ENV
     export OPENAI_BASE_URL="$ANTHROPIC_BASE_URL" OPENAI_API_BASE="$ANTHROPIC_BASE_URL"
     export OPENAI_API_KEY="$ANTHROPIC_AUTH_TOKEN"
-    export TAU2_USER_MODEL="$AGENT_MODEL"               # the user simulator, both arms
+    export TAU2_USER_MODEL="$AGENT_MODEL_WIRE"          # the user simulator, both arms
     export TAU2_LLM_TIMEOUT="${TAU2_LLM_TIMEOUT:-240}"
     export TAU2_LLM_RETRIES="${TAU2_LLM_RETRIES:-2}"
     export TAU2_INFRA_RETRIES="${TAU2_INFRA_RETRIES:-2}"
     if [ "$ARM" = "direct" ]; then
-      # In-process delivery: no service to start, so nothing here mirrors the spa block below.
-      # The agent under test IS the gateway model; gateway.py refuses the spa sentinel here.
-      export TAU2_AGENT_MODEL="$AGENT_MODEL"
+      # In-process delivery: no service to start, so nothing here mirrors the blackbox block below.
+      # The agent under test IS the gateway model; gateway.py refuses the Blackbox sentinel here.
+      export TAU2_AGENT_MODEL="$AGENT_MODEL_WIRE"
       export TAU2_MAX_CONCURRENCY="${TAU2_MAX_CONCURRENCY:-10}"
       EXTRA_YAML="actions: [edit]
 capability_sources: [seed_capability/reference/data_model.py]
 runner_repo_path: \"$SB_DIR\""
     else
-      # SPA delivery. Three services, and the run owns their lifecycle: ci_setup.sh provisioned
+      # Blackbox delivery via the Skillberry Proxy-Agent. Three services, and the run owns their lifecycle: ci_setup.sh provisioned
       # them but deliberately did not start them (starting on the operator's behalf during
       # provisioning is the anti-pattern the intervention skill calls out).
       #
       # Concurrency 4 — the adapter's own default (adapter.py) and what the arm's run.sh uses.
       # Only ONE candidate is in flight per evaluation, so parallel rollouts all want the same
       # skill the proxy is already bound to.
-      export TAU2_AGENT_MODEL="${TAU2_AGENT_MODEL:-ibm/skillberry-local}"   # the SPA sentinel
+      export TAU2_AGENT_MODEL="${TAU2_AGENT_MODEL:-ibm/skillberry-local}"   # the Blackbox sentinel
       export TAU2_MAX_CONCURRENCY="${TAU2_MAX_CONCURRENCY:-4}"
       # What the proxy calls upstream once the sentinel reaches it, and what runner_model()
       # reports. Comes from the repo-root .env locally; CI has none, and unset falls back to
       # gateway.DEFAULT_GATEWAY_MODEL, so a dispatched agent_model would be silently ignored.
       # openai/ is the litellm route for a gateway id — adding it twice 404s.
-      case "$AGENT_MODEL" in
-        openai/*) export SPA_MODEL_NAME="${SPA_MODEL_NAME:-$AGENT_MODEL}" ;;
-        *)        export SPA_MODEL_NAME="${SPA_MODEL_NAME:-openai/$AGENT_MODEL}" ;;
+      case "$AGENT_MODEL_WIRE" in
+        openai/*) export SPA_MODEL_NAME="${SPA_MODEL_NAME:-$AGENT_MODEL_WIRE}" ;;
+        *)        export SPA_MODEL_NAME="${SPA_MODEL_NAME:-openai/$AGENT_MODEL_WIRE}" ;;
       esac
-      echo "  SPA upstream model: $SPA_MODEL_NAME (sentinel: $TAU2_AGENT_MODEL)"
-      # Same vendor dir ci_setup.sh provisioned into. spa_env recomputes this from the
+      echo "  Blackbox upstream model: $SPA_MODEL_NAME (sentinel: $TAU2_AGENT_MODEL)"
+      # Same vendor dir ci_setup.sh provisioned into. blackbox_env recomputes this from the
       # environment in every process, so setup and run must agree or the run re-clones.
       export SPA_VENDOR_DIR="${SPA_VENDOR_DIR:-${CAPEVOLVE_CI_CACHE:-$HOME/.cache/capevolve-ci}/spa-vendor}"
       # Service logs are not ours to manage: each service rotates its own from inside the process
-      # holding the fd. This leg only reads bounded tails on the way out, from paths spa_env
+      # holding the fd. This leg only reads bounded tails on the way out, from paths blackbox_env
       # exports so they cannot drift from what the stack writes.
       SPA_LOGS="$( cd "$REPO" && "$PY" - <<'PYEOF' 2>/dev/null || true
 import sys
-sys.path.insert(0, "skills/interventions/llm-proxies/spa/scripts")
-import spa_env
-print(" ".join((spa_env.AGENT_LOG_FILE, spa_env.STORE_LOG_FILE,
-                spa_env.AGENT_TOOLS_LOG_FILE, spa_env.STORE_TOOLS_LOG_FILE)))
+sys.path.insert(0, "skills/interventions/llm-proxies/blackbox/scripts")
+import blackbox_env
+print(" ".join((blackbox_env.AGENT_LOG_FILE, blackbox_env.STORE_LOG_FILE,
+                blackbox_env.AGENT_TOOLS_LOG_FILE, blackbox_env.STORE_TOOLS_LOG_FILE)))
 PYEOF
 )"
       ENV_PORT="${ENV_PORT:-8004}"
       export SPA_REMOTE_ENV_URL="${SPA_REMOTE_ENV_URL:-http://127.0.0.1:$ENV_PORT}"
-      # Not a Skillberry service, so spa_env does not launch it — but its log is ours to bound.
-      # /tmp like the stack's other three, rotated by spa_env's helper rather than a second one.
+      # Not a Skillberry service, so blackbox_env does not launch it — but its log is ours to bound.
+      # /tmp like the stack's other three, rotated by blackbox_env's helper rather than a second one.
       ENV_LOG=/tmp/env_manager.log
       # Fronts the airline env over HTTP; the store's executor calls it per rollout. Start only if
       # nothing is listening — a leg following another on this serialized runner finds a live one.
@@ -335,10 +409,10 @@ PYEOF
         echo "  starting tau2 environment service -> $ENV_LOG"
         # Rotate ONLY inside this branch, where we are about to launch: rotating a log the
         # running env manager holds open leaves it appending to a deleted inode while the fresh
-        # file stays empty (see rotate_if_large in spa_env).
+        # file stays empty (see rotate_if_large in blackbox_env).
         ( cd "$REPO" && "$PY" -c "import sys
-sys.path.insert(0, 'skills/interventions/llm-proxies/spa/scripts')
-import spa_env; spa_env.rotate_if_large('$ENV_LOG')" ) \
+sys.path.insert(0, 'skills/interventions/llm-proxies/blackbox/scripts')
+import blackbox_env; blackbox_env.rotate_if_large('$ENV_LOG')" ) \
           || echo "::warning:: could not rotate $ENV_LOG (continuing; it may grow unbounded)"
         # LITELLM_LOCAL_MODEL_COST_MAP=True skips litellm's doomed remote cost-map fetch, which
         # otherwise stalls startup until it times out.
@@ -360,27 +434,27 @@ asyncio.run(EnvironmentManager(host='127.0.0.1', port=$ENV_PORT).run())
                tail -40 "$ENV_LOG" 2>/dev/null; exit 1; }
         echo "  healthy"
       fi
-      # Store, then Proxy-Agent — ORDER MATTERS: the store must be healthy before SPA starts,
-      # and SPA binds `my_skill` at start. Both starts are idempotent.
+      # Store, then Proxy-Agent — ORDER MATTERS: the store must be healthy before the Proxy-Agent starts,
+      # and the Proxy-Agent binds `my_skill` at start. Both starts are idempotent.
       ( cd "$REPO" && CAPEVOLVE_SKILLS_DIR="$REPO/skills" "$PY" - <<'PYEOF'
 import json, sys
-sys.path.insert(0, "skills/interventions/llm-proxies/spa/scripts")
-import spa_env
-spa_env.start_store()
-spa_env.start_spa("my_skill")
-print("  " + json.dumps(spa_env.status()))
+sys.path.insert(0, "skills/interventions/llm-proxies/blackbox/scripts")
+import blackbox_env
+blackbox_env.start_store()
+blackbox_env.start_spa("my_skill")
+print("  " + json.dumps(blackbox_env.status()))
 PYEOF
       ) || { echo "::error:: could not start the Skillberry stack (Store + Proxy-Agent)"; exit 1; }
       # TEAR DOWN on the way out, unlike the arm's run.sh which deliberately leaves the stack up
       # for a human to poke at. CI has no such operator, and a leftover proxy still bound to the
       # PREVIOUS leg's skill is a silent wrong-candidate hazard for whatever runs next.
       # `|| true` throughout: a failed teardown must not turn a finished run into a failed job.
-      _spa_teardown() {
+      _blackbox_teardown() {
         ( cd "$REPO" && CAPEVOLVE_SKILLS_DIR="$REPO/skills" "$PY" - <<'PYEOF' || true
 import sys
-sys.path.insert(0, "skills/interventions/llm-proxies/spa/scripts")
-import spa_env
-spa_env.stop_all()
+sys.path.insert(0, "skills/interventions/llm-proxies/blackbox/scripts")
+import blackbox_env
+blackbox_env.stop_all()
 print("  Skillberry stack stopped")
 PYEOF
         ) || true
@@ -391,13 +465,13 @@ PYEOF
         # truncating a file whose fd a live process holds fights that owner.
         for _src in $SPA_LOGS "$ENV_LOG"; do
           [ -f "$_src" ] || continue
-          tail -c 2097152 "$_src" > "$OUT/spa-$(basename "$_src").tail" 2>/dev/null || true
+          tail -c 2097152 "$_src" > "$OUT/blackbox-$(basename "$_src").tail" 2>/dev/null || true
         done
       }
-      trap _spa_teardown EXIT
+      trap _blackbox_teardown EXIT
       EXTRA_YAML="actions: [edit]
 capability_sources: []
-intervention: spa
+intervention: blackbox
 skill_name: my_skill
 protected_paths: [\"primitive_tools/*\", \"my_skill/SKILL.md\"]
 runner_repo_path: \"$SB_DIR\""
@@ -414,7 +488,7 @@ runner_repo_path: \"$SB_DIR\""
     CAPS="[skill-package]"
     export HARBOR_DATASET=swe-bench/swe-bench-verified
     export HARBOR_AGENT=claude-code
-    export HARBOR_MODEL="$AGENT_MODEL"
+    export HARBOR_MODEL="$AGENT_MODEL_WIRE"
     # Concurrency. 16 was WRONG and pilot run 31274531220 proved it: 34 of 50 tasks
     # infra-errored, the box sat at load 30 of 32 cores, and the failures were agent-bootstrap
     # (npm exit 126/128, NetworkConnectionError) plus CancelledError from rollouts starved of
@@ -474,9 +548,9 @@ runner_repo_path: \"$SB_DIR\""
     # this runner and wrong for a LiteLLM key. Setting it makes the adapter export
     # ANTHROPIC_BASE_URL plus the SONNET/HAIKU/OPUS model aliases into the container, so
     # every agent call goes through the same gateway the optimizer uses.
-    export HARBOR_AGENT_BASE_URL="${HARBOR_AGENT_BASE_URL:-$ANTHROPIC_BASE_URL}"
-    export HARBOR_AGENT_API_KEY="${HARBOR_AGENT_API_KEY:-$ANTHROPIC_AUTH_TOKEN}"
-    export ANTHROPIC_API_KEY="$ANTHROPIC_AUTH_TOKEN"
+    export HARBOR_AGENT_BASE_URL="${HARBOR_AGENT_BASE_URL:-$AGENT_API_BASE}"
+    export HARBOR_AGENT_API_KEY="${HARBOR_AGENT_API_KEY:-$AGENT_API_KEY}"
+    export ANTHROPIC_API_KEY="$AGENT_API_KEY"
     : > "$WORK/.env"
     ;;
   parsec)
@@ -521,7 +595,7 @@ runner_repo_path: \"$SB_DIR\""
     [ -d "$HARBOR_DATASET" ] || { echo "::error:: parsec shadow tasks not found at $HARBOR_DATASET (set PARSEC_HARBOR_TASKS_V2_DST / PARSEC_HARBOR_TASKS_DST, or run the matching ci/benchmarks/parsec/utils/patch-harbor-tasks*.sh first — see ci/benchmarks/parsec/README.md)"; exit 1; }
     export HARBOR_LOCAL_ASIS=1
     export HARBOR_AGENT=claude-code
-    export HARBOR_MODEL="$AGENT_MODEL"
+    export HARBOR_MODEL="$AGENT_MODEL_WIRE"
     case "${TIER:-smoke}" in
       smoke) _hp_default=2 ;;
       *)     _hp_default=4 ;;
@@ -538,9 +612,9 @@ runner_repo_path: \"$SB_DIR\""
     # Route the in-container claude-code at the VPC gateway (same rationale as
     # swebench). Without HARBOR_AGENT_BASE_URL the adapter falls back to bare
     # api.anthropic.com which is unreachable from the runner.
-    export HARBOR_AGENT_BASE_URL="${HARBOR_AGENT_BASE_URL:-$ANTHROPIC_BASE_URL}"
-    export HARBOR_AGENT_API_KEY="${HARBOR_AGENT_API_KEY:-$ANTHROPIC_AUTH_TOKEN}"
-    export ANTHROPIC_API_KEY="$ANTHROPIC_AUTH_TOKEN"
+    export HARBOR_AGENT_BASE_URL="${HARBOR_AGENT_BASE_URL:-$AGENT_API_BASE}"
+    export HARBOR_AGENT_API_KEY="${HARBOR_AGENT_API_KEY:-$AGENT_API_KEY}"
+    export ANTHROPIC_API_KEY="$AGENT_API_KEY"
     # BACKEND_MCP_URL retained for compatibility with any lingering ${VAR}
     # placeholder in task.toml (the v1 shadow patcher replaces most). Points at
     # the aap2 sim by default. Inert for v2, whose task.toml files carry a
@@ -560,15 +634,21 @@ runner_repo_path: \"$SB_DIR\""
     cp -R "$SB_SRC/tasks/pdf-excel-diff/environment/skills/pdf"          "$SEED/pdf"
     CAPS="[skill-package]"
     cat > "$WORK/.env" <<ENV
-ANTHROPIC_BASE_URL=$ANTHROPIC_BASE_URL
-ANTHROPIC_AUTH_TOKEN=$ANTHROPIC_AUTH_TOKEN
-SKILLSBENCH_MODEL=$AGENT_MODEL
+ANTHROPIC_BASE_URL=$AGENT_API_BASE
+ANTHROPIC_AUTH_TOKEN=$AGENT_API_KEY
+SKILLSBENCH_MODEL=$AGENT_MODEL_WIRE
 SKILLSBENCH_TASKS_DIR=$SB_SRC/tasks
 SKILLSBENCH_CONCURRENCY=10
 ENV
-    export SKILLSBENCH_MODEL="$AGENT_MODEL"
+    export SKILLSBENCH_MODEL="$AGENT_MODEL_WIRE"
     export SKILLSBENCH_TASKS_DIR="$SB_SRC/tasks"
     export SKILLSBENCH_CONCURRENCY=10
+    # Dedicated agent-only credentials: the plain ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN
+    # above (both the .env line and the process env) are already pinned to the OPTIMIZER's
+    # provider a few lines up, so the adapter's _gateway_env() reads THESE instead — see
+    # the comment on the ANTHROPIC_BASE_URL export above.
+    export SKILLSBENCH_AGENT_BASE_URL="$AGENT_API_BASE"
+    export SKILLSBENCH_AGENT_API_KEY="$AGENT_API_KEY"
     ;;
   spreadsheetbench)
     cp "$TPL/spreadsheetbench/adapter.py" "$PROJ/adapters/"
@@ -588,8 +668,26 @@ ENV
       exit 1
     fi
     if [ "${SB_EMPTY_SEED:-0}" = "1" ]; then
+      # Clear EVERY surface the agent reads, not just the system prompt. The capability has two:
+      # prompt.md and task_template.md. This flag was written in #281 when prompt.md was the whole
+      # capability; #282 -- the very next PR -- made task_template.md optimizable and the flag was
+      # not revisited, so run 36261022325 measured "no system prompt but keep the full tuned task
+      # template" (2453 of 3418 bytes, 72% of the capability text) and reported it as no-skill.
+      #
+      # The two are cleared DIFFERENTLY, and the asymmetry is deliberate:
+      #   prompt.md        BLANKED. Empty means no system message at all. A MISSING file falls
+      #                    back to the adapter's built-in default prompt, which would measure
+      #                    that default while claiming no skill.
+      #   task_template.md REMOVED. A shipped file OVERRIDES the built-in _TASK_TEMPLATE, so
+      #                    blanking it would hand the agent an empty user message -- no
+      #                    instruction, no paths, no answer_position -- and score every task 0.
+      #                    Removing it restores the built-in, which is the correct no-skill
+      #                    condition and close to the reference paper's own Appendix E.1 prompt
+      #                    (same fields, empty {skill_section}).
       : > "$PROJ/seed_capability/prompt.md"
-      echo ">>> spreadsheetbench: EMPTY seed (no-skill control) — prompt.md blanked" >&2
+      rm -f "$PROJ/seed_capability/task_template.md"
+      echo ">>> spreadsheetbench: EMPTY seed (no-skill control) — prompt.md blanked," \
+           "task_template.md removed (built-in _TASK_TEMPLATE applies)" >&2
     fi
     # WARM START. Learning was not cumulative: every run began from the pristine seed, so each
     # explored a different subset of rules and forgot the rest. Across the two pilots' champions,
@@ -675,6 +773,12 @@ OPTNOTE
     SB_DEFAULT="$SB_CACHE/sample_data_200"
     # pilot draws its tasks from full's train split, so it needs the 912-task dataset too.
     case "$TIER" in full|pilot) SB_DEFAULT="$SB_CACHE/all_data_912_v0.1";; esac
+    # full_verified is the OTHER dataset variant (see fetch_data.sh) — a different download
+    # and layout, not a subset of the 912 archive. Without this arm, a direct
+    # `TIER=full_verified` invocation without SPREADSHEETBENCH_DATA_DIR set (e.g. locally,
+    # bypassing ci_setup.sh) would silently fall through to the sample_200 fallback above
+    # and score the wrong benchmark under the full_verified tier's name.
+    case "$TIER" in full_verified) SB_DEFAULT="$SB_CACHE/spreadsheetbench_verified_400";; esac
     # SPREADSHEETBENCH_DATA_DIR is expected to be set (and exported to GITHUB_ENV) by
     # ci_setup.sh, which calls fetch_data.sh and echoes the resolved path. When running
     # locally without ci_setup.sh, the SB_DEFAULT fallback is used instead.
@@ -684,20 +788,22 @@ OPTNOTE
     # (still bounded; each container is ~8GB RAM / 2 CPU, see adapter.py's NOTE ON SCORING)
     # unless the caller already pinned SPREADSHEETBENCH_CONCURRENCY explicitly.
     SB_CONCURRENCY_DEFAULT=4
-    case "$TIER" in full|pilot) SB_CONCURRENCY_DEFAULT=8;; esac
+    case "$TIER" in full|pilot|full_verified) SB_CONCURRENCY_DEFAULT=8;; esac
     # Rounds of code-exec interaction the agent gets per task. SkillOpt runs SpreadsheetBench
     # as "multi-round codegen with up to 30 turns" (arXiv 2605.23904), and the adapter's own
     # default is 5 — a real handicap on a multi-round benchmark, so full (the comparison tier)
     # matches 30. Smoke stays at 5 to keep it a cheap, fast signal whose numbers remain
     # comparable to its own history. Override with SPREADSHEETBENCH_MAX_TURNS.
     SB_MAX_TURNS_DEFAULT=5
-    # pilot exists to MEASURE the full tier, so it must match full's turn budget.
-    case "$TIER" in full|pilot) SB_MAX_TURNS_DEFAULT=30;; esac
+    # pilot exists to MEASURE the full tier, so it must match full's turn budget. full_verified is
+    # the other comparison tier (the verified 400-task release) and matches it for the same
+    # reason: the turn budget is part of what is being compared, not an implementation detail.
+    case "$TIER" in full|pilot|full_verified) SB_MAX_TURNS_DEFAULT=30;; esac
     CAPS="[system-prompt]"
     cat > "$WORK/.env" <<ENV
-MODEL=litellm_proxy/$AGENT_MODEL
-LITELLM_PROXY_API_BASE=$ANTHROPIC_BASE_URL
-LITELLM_PROXY_API_KEY=$ANTHROPIC_AUTH_TOKEN
+MODEL=litellm_proxy/$AGENT_MODEL_WIRE
+LITELLM_PROXY_API_BASE=$AGENT_API_BASE
+LITELLM_PROXY_API_KEY=$AGENT_API_KEY
 MAX_TOKENS=8000
 TEMPERATURE=0.0
 SPREADSHEETBENCH_HARNESS_DIR=$REPO/third_party/spreadsheetbench
@@ -706,6 +812,7 @@ SPREADSHEETBENCH_TASK_IDS=$IDS_CSV
 SPREADSHEETBENCH_CONCURRENCY=${SPREADSHEETBENCH_CONCURRENCY:-$SB_CONCURRENCY_DEFAULT}
 SPREADSHEETBENCH_MAX_TURNS=${SPREADSHEETBENCH_MAX_TURNS:-$SB_MAX_TURNS_DEFAULT}
 SPREADSHEETBENCH_SCORING=${SB_SCORING:-soft}
+SPREADSHEETBENCH_REWARD_RECALC=${SB_REWARD_RECALC:-0}
 ENV
     export SPREADSHEETBENCH_HARNESS_DIR="$REPO/third_party/spreadsheetbench"
     export SPREADSHEETBENCH_DATA_DIR="$SB_DATA"
@@ -715,6 +822,27 @@ ENV
     # match — the "native hard score" that published comparisons report). Both are recorded
     # on every rollout either way; this picks the one the GATE optimizes against.
     export SPREADSHEETBENCH_SCORING="${SB_SCORING:-soft}"
+    # REWARD: as saved (default, SB_REWARD_RECALC=0) or after LibreOffice formula recalculation
+    # (1). As saved is how SkillOpt and WikiSkill score SpreadsheetBench, so it is the reward on
+    # every tier; the other is still recorded per rollout. Runs before this default graded with
+    # recalculation, so their published numbers are higher and not directly comparable.
+    export SPREADSHEETBENCH_REWARD_RECALC="${SB_REWARD_RECALC:-0}"
+    if [ "$SPREADSHEETBENCH_REWARD_RECALC" = "1" ]; then SB_REWARD_METRIC="${SPREADSHEETBENCH_SCORING}_restriction"
+    else SB_REWARD_METRIC="${SPREADSHEETBENCH_SCORING}_no_recalc"; fi
+    echo ">>> spreadsheetbench reward: $SB_REWARD_METRIC" >&2
+    printf '%s' "$SB_REWARD_METRIC" > "$OUT/reward_metric"
+    # LATEST RUN. One history slot, overwritten by every spreadsheetbench run: the whole run dir
+    # plus every output workbook (recalculated and as-saved), kept on the runner so a finished
+    # run can be re-scored offline and a later run can build on its seed (SB_REUSE_LATEST_BASELINE).
+    # Outputs are otherwise deleted after scoring, and the runner's work dir is wiped per job.
+    SB_KEEP_LATEST_RUN="${SB_KEEP_LATEST_RUN:-1}"
+    SB_LATEST_DIR="${SB_LATEST_DIR:-$HOME/.cache/capevolve-latest/spreadsheetbench}"
+    if [ "$SB_KEEP_LATEST_RUN" = "1" ]; then
+      export SPREADSHEETBENCH_KEEP_OUTPUTS=1
+      echo "SPREADSHEETBENCH_KEEP_OUTPUTS=1" >> "$WORK/.env"
+      # Kept outputs accumulate in the shared data dir, so start this run from an empty one.
+      _discard_dir "${SB_DATA:?}/outputs" || exit 1
+    fi
     ;;
   rfe-creator)
     # Optimizes 7 Claude Code skills (rfe.speedrun, rfe.create, rfe.auto-fix, rfe.review,
@@ -736,19 +864,25 @@ ENV
     done
     CAPS="[skill-package]"
     cat > "$WORK/.env" <<ENV
-ANTHROPIC_BASE_URL=$ANTHROPIC_BASE_URL
-ANTHROPIC_AUTH_TOKEN=$ANTHROPIC_AUTH_TOKEN
+ANTHROPIC_BASE_URL=$AGENT_API_BASE
+ANTHROPIC_AUTH_TOKEN=$AGENT_API_KEY
 RFE_CREATOR_DIR=$RFE_SRC/rfe-creator
 AGENT_EVAL_HARNESS_DIR=$RFE_SRC/agent-eval-harness
 RFE_EVAL_CONFIG=$RFE_SRC/eval.merged.yaml
-RFE_RUNNER_MODEL=$AGENT_MODEL
+RFE_RUNNER_MODEL=$AGENT_MODEL_WIRE
 RFE_HARNESS_PY=$PY
 ENV
     export RFE_CREATOR_DIR="$RFE_SRC/rfe-creator"
     export AGENT_EVAL_HARNESS_DIR="$RFE_SRC/agent-eval-harness"
     export RFE_EVAL_CONFIG="$RFE_SRC/eval.merged.yaml"
-    export RFE_RUNNER_MODEL="$AGENT_MODEL"
+    export RFE_RUNNER_MODEL="$AGENT_MODEL_WIRE"
     export RFE_HARNESS_PY="$PY"
+    # Dedicated agent-only credentials — same rationale as SKILLSBENCH_AGENT_* above: the
+    # adapter's _harness_env() copies the full process env (which already carries the
+    # OPTIMIZER's ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN), then overrides those two keys
+    # from THESE vars before handing the env to the `claude` subprocess tree.
+    export RFE_AGENT_BASE_URL="$AGENT_API_BASE"
+    export RFE_AGENT_API_KEY="$AGENT_API_KEY"
     ;;
   *) echo "unknown bench: $BENCH" >&2; exit 2;;
 esac
@@ -795,12 +929,116 @@ print(json.dumps({"train":ids,"val":ids,"test":ids}))
 PY
 fi
 
+# PLAN. Print what this dispatch will actually spend BEFORE it spends it. An over-budget
+# `trials` x `iterations` combination is otherwise invisible until the job is killed at
+# `timeout-minutes`, hours in and with nothing to show — which is exactly how a blank-trials
+# whole-set dispatch used to fail. Advisory only: it reports, it does not refuse — a
+# deliberate long run is legitimate, an accidental one is not.
+#
+# A RANGE, not a number, and neither end is called an "upper bound" (issue #542). The old
+# single figure `per_val + iters*per_val + 2*test*trials` was wrong in both directions:
+#   * run 36175707483 (`agent-optimize`, val=40 train=80 test=280, trials=1, iterations=8)
+#     printed 920 and spent 1,943 — the model is exactly right about what it models (seed +
+#     candidate val 360, finalize 560 = 920) and silently omitted 1,023 rollouts of agent-mode
+#     overhead: 2 null-control replicates per round (640), train-split diagnostics (240),
+#     cheap subset screens (103) and one `grow` replicate (40). That is a FLOOR, not a bound.
+#   * run 36261022325 (`hill-climb-all`, same split, iterations=1) printed 640 and spent 440 —
+#     over by 280 because it assumed `finalize` always scores test TWICE, when nothing was
+#     accepted so `best == seed` and it scored ONE capability; and under by 80 because the
+#     baseline also evaluates the TRAIN split, which it modelled nowhere.
+# (Both actuals counted off the runs' event logs by (tag, split): `seed` is evaluated on both
+# val and train under one tag, so keying by tag alone loses one entry and double-counts the
+# other — that error is what produced the 2,023/480 figures first published on #542.)
+#
+# So: floor = the run every algorithm is guaranteed to pay for — baseline val, the baseline's
+# train eval (over the TRAIN split's own id count, which on the split both runs above used is
+# twice val's — 80 against 40; skipped entirely when the train ids ARE the val ids, the dedup
+# in harness._baseline_train), one val eval per booked iteration, and ONE finalize pass
+# over test. Upper = a second finalize pass (champion + baseline on test), and under
+# `agent-optimize` a per-round allowance for what the agent buys itself and the deterministic
+# path never does: 2 null controls, one more val-sized eval (a `grow` replicate, a re-run
+# train diagnostic), and a subset screen. Those coefficients are a judgement call sized off the
+# two runs above — the requirement is that the printed range CONTAINS reality (720-2040 against
+# 1,943; 440-720 against 440), not that it predicts it exactly.
+#
+# NUM_TRIALS/ITER are always set by here (lines 32/34) when this script runs top to bottom;
+# the ":-10"/":-3" below exist only so this block stays self-contained when a test lifts and
+# runs it on its own (test_benchmarks_trials_defaults.py does exactly that) — they match the
+# script's own real defaults, not the "${:-1}" this replaced, which was both dead (always
+# shadowed by line 32/34) and actively misleading next to those real defaults.
+"$PY" - "$PROJ/inputs/split_ids.json" "${NUM_TRIALS:-10}" "${ITER:-3}" "${ALGORITHM:-}" >&2 <<'PLAN'
+import json, sys
+split = json.load(open(sys.argv[1]))
+trials, iters, algorithm = int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+agent = algorithm == "agent-optimize"
+val, test = len(split["val"]), len(split["test"])
+# The train eval is skipped when train and val hold the SAME ids, and otherwise costs the
+# train split's own size — which is NOT val's (80 vs 40 on the split the runs above used).
+train_ids = split.get("train") or ()
+train = 0 if set(train_ids) == set(split["val"]) else len(train_ids)
+why_no_train = (" (no train ids in the split)" if not train_ids else
+                " (train ids = val ids, not re-evaluated)")
+per_val, per_train, per_test = val * trials, train * trials, test * trials
+floor = per_train + per_val + iters * per_val + per_test
+extra = [f"a 2nd finalize {per_test}"]
+upper = floor + per_test
+if agent:
+    controls, spare, screen = 2 * per_val, per_val, trials * max(1, val // 4)
+    upper += iters * (controls + spare + screen)
+    extra.append(f"{iters} x ({controls} null controls + {spare} extra val + {screen} screen)")
+note = (" — agent-optimize is asked to respect the iteration budget, not capped to it"
+        if agent else "")
+print(f">>> plan: {floor}-{upper} rollouts (advisory floor-upper{note}) — "
+      f"floor: baseline {per_val} val"
+      + (f" + {per_train} train" if per_train else why_no_train)
+      + f" + {iters} x {per_val} val + finalize {per_test}; "
+      f"upper adds {' + '.join(extra)} "
+      f"(val={val} test={test} trials={trials} iterations={iters})")
+PLAN
+
+# REUSE THE LATEST RUN'S SEED. SB_REUSE_LATEST_BASELINE=1 builds this run on the seed measured by
+# the latest kept spreadsheetbench run (see LATEST RUN above): its val/train rollouts and sealed
+# test score are carried over and the seed is not re-evaluated (harness.reuse_baseline), so the
+# plan above over-counts by the seed's evals. The prior run's frozen split wins over
+# split_ids_file, so it must be THIS tier's split exactly.
+REUSE_YAML=""
+if [ "${BENCH:-}" = "spreadsheetbench" ] && [ "${SB_REUSE_LATEST_BASELINE:-0}" = "1" ]; then
+  PRIOR="$SB_LATEST_DIR/run_suite"
+  "$PY" - "$SB_LATEST_DIR/latest.json" "$PRIOR/splits.json" "$PROJ/inputs/split_ids.json" "$TIER" "${SB_EMPTY_SEED:-0}" <<'PY' || exit 1
+import json, sys
+meta_p, prior_p, want_p, tier, empty_seed = sys.argv[1:6]
+try:
+    meta, prior = json.load(open(meta_p)), json.load(open(prior_p))
+except OSError as e:
+    raise SystemExit(f"::error:: SB_REUSE_LATEST_BASELINE=1 but no kept run to reuse: {e}")
+want = json.load(open(want_p))
+if meta.get("tier") != tier:
+    raise SystemExit(f"::error:: the kept run is tier {meta.get('tier')!r}, this run is {tier!r}")
+# The kept run's seed snapshot replaces this run's, so the requested seed must be the same one.
+if str(meta.get("empty_seed", "0")) != empty_seed:
+    raise SystemExit(f"::error:: the kept run has SB_EMPTY_SEED={meta.get('empty_seed')}, this run "
+                     f"asks for {empty_seed} — reusing it would silently swap the seed")
+for k in ("train", "val", "test"):
+    if set(map(str, prior.get(k, []))) != set(map(str, want[k])):
+        raise SystemExit(f"::error:: the kept run's {k} split differs from this tier's split_ids.json")
+print(f">>> reusing the seed of kept run {meta.get('run_id')} ({meta.get('run_url')})", file=sys.stderr)
+PY
+  # Reuse a COPY re-scored under THIS run's reward: the kept run may have used another one (runs
+  # before the as-saved default graded with recalculation), and a baseline in a different metric
+  # would make every gate decision wrong. The kept slot itself is never modified.
+  RESCORED="$WORK/reused_seed_run"
+  rm -rf "$RESCORED" && mkdir -p "$RESCORED" && cp -a "$PRIOR" "$RESCORED/run_suite" || exit 1
+  "$PY" "$REPO/ci/benchmarks/spreadsheetbench/utils/rescore_run.py" "$RESCORED/run_suite" \
+        --metric "$SB_REWARD_METRIC" >&2 || { echo "::error:: could not re-score the kept run" >&2; exit 1; }
+  REUSE_YAML="reuse_baseline:     \"$RESCORED/run_suite\""
+fi
+
 cat > "$PROJ/capevolve.yaml" <<YAML
 capabilities:       $CAPS
 capability_path:    seed_capability
 optimizer_skill:    claude-code
-optimizer_model:    $OPTIMIZER_MODEL
-target_model:       $AGENT_MODEL
+optimizer_model:    $OPTIMIZER_MODEL_WIRE
+target_model:       $AGENT_MODEL_WIRE
 optimizer_max_turns:    ${OPTIMIZER_MAX_TURNS:-80}
 optimizer_usd_per_iter: ${OPTIMIZER_USD_PER_ITER:-0}
 # Set (to an ABSOLUTE path) only by an arm that ships its own optimizer instructions;
@@ -825,6 +1063,7 @@ $ALGO_YAML
 ${EXTRA_YAML:-}
 dataset_source:     adapter
 split_ids_file:     "inputs/split_ids.json"
+$REUSE_YAML
 # With an explicit split_ids_file the partition is fixed, so split_seed only varies the
 # per-trial ROLLOUT seeding (harness base_seed reads splits.seed). That is what makes
 # ">=3 seeds" possible on one committed split: dispatch the same run with 42/43/44.
@@ -886,7 +1125,7 @@ if [ "$ORCH_MODE" = "agent" ]; then
   echo ">>> agent mode — handing the loop to the headless host (turns=$HOST_TURNS)" >&2
   "$PY" "$REPO/skills/algorithms/agent-optimize/scripts/host.py" \
         --run-dir "$RUN_DIR" --project "$PROJ" \
-        --agent claude-code --model "$OPTIMIZER_MODEL" \
+        --agent claude-code --model "$OPTIMIZER_MODEL_WIRE" \
         --budget "$HOST_TURNS" "${HOST_USD_ARGS[@]}" </dev/null || \
     echo "::error::agent-optimize host exited non-zero for $BENCH — see its JSON above"
 fi
@@ -928,6 +1167,29 @@ if [ -d "$RUN_DIR/host" ]; then
     esac
   done
   echo ">>> host record -> $OUT/host ($(du -sh "$OUT/host" 2>/dev/null | cut -f1))" >&2
+fi
+
+# LATEST RUN (spreadsheetbench): replace the one kept slot with this run. Staged next to the slot
+# and swapped in only once complete, so a failure here leaves the previous kept run intact. The old
+# slot is renamed away before it is deleted (_discard_dir), so files a container left in it can
+# never block the swap.
+if [ "$BENCH" = "spreadsheetbench" ] && [ "${SB_KEEP_LATEST_RUN:-0}" = "1" ] && [ -d "$RUN_DIR" ]; then
+  STAGE="$SB_LATEST_DIR.staging"
+  _discard_dir "$STAGE" && mkdir -p "$STAGE" && cp -a "$RUN_DIR" "$STAGE/run_suite" \
+    && { [ ! -d "$SB_DATA/outputs" ] || mv "$SB_DATA/outputs" "$STAGE/outputs"; } \
+    && cp "$OUT/metrics.jsonl" "$OUT/report.md" "$STAGE/" 2>/dev/null
+  if [ -d "$STAGE/run_suite" ]; then
+    cat > "$STAGE/latest.json" <<JSON
+{"bench": "$BENCH", "tier": "$TIER", "run_id": "${GITHUB_RUN_ID:-local}",
+ "run_url": "${GITHUB_SERVER_URL:-}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}",
+ "sha": "${GITHUB_SHA:-}", "agent_model": "$AGENT_MODEL", "iterations": "$ITER",
+ "empty_seed": "${SB_EMPTY_SEED:-0}", "reward_metric": "${SB_REWARD_METRIC:-}", "saved_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+JSON
+    _discard_dir "$SB_LATEST_DIR" && mv "$STAGE" "$SB_LATEST_DIR" \
+      && echo ">>> kept as the latest spreadsheetbench run: $SB_LATEST_DIR ($(du -sh "$SB_LATEST_DIR" | cut -f1))" >&2
+  else
+    echo "::warning:: could not keep this run as the latest spreadsheetbench run (staging failed)" >&2
+  fi
 fi
 
 cat "$OUT/report.md"

@@ -7,6 +7,7 @@
 - [Subset screening](#subset-screening-where-the-cost-actually-goes-and-why-a-screen-may-not-accept)
 - [The constraint surface](#the-constraint-surface-free-text-stop_condition-parsed-and-re-read)
 - [Bucketing edits before spending](#bucketing-edits-before-spending)
+- [Prioritizing clusters, and code over prose](#prioritizing-clusters-and-code-over-prose--ported-from-the-deterministic-optimizers-briefing)
 - [Sibling candidates by default](#why-n3-sibling-candidates-is-the-default-not-one-candidate-at-a-time)
 - [Provisional candidates](#provisional-candidates-sequential-evidence-not-compounded-edits)
 - [JOURNAL.md write protocol](#journalmd--the-append-only-handover-and-its-write-protocol)
@@ -14,6 +15,7 @@
 - [The final measurement](#the-final-measurement-one-table-and-the-things-it-refuses-to-pretend)
 - [Gate as evidence, not a verdict](#gate-as-evidence-not-a-verdict)
 - [Measuring only what the edit reaches](#measuring-only-what-the-edit-reaches)
+- [Composition, not just the mean](#composition-not-just-the-mean)
 - [Caveats](#caveats)
 - [Process snapshot](#process-snapshot)
 - [Sources](#sources)
@@ -122,6 +124,18 @@ Rungs are cumulative — tier 2 merges tier 1's rollouts across `<tag>__screen*`
 only for the ids it adds — and savings are reported as measured integers
 (`+ (full_val − fired)` on a kill, `− fired` on a promote) so a run's ledger sums to the truth
 instead of to a flattering estimate.
+
+### The hard precondition: `round.py` refuses an unscreened full-val gate
+
+`round.py` refuses to run the full-val gate for any candidate tag with no
+`screens/<tag>__screenN.json` on disk — it exits non-zero and does not spend the 300-rollout
+eval. There are exactly two ways past that: a prior `screen.py` run for that tag (the normal
+path above), or an explicit `--skip-screen-justification "<reason>"` recording WHY you are
+paying full val directly — e.g. `"spend.py: break-even unreachable on this split size"` or
+`"pure additive READ tool, screening cost exceeds expected savings"` (the bare
+`--skip-screen-ladder` still works but records no reason on the compliance event). There is
+no third way in: a full-val eval that never went through `screen.py` and never justified
+skipping it will not run.
 
 ### The break-even, and when the ladder cannot pay for itself
 
@@ -249,12 +263,25 @@ using the same test the edit-form table already applies (`references/edit-design
 
 **Bucket A — atomic/risky.** Prose whose effect is probabilistic, or an edit targeting a cluster
 with no prior evidence. This keeps the section below's default unchanged: independent sibling
-candidates, N≥3, gated separately, one cluster each — because a bundle's measurement footprint is
-the union of its parts, so a narrow edit's footprint stays resolvable while a bundle's noise floor
-rises toward the whole split ("Measuring only what the edit reaches", below). Bundle only
-*independent* parts within one sibling — different files, different rules — so a
-rejected bundle can be resubmitted as its surviving part next round; `regressed`/`regressions` say
-which part to drop.
+candidates, N≥3, one cluster each. Bundle only *independent* parts within one sibling — different
+files, different rules — so a rejected bundle can be resubmitted as its surviving part next round;
+`regressed`/`regressions` say which part to drop.
+
+**Gating N Bucket-A siblings does not mean paying full val N times.** Screen every sibling first
+(SKILL.md step 3, cheap subset, kill-only) — that is the whole point of `screen.py` existing before
+step 4 — then run `scripts/merge_search.py` on the disjoint SCREEN-SURVIVORS (its own module
+docstring: "the missing piece is simply DECIDING which survivors are safe to try merging and
+DOING it, instead of leaving that to a driver under time pressure who defaults to the cheapest
+step"). `merge_search.py` was built for exactly this shape — prior real runs (run_agentoptv3,
+run_agentoptv4) produced 3-6 narrow single-issue candidates per round, each individually full-val
+gated and rejected, and never combined. `--survivors` accepts any tag under `$R/work/`, screened or
+not, so a screen-survivor works exactly like the finalize-time "Merging accepted candidates"
+survivors below — disjointness is a property of what each edit TOUCHED, not of how far through the
+gate it got. The resulting merged candidate(s), plus any survivor `funcmerge.py` refuses to merge
+(a real collision, not a bundling choice), are what pay for full val — never each of the N siblings
+alone when a cheap screen-then-merge path existed. A bundle's measurement footprint is the union of
+its parts, so this still costs resolvable power on a large, unrelated bundle ("Measuring only what
+the edit reaches", below) — merge disjoint survivors, not everything that happened to screen clean.
 
 **Bucket B — obvious/structural.** A code-level guard, a null-safety precondition, a
 docstring/prompt fix that is purely additive knowledge — anything the form table already marks as
@@ -289,6 +316,44 @@ buys one gate's worth of signal for a fraction of what the same gate could resol
 addressable cluster is folded in. This applies whatever the capability is (prompt, tools, or a
 skill package) and whatever the benchmark is: the check is "did I look at every cluster before
 paying," not anything specific to one edit surface.
+
+## Prioritizing clusters, and code over prose — ported from the deterministic optimizer's briefing
+
+`templates/project/optimizer/INSTRUCTIONS.md` — the briefing the deterministic
+loops (hill-climb/gepa/skillopt) hand their per-iteration optimizer subprocess — carries three
+disciplines agent-optimize's own instructions lacked, adapted here (this loop has no optimizer
+subprocess, so they land on you, the driving agent, directly):
+
+1. **Attack by leverage, not just by raw score.** `diagnose.py`'s clusters already sort by
+   `score_lost` descending, which — since `score_lost` sums `(1 − reward)` over every trial in the
+   cluster — already IS the leverage figure (failing tasks × trials × score recoverable), not a
+   proxy for it. SKILL.md's step 2 says to work that order; the reason is the same one the
+   deterministic briefing states explicitly: the biggest visible cluster is not always the biggest
+   *fixable* one, but score_lost is where the ceiling on any fix's payoff actually lives, so it is
+   the right thing to exhaust before moving to a smaller cluster with a nicer-looking fix.
+2. **Prefer a code-level fix over a prompt-level one for the same cluster, whenever `tools` is a
+   selected capability.** The failure-type table above already routes a rule-violation or a missing
+   required element to a code-level guard over prose — this is the same rule restated as a
+   cross-capability preference: a capability set that includes `tools` should see its RULE-VIOLATION
+   and CAPABILITY-GAP clusters fixed in the tool body first, and only fall back to a prompt edit for
+   a genuine knowledge gap (a fact/format/criterion the agent cannot derive by any code check). The
+   deterministic briefing's own worked example generalizes directly: an in-body guard that fires only
+   on the exact violating condition — `if payment_id not in methods: raise ValueError(...)` — is
+   BOUNDED (only already-failing inputs hit it) where the equivalent prose reminder is not, and it is
+   the fix that "drove the best prior results" on every capability that owns code for its surface.
+3. **Verify each kept edit before it pays for a gate**, the same THREE-TESTS discipline
+   (real/safe/verified) the deterministic briefing enforces: REAL — it targets a cluster failing in
+   the traces you just diagnosed, never a hypothetical one; SAFE — for a bounded in-body guard,
+   confirm it does not fire on 1-2 currently-passing tasks that use the same surface (see SKILL.md's
+   step 2 "Verify before you gate"); for an UNBOUNDED edit — one that loosens or alters a global
+   decision/permission/refusal rule — enumerate the passing tasks in that decision class and confirm
+   none relied on the old behaviour, or replace it with a scoped discriminating-condition guard
+   instead; VERIFIED — you ran the check, not just reasoned about it. An edit that fails any of the
+   three is dropped before it ever reaches step 3's screen, not after it burns a rollout.
+
+None of this changes what pays for a rollout or what the gate decides — `screen.py`/`gate_check.py`
+are unmoved — it only orders and filters what you propose before you spend, the same as Bucketing
+above.
 
 ## Why N≥3 sibling candidates is the default, not one candidate at a time
 
@@ -378,13 +443,31 @@ optimizer workdir): the framework re-seeds the same file at the same two points
 afterward) so a session that never gets a fresh workdir per iteration still gets a fresh append
 target every round.
 
+### INSIGHTS.md / META_INSIGHTS.md — the same accumulator mechanic, a real use in this loop too
+
+`harness.seed_framework_memory` seeds `INSIGHTS.md`/`META_INSIGHTS.md`/`FRAMEWORK_IMPROVEMENTS.md`
+into every workdir the same way and on the same schedule as `JOURNAL.md` — nothing about the
+seeding is deterministic-mode-specific, so they are not off-limits in agent mode either; they are
+a genuinely useful SUMMARY layer above the verbose per-round `JOURNAL.md`, most valuable in a run
+long enough that re-reading the whole journal every round gets expensive. Use them sparingly, not
+every round: append to `INSIGHTS.md` when a `commit.py` RESULT confirms a durable, cross-cluster
+finding worth a future round reading instead of re-deriving from the journal; append to
+`META_INSIGHTS.md` when the round reveals something about the SEARCH itself (a stall, a lever
+switch, screen vs. gate mismatch) rather than about the capability. `FRAMEWORK_IMPROVEMENTS.md` is
+step 6's — see SKILL.md.
+
 ## Parallelism: fan out on the cheap steps, stay serial where state moves
 
 Arbor's discipline — dispatch independent workers into separate worktrees, evaluate each on
 a dev signal, merge only what clears a held-out margin — ports cleanly, with the boundaries
 cap-evolve's own state model dictates (see `docs/SUBAGENT_PATTERNS.md`):
 
-- **Diagnosis** is read-only and costs no rollouts, so it fans out without limit.
+- **Diagnosis** is read-only and costs no rollouts, so it fans out freely in principle — but
+  never more than 2 background Bash calls in flight at once, across diagnosis or any other
+  purpose. Backgrounding is a session-level resource, not a per-tool one: a real run
+  backgrounded 5 diagnose invocations at once and the harness killed all 5 at the identical
+  millisecond, destroying a whole round's diagnostic work. `TaskStop` one before starting a
+  3rd.
 - **Proposal** fans out across *different* parents/working copies only, never two proposers
   on one candidate dir. Each sibling needs a **unique tag**, because rollouts are written as
   `<task>__<tag>__t<k>.json` and the evaluate phase derives the tag from the candidate dir
@@ -398,6 +481,22 @@ cap-evolve's own state model dictates (see `docs/SUBAGENT_PATTERNS.md`):
   exhaust a budget that had room for a single round (`spend.py --n-siblings N`).
 - **Screening is where fan-out pays best.** N tier-1 screens cost roughly one full-val eval
   between them, so the expensive stage runs only for survivors.
+- **N≥3 sibling candidates is enforced, not recommended.** This section has said "sibling
+  candidates, N≥3" since PR #522 ("screen-then-merge before gate, cluster priority,
+  framework-improvements handover"). Every round in every audited multi-hour agent-mode run
+  (two full run dirs' `events.jsonl`) proposed exactly 1 candidate anyway — the
+  guidance was prose an agent could skip under time pressure, and it always did, spending
+  wall clock and optimizer budget on one hypothesis at a time when 3+ independent ones could
+  have been screened and gated together. `round.py` now refuses `--candidates` with fewer than
+  `MIN_SIBLINGS` (3) tags unless the driver either records an explicit
+  `--single-candidate-justification` or supplies an `--afford-check-file` (spend.py's own
+  `--n-siblings 3` output) that reports `affordable: false` — the same affordability check this
+  section already told the driver to run BEFORE fanning out, now read automatically as the
+  reason instead of requiring it to be retyped. Either way the reason is written onto the
+  `agent_optimize_round_batch` event, so a serial round stays auditable rather than becoming
+  the silent default again. This does not make 1 candidate impossible: a `narrow_scope`
+  round (this document, "Bucketing edits before spending") or a budget that genuinely cannot
+  afford 3 are both legitimate, and now both leave a record instead of an assumption.
 
 Inside a single evaluation there are two further, composable sources of concurrency: an
 adapter's own `run_batch`/`run_trials` fast path (some adapters run their whole task
@@ -460,7 +559,11 @@ the round-scoped numbers no single-candidate gate can see — `noise_floor_from_
 `verdict_by_reference`/`verdict_stable`, the sign-agreement check across the round's null-control
 replicates. Neither decides for you. Nothing in `commit.py` or `round.py` checks that field against the `--decision` you pass: `set_best()`
 is an unconditional setter, and `--reject-basis driver_judgement` exists precisely so you can log a
-considered disagreement. Treat the printed numbers the way a careful researcher reads a stats printout,
+considered disagreement. It is for overriding a gate verdict that DID run: on a candidate with NEITHER
+a screen record NOR a full-val gate row (skipped both entirely), `commit.py` refuses it unless you also
+pass `--bypassed-gate-justification "<reason>"`, which is then recorded on the decision event and
+surfaced in `commit.py`'s own `warnings` output. Treat the printed numbers the way a careful researcher
+reads a stats printout,
 not the way code reads a boolean:
 
 - Read `resolvable_effect_size` first. It is the smallest true effect this round could have detected at
@@ -579,7 +682,9 @@ change behaviour at all.
 Every such claim now has to clear **2·SE of its own per-task measurement** — the two sides' per-task SEs in
 quadrature, the same "smallest resolvable effect" the gate reports for the split mean, applied per task.
 One function, `harness.move_is_resolved`, is the single bar behind every place the framework makes the
-claim: `LEDGER.md` + the journal RESULT stamp (`_candidate_task_impact`); the `no_regression` veto in both
+claim: `LEDGER.md` + the journal RESULT stamp (`_candidate_task_impact`) and the gate's own step record
+(`harness.movement`), which share one classifier (`_classify_moves`) precisely so they cannot disagree
+about what an accepted candidate did; the `no_regression` veto in both
 the hill-climb and gepa loops, which is the strongest consequence of the set since it turns a
 gate-PASSING candidate into a rejection; the round table's diagnosis list (`gate_check.regressions`);
 skillopt's within-epoch improved/regressed buffer (`_categorize`); the sealed report's seed→best movement
@@ -590,6 +695,38 @@ A sub-threshold move is reported as **`unresolved`**, which is neither "broke" n
 moved, and the measurement cannot say the edit did it. Do not redesign an edit because a task appears
 there, and do not cite one as a regression — re-measure it, or ignore it. At one trial per task every
 per-task SE is 0, the bar collapses to `eps`, and the classification is exactly what it always was.
+
+### Composition, not just the mean
+
+The gate decides on the **mean** paired Δ. So a candidate that TRADES tasks — fixes some, breaks others —
+is accepted whenever the net is positive, no matter how many previously-solved tasks it destroyed. That is
+not a defect in the statistics; the mean is the right thing to test. It is that nothing used to force the
+trade-off to be *examined*.
+
+`r3_decide` was accepted in run 36175707483 and became the champion. Its own gate notes said, in prose:
+
+> Regressions `[33722, 46646]`; FIXED vs both controls `[49036]`, **BROKE vs both controls `[33722]`** —
+> net zero
+
+So the accept was booked *knowing* it had destroyed a task against **both** concurrent controls. On the
+280-task sealed test split that champion scored **0.764** against the seed's **0.632** — a real, large gain
+— but the composition was **54 improved / 17 regressed / 209 unchanged**, and every regression sampled went
+**1.000 → 0.000** (`60-7`, `384-4`, `82-38`, `183-8`, `192-22`, `387-16`, `524-31`, `560-12`, `45635`,
+`48643`). A 40-task val split cannot see a 17-task trade on a 280-task population, so this recurs on every
+`full_verified` run unless someone looks.
+
+`gate_check` therefore reports **`movement`** (`{broke, fixed, unresolved}`) alongside `regressions`, and
+`round.py` persists it so `commit.py` puts it on the step record. Read it, and put the trade in your
+`--note`: "+5 fixed / −1 broke, accepted because X" is a decision; "+0.05, accepted" is not, because that
+same number is produced by five clean fixes and by six fixes with a task destroyed.
+
+Accepting a trade is a legitimate call. Regressions deliberately do **not** auto-reject: on a 40-task val
+split with SE ≈ 0.079 a hard no-regression rule rejects nearly everything, and these runs show tasks
+flipping `1.0 → 0.0` between two *byte-identical* control replicates, so the veto would often be firing on
+noise. `--veto-regressions` (here) and `gate_max_broke` (the deterministic loops) exist for a comparison
+run that wants a no-regression champion, and both are off by default. What is not legitimate is the
+*un-examined* trade — which is what the record used to make unavoidable, since broke/fixed reached
+`LEDGER.md` and the journal but never the step record any report reads.
 
 ## Merging accepted candidates before you finalize
 
@@ -616,6 +753,42 @@ and NO merge attempt anywhere in the run logs `merge_compliance_warning` to `eve
 in the dashboard's activity log like any other event. It never blocks: host.py owns no algorithm
 decisions (the "orchestration freedom" invariant), so this is an audit signal for the same reason
 `agent_optimize_compliance` is one for the screen ladder, not a second enforcement mechanism.
+
+### Merging safe rejects, not just accepts
+
+The gap above is real for accepted candidates, but it is bigger for REJECTED ones. A full
+diagnostic audit of a real multi-hour run on a multi-turn tool-use benchmark found the run
+reject 6 candidates in a row. Two of them, `cand_4` and `cand_5`, each individually
+measured a positive, stable, **zero-regression** signal — `gate_check.py`'s `movement.broke`
+empty, `gate_delta` positive — that simply landed just under the gate's evidence bar at that n.
+The optimizer noticed this by hand and improvised `cand_6 = union(cand_4, cand_5)`; it measured
+a slightly larger, still-zero-regression signal — still sub-threshold at n=30 in that specific
+run, but a clean, mechanically correct merge that moved the right direction. Nothing made that
+anything but a one-off: `merge_search.py`'s own `check_merge_compliance` only ever looks at
+`accepted` graph nodes, so a run can reject six small-but-safe effects in a row and never once
+be nudged to try them together — exactly the situation where bundling has the most headroom,
+since a rejected candidate's signal is, by construction, too small to have cleared the bar
+alone.
+
+`merge_rejects.py` is that nudge, one step earlier in the loop. `find_safe_rejects` reads
+`events.jsonl`'s `"reject"` decision events (the record `commit.py` writes on every reject —
+candidate id, note, `reject_basis`, and, when a gate table exists, `gate_delta` plus
+`movement`'s `broke`/`fixed`) and keeps only the ones with `gate_delta >= 0` and an empty
+`broke` list: it did not clearly hurt, it just did not clear the bar. `rejected.jsonl`
+(`cap_evolve.memory.RejectedMemory`) is deliberately NOT the source — it stores only
+`{candidate_id, summary, reason, val}`, none of the structured gate numbers this needs.
+`check_rejects_compliance` mirrors `check_merge_compliance` exactly (disjointness by target
+task ids via `mechanisms.jsonl`, the same `_mechanisms_targets` fallback): 3+ safe rejects with
+pairwise disjoint targets and no merge-of-rejects proposed yet this run logs
+`merge_rejects_compliance_warning` to `events.jsonl` — an audit signal, never a block, same as
+its accepted-candidate sibling. `--propose --rejects tag1,tag2[,tag3]` builds the actual
+combined candidate: disjointness there is by CHANGED FUNCTIONS (`merge_search.changed_functions`,
+i.e. `funcmerge.py`'s per-function split — a real edit collision is refused, never force-merged),
+and assembly is one `integrate.py` call over every given branch, best-evidenced first, which
+folds them ONE AT A TIME and measures after each — the same discipline `integrate.py`'s own
+docstring already mandates for accepted-candidate merging, so a bad interaction is attributable
+to the specific branch that caused it. The result lands at `$R/work/<tag>` as an ordinary
+candidate directory; screening/gating/accepting stays the driver's job, unchanged.
 
 ## Caveats
 

@@ -1,23 +1,30 @@
 const RAW = "https://raw.githubusercontent.com/skillberry-ai/cap-evolve/benchmark-history";
 const GH_API = "https://api.github.com/repos/skillberry-ai/cap-evolve";
-// Tier is matched GENERICALLY: the workflow's TIERS list grows (smoke, pilot, full, …) and
-// hardcoding it here silently hides new tiers from the live panel — a `pilot` run was
-// invisible while it was executing. The bench allowlist stays explicit so unrelated jobs
-// ("plan legs", "aggregate history") never match.
-// Any bench token, not a hardcoded list: enumerating them here silently hid the two
-// tau2-airline arms from this panel entirely.
-const JOB_RE = /^([a-z][a-z0-9-]*) \/ ([a-z][a-z0-9_-]*)$/;
+// Tier is matched GENERICALLY: the workflow's TIERS list grows (smoke, pilot, full,
+// full_verified, …) and hardcoding it here silently hides new tiers from the live panel — a
+// `pilot` run was invisible while it was executing. The character class must therefore admit
+// every shape a tier name can take, UNDERSCORE INCLUDED: `full_verified` fails `[a-z0-9-]*`,
+// which would have reproduced the exact pilot bug for it.
+//
+// Bench is matched GENERICALLY too, not against a hardcoded list: enumerating benches here
+// silently hid the two tau2-airline arms from this panel entirely.
+const JOB_RE = /^([a-z][a-z0-9_-]*) \/ ([a-z][a-z0-9_-]*)$/;
 // The arms are internal leg names; the picker calls them tau2-custom + intervention.
 const BENCH_LABEL = {
   tau2_custom_direct: "tau2-custom (direct)",
-  tau2_custom_spa: "tau2-custom (spa)",
+  tau2_custom_blackbox: "tau2-custom (blackbox)",
 };
 const benchLabel = (b) => BENCH_LABEL[b] || b;
 // ?fixture — read the committed local eyeball fixture instead of the live feed (see
 // site/benchmarks.fixture.json). Local-only affordance for exercising the filter cascade
 // through many reload cycles; the default path is unchanged.
+//
+// benchmarks.json/meta.json are same-origin: pages.yml renders them fresh from
+// benchmark-history's records/ on every deploy, they're never committed to that branch
+// (an ever-growing aggregate rewritten in full on every run — see pages.yml for why).
+// RAW is still used below for live/ (in-progress run data a once-per-run deploy can't serve).
 const FEED = new URLSearchParams(location.search).has("fixture")
-  ? "benchmarks.fixture.json" : `${RAW}/benchmarks.json`;
+  ? "benchmarks.fixture.json" : "benchmarks.json";
 let RECORDS = [], sortKey = "date", sortDir = -1;
 
 const $ = (s) => document.querySelector(s);
@@ -175,7 +182,7 @@ async function load() {
   try {
     const [recs, meta] = await Promise.all([
       fetch(`${FEED}?t=${Date.now()}`).then((r) => r.json()),
-      fetch(`${RAW}/meta.json?t=${Date.now()}`).then((r) => r.json()).catch(() => null),
+      fetch(`meta.json?t=${Date.now()}`).then((r) => r.json()).catch(() => null),
     ]);
     RECORDS = Array.isArray(recs) ? recs : [];
     const zh = $("#date-zone");
@@ -257,7 +264,7 @@ function render() {
     empty.hidden = false;
     empty.innerHTML = RECORDS.length
       ? "No runs match the current filters — try widening the time range."
-      : "No runs recorded yet — trigger the suite (add a <code>benchmark-smoke</code> label to a PR, or Actions → Benchmarks).";
+      : "No runs recorded yet — trigger the suite (add a <code>benchmark-smoke-&lt;bench&gt;</code> label to a PR, or Actions → Benchmarks).";
   } else {
     empty.hidden = true;
   }
