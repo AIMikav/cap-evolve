@@ -593,6 +593,20 @@ def choose_merges(merges: list[dict]) -> tuple[list[str], dict[str, str]]:
     return chosen, covered
 
 
+def dominated_siblings(base_dir: Path, work: Path, tags: list[str]) -> dict[str, str]:
+    """{tag: sibling whose diff strictly contains it} among this round's tags (#633).
+
+    A literal strict subset of a sibling's edit, against the same round parent, cannot show
+    an effect its superset does not also carry, so paying it a full-val gate of its own is
+    waste. Strict containment is acyclic, so a chain A < B < C keeps only C.
+    """
+    import merge as merge_mod
+
+    return {a: b for a in tags for b in tags
+            if a != b and merge_mod.diff_contained(base_dir, work / a, work / b)
+            } if len(tags) >= 2 else {}
+
+
 def mergeable_pairs(run_dir, plan: dict, survivors: list[str]) -> tuple[list, list]:
     """(pairs merge_stage tries to build, pairs it skips as same-cluster alternatives).
 
@@ -849,7 +863,7 @@ def _write_table(run_dir, work: Path, stem: str, attempt: int, out: dict) -> Non
         out["table_write_error"] = str(exc)
 
 
-def _next_steps(killed: list[str], merge: dict | None) -> str:
+def _next_steps(killed: list[str], merge: dict | None, dominated: dict | None = None) -> str:
     steps = ["read regressions, then commit.py --decision accept|reject|inconclusive per gated "
              "candidate — `inconclusive` for any row whose `verdict` is inconclusive, so the "
              "round is not recorded as refuting an edit it could not judge"]
@@ -861,6 +875,11 @@ def _next_steps(killed: list[str], merge: dict | None) -> str:
                      "records both; its parents "
                      f"{sorted(merge['subsumed'])} are inside it and need no commit of their "
                      "own (graph status `superseded`, `merged_into`)")
+    if dominated:
+        steps.append(f"{sorted(dominated)} were not gated: each one's diff is a strict subset of "
+                     f"a sibling's ({dominated}, graph status `superseded`, `dominated_by`). If "
+                     "its superset is rejected, the subset may still be worth gating alone in a "
+                     "later round")
     return "; ".join(steps)
 
 
@@ -1130,6 +1149,12 @@ def _main(argv=None) -> int:
     screen_payloads = {t: latest_screen(run_dir, t) if screened_by_tag[t] else None for t in tags}
     killed = [t for t in tags if (screen_payloads[t] or {}).get("decision") == "kill"]
     survivors = [t for t in tags if t not in killed]
+    # #633: a survivor whose diff is a STRICT subset of a sibling survivor's (same round, same
+    # parent) is never gated on its own — purely structural, no eval spent to learn it. Taken
+    # out BEFORE #630's merge-eligibility count, so a (subset, superset) pair is never charged
+    # to max_merge_skips; its graph.jsonl transition is written below, after every refusal.
+    dominated = dominated_siblings(run_dir.candidate_dir(best), work, survivors)
+    survivors = [t for t in survivors if t not in dominated]
 
     # #630: --no-merge, priced like a screen skip. A merge APPLIED this round when merge_stage
     # would have run and found a pair to build — its own trigger condition and its own pair
@@ -1228,6 +1253,12 @@ def _main(argv=None) -> int:
                           cluster_ids=cluster_ids_for(run_dir, plan, t),
                           edit_kind=(plan.get(t) or {}).get("edit_kind"))
 
+    for t, sup in dominated.items():
+        graph.append_node(run_dir, node_id=t, parents=[best], status="superseded", gate={},
+                          dominated_by=sup,
+                          reason=f"its diff is a strict subset of sibling {sup}'s, which is "
+                                 "gated instead")
+
     # #438: pairwise merges of disjoint survivors, each screened, BEFORE any full-val gate.
     MERGE = None
     if not args.no_merge and merge_applies:
@@ -1261,13 +1292,14 @@ def _main(argv=None) -> int:
                       n_candidates=len(input_tags),
                       single_candidate_justification=JUSTIFICATION,
                       single_candidate_justification_source=JUSTIFICATION_SOURCE,
-                      gated=list(tags), screen_killed=killed,
+                      gated=list(tags), screen_killed=killed, dominated=dominated,
                       merge_candidates=[m["tag"] for m in (MERGE or {}).get("merges", [])],
                       merges_gated=(MERGE or {}).get("chosen", []),
                       no_merge=bool(args.no_merge), merge_eligible_pairs=eligible_pairs)
     CASCADE = {
         "screen_stage": screen_stage,
         "screen_killed": killed,
+        "dominated": dominated,
         "merge_stage": MERGE,
         "merge_skip": MERGE_SKIP,
         "gated": list(tags),
@@ -1279,7 +1311,7 @@ def _main(argv=None) -> int:
     if not tags:
         out = {"attempt": ATTEMPT, "batch_id": STEM, "candidates": [], "control": None,
                "control_replicates": [], **CASCADE,
-               "next": _next_steps(killed, MERGE)}
+               "next": _next_steps(killed, MERGE, dominated)}
         _write_table(run_dir, work, STEM, ATTEMPT, out)
         print(json.dumps(out, indent=2))
         return 0
@@ -1667,7 +1699,7 @@ def _main(argv=None) -> int:
         "control_replicates": ctl_rows,
         "pooled_control_replicates": pooled_rows if PRIOR_CTL else None,
         **CASCADE,
-        "next": _next_steps(killed, MERGE),
+        "next": _next_steps(killed, MERGE, dominated),
     }
     _write_table(run_dir, work, STEM, ATTEMPT, out)
     # One "gated" transition per candidate the full-val gate judged (#435). A node gated with
