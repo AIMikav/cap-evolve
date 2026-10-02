@@ -440,7 +440,13 @@ def _live_round(c: Checker, tmp: Path) -> None:
                                        "--candidate-id", tag, "--from-dir", str(work / tag),
                                        "--decision", "accept", "--val", "1.0",
                                        "--note", "raise coverage generally",
-                                       "--optimizer-usd", "0.25"])
+                                       "--optimizer-usd", "0.25",
+                                       "--missing-handover-justification",
+                                       "check.py smoke test, not journal semantics",
+                                       "--missing-ranked-issues-justification",
+                                       "check.py smoke test, not ranked-issue semantics",
+                                       "--missing-diagnosis-justification",
+                                       "check.py smoke test, not diagnosis semantics"])
     if cm:
         c.check(cm.get("best_id") == tag, f"commit.py did not set best: {cm}")
         c.check(cm["spent"]["iterations"] == 1 and cm["spent"]["stall"] == 0
@@ -452,7 +458,13 @@ def _live_round(c: Checker, tmp: Path) -> None:
     # a reject must advance the stall counter (what budget_exhausted's stall rule reads)
     rj = _run(c, "commit.py (reject)", [str(HERE / "commit.py"), "--run-dir", R,
                                         "--candidate-id", "cand_2", "--from-dir", str(work / tag),
-                                        "--decision", "reject", "--note", "no gain"])
+                                        "--decision", "reject", "--note", "no gain",
+                                        "--missing-handover-justification",
+                                        "check.py smoke test, not journal semantics",
+                                       "--missing-ranked-issues-justification",
+                                       "check.py smoke test, not ranked-issue semantics",
+                                       "--missing-diagnosis-justification",
+                                       "check.py smoke test, not diagnosis semantics"])
     if rj:
         c.check(rj["best_id"] == tag and rj["spent"]["stall"] == 1,
                 f"reject changed best or did not advance stall: {rj}")
@@ -548,7 +560,10 @@ def _tag_collision(c: Checker, tmp: Path) -> None:
     (work / "policy.md").write_text("v1", encoding="utf-8")
     argv = [str(HERE / "commit.py"), "--run-dir", str(run_dir.root),
             "--candidate-id", "dup", "--from-dir", str(work),
-            "--decision", "reject", "--note", "first"]
+            "--decision", "reject", "--note", "first",
+            "--missing-handover-justification", "check.py smoke test, not journal semantics",
+            "--missing-ranked-issues-justification", "check.py smoke test, not ranked-issue semantics",
+            "--missing-diagnosis-justification", "check.py smoke test, not diagnosis semantics"]
     first = _run(c, "commit.py (first use of a tag)", argv)
     c.check(bool(first) and first.get("decision") == "reject",
             f"the first commit of a fresh tag was refused: {first}")
@@ -632,6 +647,8 @@ def _round_control(c: Checker, tmp: Path) -> None:
     r2 = _run(c, "round.py --gate-against control",
               [str(HERE / "round.py"), "--run-dir", R, "--project", str(project),
                "--candidates", "cand_y", "--n-trials", "1", "--k-se", "1.0",
+               # A 2nd skip in this run is unrestricted: a 6-task val makes screening
+               # structurally uneconomical (#631), so no max_screen_skips budget applies.
                "--gate-against", "control", "--skip-screen-ladder",
                "--single-candidate-justification", "check.py: single-candidate gate mechanics"])
     if r2:

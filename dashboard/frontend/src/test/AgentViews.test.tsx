@@ -191,6 +191,69 @@ describe('GatePanel', () => {
     render(<GatePanel summary={summary({ gate_decisions: [row({ reason: 'churn — broke t1' })] })} />)
     expect(screen.getByText(/churn — broke t1/)).toBeInTheDocument()
   })
+
+  // Shapes copied from reduce_run() on run_v18_fromscratch_20260930 (cand_3, cand_1).
+  it('renders the structured SE / bar / control Δ / stability / override fields', () => {
+    const gated = row({
+      candidate: 'cand_3', verdict: 'accept', val: 0.6733, parent_val: 0.5333, delta: 0.14,
+      stderr: 0.036703, n: 30, k_se: 0.2, threshold: 0.007340644213641223,
+      resolvable_effect_size: 0.073406, gate_mode: 'parent', control_relative_verdict: 'accept',
+      control_relative_delta: 0.18000000000000002, evidence_bar: 0.0467, gate_verdict: 'accept',
+      overrode_gate: false, verdict_stable: true,
+      // A reason whose prose disagrees: the table must show the structured numbers.
+      reason: 'SE=9.9999, 0.5·SE=8.8888',
+    })
+    const overridden = row({
+      candidate: 'cand_1', verdict: 'reject', val: 0.63, gate_verdict: 'accept',
+      overrode_gate: true, reject_basis: 'driver_judgement',
+    })
+    render(<GatePanel summary={summary({ gate_decisions: [gated, overridden] })} />)
+    expect(screen.getByText('±0.0367')).toBeInTheDocument()
+    expect(screen.getByText('0.0073')).toBeInTheDocument()
+    expect(screen.getByText('k=0.2')).toBeInTheDocument()
+    expect(screen.getByText('+0.1800')).toBeInTheDocument()
+    expect(screen.getByText('bar 0.0467')).toBeInTheDocument()
+    expect(screen.getByText('stable')).toBeInTheDocument()
+    expect(screen.getByText('overrode gate (raw accept)')).toBeInTheDocument()
+    expect(screen.queryByText('±9.9999')).not.toBeInTheDocument()
+  })
+
+  // Real rows from reduce_run() on run_full: cand_2 (accept) and cand_13 (reject).
+  it('draws Δ̄ against the k·SE bar and the control Δ against the noise floor', () => {
+    const accept = row({
+      candidate: 'cand_2', verdict: 'accept', val: 0.7533, parent_val: 0.4867,
+      delta: 0.26666666666666666, stderr: 0.055983, n: 30, k_se: 0.2,
+      threshold: 0.011196605944406973, control_relative_delta: 0.26333333333333336,
+      evidence_bar: 0.06,
+    })
+    const reject = row({
+      candidate: 'cand_13', verdict: 'reject', val: 0.8067, parent_val: 0.8267, delta: -0.02,
+      stderr: 0.052391, n: 30, k_se: 0.2, threshold: 0.010478220433273767,
+      control_relative_delta: -0.011666666666666667, evidence_bar: 0.03,
+    })
+    const noData = row({ candidate: 'cand_1', verdict: 'reject' })
+    render(<GatePanel summary={summary({ gate_decisions: [accept, reject, noData] })} />)
+    const a = screen.getByRole('img', { name: /Δ̄ \+0\.2667 vs k·SE 0\.0112; Δ ctl \+0\.2633 vs noise floor 0\.0600/ })
+    const r = screen.getByRole('img', { name: /Δ̄ -0\.0200 vs k·SE 0\.0105; Δ ctl -0\.0117 vs noise floor 0\.0300/ })
+    expect(screen.getAllByRole('img')).toHaveLength(2) // no bar for a row with no Δ̄
+    const fill = (svg: Element, i: number) => svg.querySelectorAll('[data-fill]')[i]
+    expect(fill(a, 0).getAttribute('fill')).toBe('var(--accepted)')
+    expect(fill(r, 0).getAttribute('fill')).toBe('var(--rejected)')
+    // ±bar markers on both tracks; the accept fill extends right of zero past +k·SE.
+    expect(a.querySelectorAll('[data-threshold]')).toHaveLength(4)
+    const thr = Number(a.querySelector('[data-threshold]')!.getAttribute('x1'))
+    const f = fill(a, 0)
+    expect(Number(f.getAttribute('x')) + Number(f.getAttribute('width'))).toBeGreaterThan(thr)
+    // The reject fill sits left of zero (x < centre).
+    expect(Number(fill(r, 0).getAttribute('x'))).toBeLessThan(80)
+  })
+
+  it('omits the newer fields on an older row that lacks them instead of crashing', () => {
+    render(<GatePanel summary={summary({ gate_decisions: [row()] })} />)
+    expect(screen.queryByText('stable')).not.toBeInTheDocument()
+    expect(screen.queryByText(/overrode gate/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/^bar \d/)).not.toBeInTheDocument()
+  })
 })
 
 describe('KpiStrip', () => {

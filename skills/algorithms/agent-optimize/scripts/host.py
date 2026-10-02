@@ -91,6 +91,7 @@ from datetime import datetime
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
+import meter
 
 HERE = Path(__file__).resolve().parent
 SKILL_DIR = HERE.parent
@@ -1048,6 +1049,9 @@ def _agent_env(model: str | None) -> dict:
         # agent must remember is the form that already failed.
         "PATH": os.pathsep.join([str(Path(sys.executable).parent),
                                  os.environ.get("PATH", "")]).rstrip(os.pathsep),
+        # #610: tells commit.py this is a hosted session, so it meters each decision's
+        # optimizer tokens/seconds from this session's log (meter.py) instead of leaving null.
+        "CAPEVOLVE_HOST_METER": "1",
     }
     if model:
         env["CAPEVOLVE_OPTIMIZER_MODEL"] = model
@@ -1105,7 +1109,12 @@ def main(argv=None) -> int:
         # is the path most likely to be sitting on an abandoned round. Reporting it only on
         # the full host path would hide it from exactly the reader who came looking.
         out["unbooked_rounds"] = _unbooked_rounds(run_dir)
-        out["dangling_eval"] = _dangling_eval(run_dir) if not out["sealed"] else None
+        # Checked regardless of whether test sealed: `_dangling_eval` already drops any
+        # (split, tag) pair that got its matching `evaluate`, so a successful test seal only
+        # ever clears the (test, FINAL) entry. A dangling VAL eval_start from an earlier
+        # round's gate — issue #587 — is a different (split, tag) key and survives a clean
+        # seal untouched; gating this check on `sealed` hid exactly that case.
+        out["dangling_eval"] = _dangling_eval(run_dir)
         if out["dangling_eval"] is not None:
             _log_eval_abandoned(run_dir, out["dangling_eval"])
         print(json.dumps({"run_dir": str(run_dir), "seal_only": True, **out}, indent=2))
@@ -1311,6 +1320,11 @@ def main(argv=None) -> int:
                          timed_out=timed_out, stop_reason=stop_reason, num_turns=num_turns,
                          is_error=is_error, terminal_reason=terminal_reason,
                          permission_denials=permission_denials, attempt=attempt)
+            # #610: the session's real USD exists only now; split it over the decisions
+            # commit.py metered during it, so per-candidate optimizer cost is recorded.
+            attribution = meter.attribute_usd(run_dir, usd)
+            if attribution is not None:
+                rd.log_event("opt_cost_attribution", **attribution)
             # Book only what the agent did not already attribute to a round during THIS
             # invocation. `seconds` is booked too: without it the run recorded
             # `optimizer_seconds: 0.0` for a loop that ran for hours, so metrics.py's
@@ -1357,7 +1371,17 @@ def main(argv=None) -> int:
     # Also after the seal: `_seal` may itself have just closed the open eval (e.g. the agent's
     # FINAL attempt was still running and finished during measure.py, same as an unbooked
     # round above). Only an eval still open AFTER the seal attempt is genuinely abandoned.
-    dangling_eval = _dangling_eval(run_dir) if not seal.get("sealed") else None
+    #
+    # Checked unconditionally, NOT only when the seal failed (#587). `_dangling_eval` already
+    # drops any (split, tag) pair with a matching `evaluate`, so a successful test seal only
+    # ever resolves the (test, FINAL) key it wrote. A round's full-val `eval_start` for a
+    # candidate — opened, then abandoned when the driver's session ended on a genuine
+    # voluntary stop (`stop_reason: success`, real `num_turns`), not a background-task kill —
+    # is a different (split, tag) key entirely and survives test sealing cleanly untouched;
+    # gating this check on `seal.get("sealed")` let that candidate's eval vanish with no
+    # `eval_abandoned` event and no warning, while the run finalized as if nothing was
+    # outstanding.
+    dangling_eval = _dangling_eval(run_dir)
     if dangling_eval is not None:
         _log_eval_abandoned(run_dir, dangling_eval)
 

@@ -96,10 +96,9 @@ right" but "did the agent follow it at all". Never exercised ⇒ the **form** is
 still wrong ⇒ the content is.
 
 **2. Bucket every edit before spending, per the form table below** (deterministic → B,
-probabilistic → A). **A:** sibling candidates, N≥3 — screen each first (step 3, kill-only), then
-`merge_search.py` on disjoint SCREEN-SURVIVORS, and gate only the merged one(s) plus any
-unmergeable survivor on full val — never gate N siblings individually when
-screen-then-merge was an option. <3 needs `--single-candidate-justification` or an unaffordable
+probabilistic → A). **A:** sibling candidates, N≥3, in ONE `round.py` call — never
+gate a hand-built union. <3 needs
+`--single-candidate-justification` or an unaffordable
 `--afford-check-file`, else refused. **B:** merge every low-risk structural fix
 into one working copy, gate once via steps 3–4 — no per-fix screen/gate, each part cleared its
 bar. Attack by `score_lost`; prefer code-level over prompt-level fixes for
@@ -137,22 +136,20 @@ different** — never a narrower version of a rejected rule.
 **2b. Micro-test first, when the cluster has one** — `microcase.py run-all`; `micro_test_fail`
 rejects on the spot, no rollout paid.
 
-**3. Cheap SUBSET screen — the promotion ladder.** Do not pay full val to learn an edit is bad.
-Default to your own subset, named via `--ids` — the tasks THIS edit plausibly touches (the primary
-interface, `references/algorithm.md` "Choosing your own subset"; `--tier 1/2/3` falls back with no
-better idea which tasks to pick):
+**3. Screen → merge → gate: ONE `round.py` call** ("Parallel round"). Name each
+candidate's subset + WHY in `--plan` (`algorithm.md` "Choosing your own subset"). By hand:
 
 ```bash
 python "$A/screen.py" --run-dir "$R" --project "$P" \
-       --candidate "$R/work/$TAG" --ids <comma-separated task ids> --k-se 1.0
+       --candidate "$R/work/$TAG" --ids <comma-separated task ids> --k-se 1.0 --rationale "<why>"
 ```
 
 Only the candidate pays, for the subset. `decision` is `kill` or `promote`
 — **never accept** — kills only on proven harm. **Check the arithmetic before trusting a screen:**
 `savings.breakeven_kill_rate` (`fired / full_val_rollouts`) is the fraction it must kill to pay for itself;
 `savings.net_rollouts` books what it cost. Screen only when that break-even sits below your observed kill
-rate — on a small val the tier-1 floor makes it unreachable, so pay full val directly — and read a screen as
-evidence about the tasks the edit targeted, never as a gate decision.
+rate; it is evidence about the targeted tasks, not a gate decision. Baseline freezes this as
+`screening_structurally_uneconomical` (#631). If false, skips beyond `max_screen_skips` (default 1) are refused.
 
 **4. Honest gate on FULL val.** Before this step, confirm every addressable diagnosed cluster
 for the round is folded in or deferred (with why) — "Bucketing edits before spending",
@@ -172,9 +169,13 @@ estimate, not proof (`--veto-regressions` restores the old no-regression veto; s
 `footprint` before the delta; `unresolved` is no evidence** — `references/algorithm.md`, "Measuring only
 what the edit reaches". `phases/gate/scripts/run.py` inspects the same gate but books no decision.
 
-**5. Commit the decision through the run dir**, so `best_id`, the stall counter and the audit log
-stay real. `--decision reject` keeps the old best; it snapshots the candidate, logs the event
-and advances `iterations` + stall:
+**5. Handover + DIAGNOSIS.json, THEN commit.** Add one `## Iteration <cid>` entry below
+`work/$TAG/JOURNAL.md`'s marker (not `$R/JOURNAL.md`): what, why, what the
+numbers said — the only thing the NEXT round reads. `work/$TAG/DIAGNOSIS.json` maps
+edits→clusters→tasks. `commit.py` refuses without either
+(or on a blank PROCESS.md ranked list / bare retry of a refuted idea). Then
+commit, so `best_id`, stall and the audit log stay real. `--decision reject` keeps the old
+best; it snapshots, logs and advances `iterations` + stall:
 
 ```bash
 python "$A/commit.py" --run-dir "$R" --candidate-id "$TAG" --from-dir "$R/work/$TAG" \
@@ -199,28 +200,29 @@ unresolved round (`verdict_stable: false`) — run `grow.py` first, required unl
 after which `grow.py` buys trials on the SAME candidate, re-gating at the pooled n, capped at 2.
 `references/algorithm.md`.
 
-**6. Write the handover before ending this round** — append one `## Iteration <cid>` entry below
-`work/$TAG/JOURNAL.md`'s marker (never `$R/JOURNAL.md`, framework-owned): what you tried, why, what
-the numbers said. The only thing the NEXT round reads (`references/algorithm.md`). A real
-framework bug/gap (not the capability)? Log it in `work/$TAG/FRAMEWORK_IMPROVEMENTS.md` (its
-seeded format), not just in chat.
+**6.** A real framework bug/gap? Log it in `work/$TAG/FRAMEWORK_IMPROVEMENTS.md`, not just chat.
 
-## Parallel round (optional)
+## Parallel round — the default cascade
 
-**The whole of steps 3–4 for a round is one command.** `round.py` builds the null control, evaluates
-every tag in parallel *processes* (each runs its own adapter `apply()`, which mutates a process-global
-registry and must never be shared), gates them serially, and prints one table:
+**The whole of steps 3–4 for a round is one command.** `round.py` screens every tag, gates no kill,
+pairwise-merges disjoint survivors and screens each merge, builds the null control, evaluates
+each survivor once in parallel *processes* (each runs its own adapter `apply()`, which mutates a
+process-global registry and must never be shared), gates them serially, and prints one table:
 
 ```bash
 python "$A/round.py" --run-dir "$R" --project "$P" \
-       --candidates cand_1,cand_2,cand_3 \
+       --candidates cand_1,cand_2,cand_3 --plan "$R/work/plan.json" \
        --n-trials <num_trials> --k-se <gate_k_se> --concurrency 8 --max-parallel 2
 ```
 
-`--concurrency` is the gate's *measurement* concurrency, deliberately low by default; `round.py`
-refuses one too hot to resolve its own verdict — never raise it to buy wall clock. Read
-`noise_floor_from_control` FIRST: a candidate inside that band is not evidence, whatever its verdict.
-`round.py` never commits — which part of a bundle to keep is your call.
+Read `screen_stage`/`screen_killed`/`merge_stage` first (`algorithm.md`, "Gating N Bucket-A siblings").
+`--no-merge` past `max_merge_skips` (default 1) is refused (#630).
+Wrote a gold-replay check? Register it: `--pregate-check`.
+
+`--concurrency` (gate load) is low by default; `round.py` refuses one too hot to
+resolve its verdict — never raise it to buy wall clock. Read
+`noise_floor_from_control` FIRST: inside that band is no evidence, whatever the verdict.
+It never commits; which part of a bundle to keep is your call.
 
 Four invariants, to state before every fan-out (the reasoning, and where fan-out pays best, are under
 *Parallelism* in [`references/algorithm.md`](references/algorithm.md)):

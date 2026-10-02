@@ -596,7 +596,14 @@ def _cmd_run(argv):
                         "instead of printing the handoff and returning. Value is the "
                         "host agent (a row in optimizers/registry.yaml, e.g. claude-code). "
                         "Opt-in: omit this flag to keep today's handoff-and-return behavior.")
+    p.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default=None,
+                   help="verbose/debug logging for cap_evolve itself (per-task/per-trial "
+                        "detail on DEBUG), surfaced in each phase/algorithm subprocess's "
+                        "relayed stderr. Same as setting CAPEVOLVE_LOG_LEVEL; this flag just "
+                        "sets it for this run's child processes.")
     args = p.parse_args(argv)
+    if args.log_level:
+        os.environ["CAPEVOLVE_LOG_LEVEL"] = args.log_level
 
     skills_dir = Path(args.skills_dir) if args.skills_dir else _find_skills_dir()
     if not skills_dir:
@@ -666,6 +673,7 @@ def _cmd_run(argv):
         # run print TWO json documents, so `cap-evolve run | jq` could not parse it.
         if _stderr_is_usable():
             print(json.dumps(status), file=sys.stderr, flush=True)
+            print(dashboard_launch.banner(status), file=sys.stderr, flush=True)
     # How the candidate will be DELIVERED (spec `intervention:`). Checked here, before any
     # step runs: for an out-of-process intervention a dead stack makes every candidate's
     # deployment fail, and since that is correctly per-candidate infra noise, the run
@@ -1091,6 +1099,8 @@ def _cmd_dashboard(argv):
         args.base, mode="auto", port=args.port, open_browser=not args.no_open
     )
     print(json.dumps(status))
+    if _stderr_is_usable():
+        print(dashboard_launch.banner(status), file=sys.stderr, flush=True)
     return 0 if status.get("dashboard") not in (None, "error", "skipped") else 1
 
 

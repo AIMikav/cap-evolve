@@ -16,8 +16,8 @@ export type RunStatus =
 
 export type Verdict = 'accept' | 'reject' | 'indecisive' | 'no measurement'
 
-/** One row of summary.gate_decisions. Δ̄/SE/n are parsed out of the gate's own reason
- *  string; a value the gate did not record is `null` — never a stand-in 0. */
+/** One row of summary.gate_decisions, as `reduce_run()` emits it. A value the gate did
+ *  not record is `null`/absent — never a stand-in 0. */
 export interface GateDecision {
   iteration: number | null
   candidate: string
@@ -30,6 +30,8 @@ export interface GateDecision {
   n: number | null
   k_se: number | null
   threshold: number | null
+  /** 2·SE — the smallest Δ̄ this measurement could resolve. Absent on older run dirs. */
+  resolvable_effect_size?: number | null
   reason: string
   /** Which reference the gate actually used ("parent" vs a drift-controlled reference). */
   gate_mode?: string | null
@@ -93,6 +95,8 @@ export interface LogRow {
 /** Which panels this run has real data for. Absent signal ⇒ panel omitted, never faked. */
 export interface RunCapabilities {
   per_task: boolean
+  /** Sealed test (and seed-on-test) per-task rewards, when finalize() persisted them. */
+  test_per_task?: boolean
   lineage: boolean
   gate: boolean
   cost: boolean
@@ -226,6 +230,10 @@ export interface PerIterationCost {
   optimizer_usd: number | null
   optimizer_seconds: number
   optimizer_tokens: number
+  /** Cache-read/-creation tokens the optimizer CLI reported for this step (#575 D.3).
+   *  Null (not 0) on any run recorded before that capture existed. */
+  optimizer_cache_read_tokens?: number | null
+  optimizer_cache_creation_tokens?: number | null
   runner_usd: number | null
   runner_seconds: number
   runner_tokens: number
@@ -289,6 +297,22 @@ export interface GraphNode {
    *  screen's own rollouts (see `ScreenRow.per_task`) — never emitted by the reducer
    *  itself, so absent means "a real candidate". */
   kind?: 'candidate' | 'screen'
+  /** Structured gate numbers the reducer copies onto the node when the algorithm
+   *  recorded them (see dashboard.py `_gk` loop). All optional: older run dirs lack them. */
+  gate_delta?: number | null
+  gate_stderr?: number | null
+  gate_n?: number | null
+  gate_k_se?: number | null
+  gate_threshold?: number | null
+  gate_resolvable_effect_size?: number | null
+  gate_mode?: string | null
+  gate_verdict?: Verdict | null
+  control_relative_verdict?: Verdict | null
+  control_relative_delta?: number | null
+  evidence_bar?: number | null
+  overrode_gate?: boolean | null
+  reject_basis?: string | null
+  verdict_stable?: boolean | null
   /** Set when the driver's own handover file came back empty/malformed for this
    *  round: the `reason`/`note` shown is reconstructed after the fact, not the
    *  optimizer's live reasoning. */
@@ -297,6 +321,12 @@ export interface GraphNode {
    *  Nodes sharing this id were evaluated and gated TOGETHER, not sequentially —
    *  absent for candidates not gated via round.py. */
   round_id?: string | null
+  /** Optimizer diagnosis for this candidate (from DIAGNOSIS.json). */
+  diagnosis?: Diagnosis | null
+  /** Per-task outcome classification vs parent. */
+  outcomes?: Outcomes | null
+  /** Prompt map metadata for capability files. */
+  prompt_map?: PromptMap | null
 }
 
 export interface RunGraph {
@@ -377,8 +407,18 @@ export interface RunSummaryDetail {
   }
   tokens?: number | null
   tokens_by_role?: { runner: number; optimizer: number; intake: number }
+  /** Cache-read/-creation token totals (#575 D.3), summed across iterations that
+   *  reported them. Null ("not recorded"), never 0, when nothing did. */
+  cache_read_tokens?: number | null
+  cache_creation_tokens?: number | null
   per_iteration?: PerIterationCost[]
+  /** Sealed-test per-task rewards for the best candidate / for the seed, when
+   *  finalize() persisted them — shown the same way val's per-task scores are. */
+  test_per_task?: Record<string, number> | null
+  test_baseline_per_task?: Record<string, number> | null
   evaluations?: Evaluation[]
+  /** Timeline activities for visualization (optimizer calls, evaluations, gates). */
+  activities?: Activity[]
   intake?: {
     usd: number
     seconds: number
@@ -405,6 +445,8 @@ export interface RunSummaryDetail {
   } | null
   budget_warnings?: { metric: string; pct: number; spent: number; limit: number }[]
   gate_warnings?: unknown[]
+  /** Run-level annotations ({kind, candidate, text}): diagnose/optimizer_error events and
+   *  diagnosis_parse_warning. NOT per-candidate diagnoses — read graph.nodes[i].diagnosis. */
   diagnoses?: unknown[]
   git_log?: { hash: string; subject: string }[]
   /** The intake-authored project config — capevolve.yaml (grouped), PROJECT.md, and
@@ -561,3 +603,84 @@ export type StreamEvent =
   | { type: 'event'; data: Record<string, unknown> }
   | { type: 'done'; data: { run_id: string } }
   | { type: 'idle'; data: { run_id: string } }
+
+/** Activity on the run timeline (from summary.activities). */
+export interface Activity {
+  id: string
+  /** `grow` = a provisional candidate's extra val trials (tag `<cid>__grow<N>`). */
+  type: 'seed' | 'optimize' | 'evaluate' | 'grow' | 'gate' | 'final_eval' | 'finalize'
+  lane: 'phase' | 'iteration' | 'optimizer' | 'evaluator' | 'milestone' | 'gate' | 'finalize' | 'chart'
+  iteration: number | null
+  candidate: string | null
+  start: number
+  end: number
+  error: boolean
+  split?: string
+  growth_round?: number
+  reward?: number | null
+}
+
+/** Prompt map metadata for a capability file (from graph.nodes[].prompt_map). */
+export interface PromptMapFile {
+  lines: number
+  bytes: number
+  headings: Array<[number, number, string]>  // [line, level, text]
+  add: number[]  // line numbers added vs parent
+  rem: number[]  // line numbers where content was removed
+  touched: Array<[string, number]>  // [heading text, line number]
+}
+
+export type PromptMap = Record<string, PromptMapFile>
+
+/** Optimizer diagnosis cluster (from graph.nodes[].diagnosis.clusters). */
+export interface Cluster {
+  id: string
+  name: string
+  detail?: string
+  tasks: string[]
+  scope?: string
+  latent?: boolean
+  tag?: string
+  /** Compact schema (#625): the edit shipped for this cluster, inline, as a string. */
+  edit?: string
+  evidence?: string
+}
+
+/** Optimizer edit (from graph.nodes[].diagnosis.edits). */
+export interface Edit {
+  id: string
+  title: string
+  files?: string[]
+  lever?: string
+  clusters: string[]
+  blast_radius?: string
+  verified?: string
+}
+
+/** Skipped edit (from graph.nodes[].diagnosis.skipped). */
+export interface SkippedEdit {
+  title: string
+  reason: string
+}
+
+/** Optimizer diagnosis (from graph.nodes[].diagnosis) — the raw DIAGNOSIS.json.
+ *  Two shapes occur in real runs (#625): the documented one with a top-level `edits[]`,
+ *  and the compact one optimizers actually write — `clusters[].edit` as a string, no
+ *  `edits`, `skipped` as a `{task: reason}` map. Read edits/skipped via lib/diagnosis.ts. */
+export interface Diagnosis {
+  candidate?: string
+  headline: string
+  clusters: Cluster[]
+  edits?: Edit[]
+  skipped?: SkippedEdit[] | Record<string, string>
+  techniques?: string[]
+  note?: string
+  /** Validation warnings from the harness (advisory only). */
+  warnings?: string[]
+}
+
+/** Per-task outcome vs the parent (from graph.nodes[].outcomes — dashboard.py's
+ *  `_compute_outcomes`): a `{task_id: status}` map. */
+export type OutcomeStatus = 'fixed' | 'broke' | 'still_failing' | 'still_passing'
+export type Outcomes = Record<string, OutcomeStatus>
+

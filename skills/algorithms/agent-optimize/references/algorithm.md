@@ -11,6 +11,7 @@
 - [Sibling candidates by default](#why-n3-sibling-candidates-is-the-default-not-one-candidate-at-a-time)
 - [Provisional candidates](#provisional-candidates-sequential-evidence-not-compounded-edits)
 - [JOURNAL.md write protocol](#journalmd--the-append-only-handover-and-its-write-protocol)
+- [DIAGNOSIS.json](#diagnosisjson--which-cluster-each-change-targets-on-which-tasks)
 - [Parallelism](#parallelism-fan-out-on-the-cheap-steps-stay-serial-where-state-moves)
 - [The final measurement](#the-final-measurement-one-table-and-the-things-it-refuses-to-pretend)
 - [Gate as evidence, not a verdict](#gate-as-evidence-not-a-verdict)
@@ -137,6 +138,28 @@ paying full val directly — e.g. `"spend.py: break-even unreachable on this spl
 no third way in: a full-val eval that never went through `screen.py` and never justified
 skipping it will not run.
 
+**Skipping is arithmetic, not argument (#631).** #585/#613 refused skip reasons that were
+near-duplicate TEXT of an earlier one. A real run got past that by rewording every round while
+the strategy stayed the same: 12 of 16 candidates went unscreened, each with a different
+justification. So the check now runs on a number that can't be reworded:
+
+- At baseline, `harness.freeze_screening_economics` computes screen.py's own tier-1
+  `breakeven_kill_rate` (`max(MIN_K, 25% of val)` rollouts against `val_n × num_trials`). It writes
+  `screening_structurally_uneconomical` (break-even > `SCREEN_BREAKEVEN_CEILING` = 0.25) and the
+  arithmetic behind it into `state.json`, **once**. A round's own `--n-trials` never recomputes it.
+- `true` (a tiny val, where the screen costs about as much as full val): skipping is unrestricted,
+  bare or justified.
+- `false` (any val of reasonable size, e.g. 30 × 10 trials gives a break-even of 0.027): screening
+  is mandatory. At most `max_screen_skips` distinct candidates per run (capevolve.yaml, default 1)
+  may go to full val unscreened. The count is read fresh from the `agent_optimize_compliance` events
+  in `events.jsonl`. Once the budget is spent, `round.py` exits 2 before spending anything. **There is
+  no override flag**, because a fresh justification is exactly what got gamed. The way through is to
+  drop the skip flag and let `round.py` screen the candidate. Re-gating a candidate that was already
+  charged costs no extra budget.
+
+Justification text is still recorded, along with `justification_near_duplicate_of` (difflib ratio
+≥ 0.75), as audit evidence. It is never enforced. `--duplicate-skip-justification` has been removed.
+
 ### The break-even, and when the ladder cannot pay for itself
 
 Screening is an economic bet, not a free improvement, and the arithmetic is one division:
@@ -182,6 +205,18 @@ exactly those ids, with the same audit trail under `$R/screens/`. It can still o
 accept, for the same reason the heuristic path can't: a subset you picked because it targets the
 edit is biased toward that edit, which is excellent triage and an invalid basis for acceptance.
 
+Inside a round the same choice goes in `round.py --plan <file>`, a JSON file you write (e.g.
+`$R/work/plan.json`), one entry per tag, every key optional:
+
+```json
+{"cand_1": {"ids": "8,14,22", "rationale": "cluster c3 timeout-before-tool-call + 2 passing canaries",
+            "cluster_ids": ["c3"], "edit_kind": "code"}}
+```
+
+`ids`/`rationale` become that tag's screen subset and its `subset.rationale` in `graph.jsonl`;
+`cluster_ids` also stop two alternative fixes of the SAME cluster being merged. A tag with no
+entry is screened on `--screen-tier` (default 1) and gets the heuristic's own rationale.
+
 On **train** there is no screen/gate ceremony to bypass at all: `evaluate.py --split train --ids
 <your subset>` (`cap_evolve.harness.evaluate_candidate`'s `ids` parameter, exposed on the CLI)
 runs exactly the ids you name and nothing else, under a tag you control. Iterate on it as many
@@ -194,6 +229,32 @@ freedom stops: `gate_check.py`'s coverage guard (`min_coverage`) exists to catch
 under-measured candidate, and a deliberately-chosen subset's `coverage` reads 1.0 by construction
 (its denominator IS the subset) — the exact blind spot the guard cannot see through. The full-val
 eval stays the whole split every round, same as the heuristic-screened path always required.
+
+### Pre-gate check: a validity check you wrote is a refusal, not a signal (#632)
+
+Some edits change the very target they are scored against. When a scorer builds its expected
+state by replaying the gold actions through the CANDIDATE's own tools, a guard that makes a gold
+call raise moves the target: one task spuriously "fixed", another broken. In one real run, a
+gold-replay script the agent wrote (gold through the candidate's tools vs the pristine ones)
+flagged "4 of 30 val tasks differ" BEFORE the gate. The agent read that as expected and paid the
+300-rollout gate anyway. Later it carried the same guard into a bundle and paid a second gate.
+
+Register any such check once:
+
+```bash
+python "$A/round.py" ... --pregate-check "python $R/work/replay_gold.py"
+```
+
+From then on `round.py` runs `CMD <candidate_dir>` on every tag, and on every merge it builds,
+before any screen or eval. You do not need to pass the flag again: it is stored in
+`$R/work/pregate_check.json`. A candidate fails on a nonzero exit, or on a nonzero
+`N of M … differ` summary line, because `replay_gold.py` as written exits 0 either way. One
+failing tag refuses the whole round (rc 2) and names it. The refusal also lists every tag an
+earlier round already disqualified (`known_invalid_earlier_in_run`), so a bundle that carries one
+of them points at it. A merge that fails is skipped before its screen. The check runs on the
+bytes, not on provenance, which is why a hand-built bundle cannot slip through. To book a refused
+tag, use `commit.py --decision reject --reject-basis driver_judgement
+--bypassed-gate-justification "pre-gate check failed: …"`.
 
 ### `phases/gate` is an inspection front-end, not the round's gate
 
@@ -267,7 +328,31 @@ candidates, N≥3, one cluster each. Bundle only *independent* parts within one 
 files, different rules — so a rejected bundle can be resubmitted as its surviving part next round;
 `regressed`/`regressions` say which part to drop.
 
-**Gating N Bucket-A siblings does not mean paying full val N times.** Screen every sibling first
+**Gating N Bucket-A siblings does not mean paying full val N times.** Since #437/#438 this is
+`round.py`'s default: one call screens every sibling, drops kills, builds each disjoint
+survivor pair with `merge.build_merge_dir` (no measurement of its own — the merge is judged by
+the same screen), screens the merge on both parents' tasks plus fresh whole-suite canaries, and
+gates a merge INSTEAD of its parents only when it kept each parent's own screened gain (else the
+parents are gated alone). Each survivor is paid for at full val once. Every transition is a
+`graph.jsonl` node (`screened`/`proposed`/`superseded`/`gated`, then the commit). The table's
+`screen_stage` gives each tag's subset, rationale and decision; `screen_killed` is never gated
+(commit each `--reject-basis screen_kill`); `merge_stage.merges[]` lists every pair built, its
+screen, `qualifies`, and `not_gated_because` for any merge not chosen, and `skipped_pairs` every
+pair refused as an edit collision or a same-cluster pair. Commit a gated merge without
+`--parents` — its node already has both; its parents (`superseded`, `merged_into`) need no commit
+of their own. `--no-merge` gates every survivor alone. It is priced on the same terms as a screen skip
+(#630: 7 of 9 rounds of a real run passed it, so `merge_stage` never ran and the optimizer hand-built
+the union that was declined, paying a third full-val gate for it). The flag only counts when a
+merge *applied*: 2+ screened survivors with at least one cluster-disjoint pair, which is
+`mergeable_pairs`, the same rule `merge_stage` uses. In that case `round.py` logs
+`merge_compliance_warning` (`reason: no_merge_with_eligible_pairs`, `realtime: true`) and a stderr
+WARNING right away, rather than only at finalize. It also spends one of the run's
+`max_merge_skips` (capevolve.yaml, default 1), counted from the `agent_optimize_round_batch` events.
+Once that budget is spent, the round is refused with no override flag, before any compliance
+event or graph transition is written. To recover, re-run without the flag: the screens are already
+on disk, and a pair that collides at build time costs nothing. A round where no merge applied
+spends nothing. The manual path
+below still works for pairs outside one round. Screen every sibling first
 (SKILL.md step 3, cheap subset, kill-only) — that is the whole point of `screen.py` existing before
 step 4 — then run `scripts/merge_search.py` on the disjoint SCREEN-SURVIVORS (its own module
 docstring: "the missing piece is simply DECIDING which survivors are safe to try merging and
@@ -435,6 +520,35 @@ The write protocol:
    `commit.py` stamps a `**RESULT (framework, objective):**` line right below your entry
    afterward (accept/reject, Δ, and the exact tasks fixed/broken vs the parent), which is the
    authoritative record of what actually worked — read it, don't guess at it.
+
+`commit.py` enforces step 2 as a precondition (#588): it refuses to record a decision when no
+new `## Iteration` entry exists for that candidate, unless you pass
+`--missing-handover-justification "<reason>"`. Write the entry before calling `commit.py`, not
+after.
+
+## DIAGNOSIS.json — which cluster each change targets, on which tasks
+
+Write `$R/work/$TAG/DIAGNOSIS.json` as part of every candidate, while you edit — not after
+(schema at the bottom of `work/$TAG/PROCESS.md`): each cluster this round targets as
+`{id, name, detail, tasks: [...]}` (from step 1's diagnose `clusters`), and each edit as
+`{id, title, files, clusters: [<cluster ids>]}`. It is the ONLY record of which root cause a change
+targets and which tasks it aims at: `commit.py` copies the edits' clusters into the candidate's
+`graph.jsonl` `cluster_ids` and those clusters' tasks into its `subset` (a `screen.py` subset, when
+one ran, wins — it is what was measured), and the dashboard's diagnosis view renders the file.
+
+`commit.py` enforces it as a precondition (#611), exactly like the handover: it refuses an
+accept/reject/inconclusive when the file is missing or an empty template (no cluster with an `id`
+AND tasks), unless you pass `--missing-diagnosis-justification "<reason>"`. A merge candidate writes
+the union of its parents' targeted clusters.
+
+Two more preconditions (#634), same escape-hatch shape. (1) `work/$TAG/PROCESS.md`'s "Ranked
+issue list" must have at least one data row — the round's re-survey of ALL current failures, so the
+search does not narrow onto 1-2 stubborn tasks — unless you pass
+`--missing-ranked-issues-justification "<reason>"`. (2) If this DIAGNOSIS.json's targeted tasks
+overlap (Jaccard ≥ 0.5) those of an earlier candidate the gate REJECTED (`inconclusive` and
+`--reject-basis infra` do not count), `commit.py` lists the refuted priors and refuses unless you
+pass `--retry-justification "<one line: what is different this time>"`. Check JOURNAL.md's
+RESULT lines before building a near-variant of a refuted idea. Merge candidates are exempt from both.
 
 This is a general convention for ANY continuous-session algorithm (one long-running optimizer
 subprocess spanning many rounds, as opposed to the deterministic loops' fresh per-iteration
@@ -789,6 +903,25 @@ folds them ONE AT A TIME and measures after each — the same discipline `integr
 docstring already mandates for accepted-candidate merging, so a bad interaction is attributable
 to the specific branch that caused it. The result lands at `$R/work/<tag>` as an ordinary
 candidate directory; screening/gating/accepting stays the driver's job, unchanged.
+
+### Merging two arbitrary live branches (#586)
+
+`merge_search.py` and `merge_rejects.py` above are each scoped to how they FIND their two
+branches — this round's `work/` survivors, or this run's recorded safe rejects — not to the
+merge itself. Neither can merge two arbitrary tags, e.g. an already-accepted candidate from an
+earlier iteration with a survivor from a later round, which is the literal "two
+independently-evolving branches" case #586 asks for. `merge.py --a TAG_A --b TAG_B --base
+TAG` is that generalization: it resolves each tag to wherever it currently lives (`work/` if
+still uncommitted, else `candidates/` once `commit.py` has snapshotted it, on either an accept
+or a reject), refuses an overlapping pair the same way `merge_search.changed_functions` does,
+and drives the SAME `integrate.py` call `merge_search.py` uses (generalized to take explicit
+branch directories rather than assuming both live under `work/`). A built merge lands at
+`$R/work/merge_<a>_<b>`, gated by `round.py` with no special-casing; on accept, commit with
+`commit.py --parents <a>,<b>` so `graph.jsonl` records both ancestors instead of one.
+
+Within one round the automatic pass above now covers this (every disjoint survivor pair,
+selected by a greedy matching on screen Δ). Still manual: pairs ACROSS rounds (an earlier
+accept with a current survivor) — name the two tags here.
 
 ## Caveats
 

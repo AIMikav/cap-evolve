@@ -713,14 +713,17 @@ ENV
     # the gate's SE, so the k_se that is sane under soft scoring rejects almost everything under
     # hard. This bit us twice and silently: pilots 30799393875 and 30890657732 both ran the
     # default k_se=1.0 against SB_SCORING=hard, and 30890657732's cand_0003 scored 0.600 — ABOVE
-    # its accepted champion's 0.580 — and was rejected on a delta of 0.020. GATE_K_SE is always
-    # set by the workflow so it cannot be corrected from overrides.env; warn loudly instead.
+    # its accepted champion's 0.580 — and was rejected on a delta of 0.020. GATE_K_SE now blank-
+    # defaults in the workflow so a tier's overrides.env can correct it (see full/pilot/
+    # full_verified's GATE_K_SE=0.2), but a hard-scoring tier that omits that pairing would
+    # silently reproduce the same wrongful reject — hard-fail instead of warning.
     if [ "${SB_SCORING:-soft}" = "hard" ]; then
       if awk "BEGIN{exit !(${GATE_K_SE:-1.0} >= 0.5)}"; then
-        echo "::warning:: SB_SCORING=hard with gate_k_se=${GATE_K_SE:-1.0}. Bernoulli per-task" \
+        echo "::error:: SB_SCORING=hard with gate_k_se=${GATE_K_SE:-1.0}. Bernoulli per-task" \
              "reward widens the gate's SE, so real gains are likely to be REJECTED (run" \
-             "30890657732 rejected a 0.600 candidate in favour of 0.580). Dispatch with" \
-             "gate_k_se=0.2 for hard scoring." >&2
+             "30890657732 rejected a 0.600 candidate in favour of 0.580). Pair SB_SCORING=hard" \
+             "with GATE_K_SE=0.2 in this tier's overrides.env, or dispatch gate_k_se=0.2." >&2
+        exit 1
       fi
     fi
     # Prompt-only optimizer instructions. The default template shipped in
@@ -831,12 +834,16 @@ ENV
     else SB_REWARD_METRIC="${SPREADSHEETBENCH_SCORING}_no_recalc"; fi
     echo ">>> spreadsheetbench reward: $SB_REWARD_METRIC" >&2
     printf '%s' "$SB_REWARD_METRIC" > "$OUT/reward_metric"
-    # LATEST RUN. One history slot, overwritten by every spreadsheetbench run: the whole run dir
-    # plus every output workbook (recalculated and as-saved), kept on the runner so a finished
-    # run can be re-scored offline and a later run can build on its seed (SB_REUSE_LATEST_BASELINE).
-    # Outputs are otherwise deleted after scoring, and the runner's work dir is wiped per job.
+    # LATEST RUN. One history slot PER (tier, agent model), overwritten by the next spreadsheetbench
+    # run with the same tier and model: the whole run dir plus every output workbook (recalculated
+    # and as-saved), kept on the runner so a finished run can be re-scored offline and a later run
+    # can build on its seed (SB_REUSE_LATEST_BASELINE). Keyed so that, e.g., a GPT baseline never
+    # overwrites the Gemma seed another experiment reuses. Outputs are otherwise deleted after
+    # scoring, and the runner's work dir is wiped per job.
     SB_KEEP_LATEST_RUN="${SB_KEEP_LATEST_RUN:-1}"
-    SB_LATEST_DIR="${SB_LATEST_DIR:-$HOME/.cache/capevolve-latest/spreadsheetbench}"
+    SB_SLOT_KEY="${TIER}__$(printf '%s' "$AGENT_MODEL" | tr -c 'A-Za-z0-9._-' '_')"
+    SB_LATEST_DIR="${SB_LATEST_DIR:-$HOME/.cache/capevolve-latest/spreadsheetbench-slots/$SB_SLOT_KEY}"
+    echo ">>> spreadsheetbench kept-run slot: $SB_LATEST_DIR" >&2
     if [ "$SB_KEEP_LATEST_RUN" = "1" ]; then
       export SPREADSHEETBENCH_KEEP_OUTPUTS=1
       echo "SPREADSHEETBENCH_KEEP_OUTPUTS=1" >> "$WORK/.env"

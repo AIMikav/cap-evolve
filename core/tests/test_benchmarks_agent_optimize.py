@@ -315,7 +315,10 @@ def test_agent_mode_rounds_render_in_the_ci_iteration_timeline(tmp_path):
     p = subprocess.run(
         [sys.executable, str(commit), "--run-dir", str(run_dir.root),
          "--candidate-id", "cand_1", "--from-dir", str(work),
-         "--decision", "accept", "--val", "0.61", "--note", "a general rule"],
+         "--decision", "accept", "--val", "0.61", "--note", "a general rule",
+         "--missing-handover-justification", "fixture: journal handover not under test",
+         "--missing-ranked-issues-justification", "fixture: ranked issues not under test",
+         "--missing-diagnosis-justification", "fixture: diagnosis not under test"],
         capture_output=True, text=True,
         env={**os.environ, "CAPEVOLVE_CORE": str(REPO / "core")})
     assert p.returncode == 0, f"commit.py failed: {p.stdout}\n{p.stderr}"
