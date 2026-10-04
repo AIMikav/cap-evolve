@@ -1,1 +1,1 @@
-{"path":"history.jsonl","binary":false,"size":105,"truncated":false,"text":"{\"candidate_id\": \"cand_0001\", \"summary\": \"candidate cand_0001 (val 0.675, \\u0394 +0.225)\", \"val\": 0.675}\n"}
+{"path":"history.jsonl","binary":false,"size":223,"truncated":false,"text":"{\"candidate_id\": \"cand_0001\", \"summary\": \"candidate cand_0001 (val 0.675, \\u0394 +0.225)\", \"val\": 0.675}\n{\"candidate_id\": \"cand_0005\", \"summary\": \"candidate cand_0005 (val 0.692, \\u0394 +0.017)\", \"val\": 0.6923076923076923}\n"}
