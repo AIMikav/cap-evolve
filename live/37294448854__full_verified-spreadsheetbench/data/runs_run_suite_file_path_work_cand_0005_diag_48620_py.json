@@ -1,1 +1,0 @@
-{"path":"work/cand_0005/diag_48620.py","binary":false,"size":248,"truncated":false,"text":"import json\nwith open('./trajectories/48620__cand_0002__t0.json') as f:\n    data = json.load(f)\n    for turn in data['rollout']['trace']:\n        if turn['role'] == 'assistant' and '```python' in turn['content']:\n            print(turn['content'])\n"}
