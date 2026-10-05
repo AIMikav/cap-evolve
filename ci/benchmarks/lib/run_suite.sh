@@ -46,9 +46,9 @@ _discard_dir() {
 }
 
 ITER="${ITERATIONS:-3}"
-AGENT_MODEL="${AGENT_MODEL:-ibm-ete-int/aws/gpt-oss-120b}"
+AGENT_MODEL="${AGENT_MODEL:-gpt-oss-120b}"
 NUM_TRIALS="${NUM_TRIALS:-10}"
-OPTIMIZER_MODEL="${OPTIMIZER_MODEL:-ibm-ete-int/claude-opus-4-8}"
+OPTIMIZER_MODEL="${OPTIMIZER_MODEL:-claude-opus-4-8}"
 GATE_K_SE="${GATE_K_SE:-1.0}"
 # Raw native trajectories (tau2's own results.json, via adapter._sim_save_path). ON for the
 # tau2 legs, whose adapters write them and where a failed rollout is only readable from the
@@ -189,6 +189,16 @@ mkdir -p "$OUT/optimized"
 # error.
 # shellcheck source=ci/benchmarks/lib/resolve_provider.sh
 . "$LIB_DIR/resolve_provider.sh"
+# A model may be a PLAIN catalog name (ci/benchmarks/model_catalog.txt). ci_setup.sh's preflight
+# picks its provider with live probes (RITS, then ibm-ete-int, then ibm-ete) and exports the
+# result; use it, so this run talks to exactly the provider that was checked. Without that
+# preflight (a laptop run), pin_model takes the first provider in order whose secrets are set.
+# Either way AGENT_MODEL/OPTIMIZER_MODEL hold a prefixed id from here on, which is what the
+# slot key, the progress lines and run.json record.
+AGENT_MODEL="${AGENT_MODEL_RESOLVED:-$AGENT_MODEL}"
+OPTIMIZER_MODEL="${OPTIMIZER_MODEL_RESOLVED:-$OPTIMIZER_MODEL}"
+AGENT_MODEL="$(pin_model "$AGENT_MODEL")" || exit 1
+OPTIMIZER_MODEL="$(pin_model "$OPTIMIZER_MODEL")" || exit 1
 resolve_provider "$AGENT_MODEL"
 AGENT_MODEL_WIRE="$RESOLVED_MODEL"; AGENT_API_BASE="$RESOLVED_API_BASE"; AGENT_API_KEY="$RESOLVED_API_KEY"
 resolve_provider "$OPTIMIZER_MODEL"
@@ -198,8 +208,8 @@ OPTIMIZER_MODEL_WIRE="$RESOLVED_MODEL"; OPTIMIZER_API_BASE="$RESOLVED_API_BASE";
 # ANTHROPIC_AUTH_TOKEN from the process environment — overriding them here, once, before
 # either is invoked, is what makes an OPTIMIZER_MODEL on ibm-ete, or ibm-rits, actually
 # reach that provider rather than silently keep talking to the ibm-ete-int gateway with a
-# model id it doesn't recognise. NOT yet verified that lite-rits (ibm-rits) speaks the
-# Anthropic Messages API the CLI expects — see the PR description.
+# model id it doesn't recognise. lite-rits (ibm-rits) does NOT serve the Anthropic Messages
+# API the CLI expects; an ibm-rits optimizer is re-pointed at a private proxy just below.
 #
 # This export is process-wide and OUTLIVES this block, which matters for the skillsbench/
 # rfe-creator arms below: their in-sandbox agent also ultimately shells out to `claude`,
@@ -211,6 +221,18 @@ OPTIMIZER_MODEL_WIRE="$RESOLVED_MODEL"; OPTIMIZER_API_BASE="$RESOLVED_API_BASE";
 # _gateway_env() and templates/adapters/rfe_creator/adapter.py's _harness_env().
 export ANTHROPIC_BASE_URL="$OPTIMIZER_API_BASE"
 export ANTHROPIC_AUTH_TOKEN="$OPTIMIZER_API_KEY"
+# An ibm-rits OPTIMIZER cannot use lite-rits for this: the claude CLI needs /v1/messages, and
+# lite-rits answers that route with HTTP 500 (see rits_messages_proxy.sh). Start a private
+# Anthropic-to-OpenAI proxy for the job, which re-points the two vars above at itself. This
+# does not touch the agent's path: an ibm-rits AGENT keeps calling lite-rits's
+# /chat/completions, which works.
+if [ "$RESOLVED_PROVIDER" = "ibm-rits" ]; then
+  # shellcheck source=ci/benchmarks/lib/rits_messages_proxy.sh
+  . "$LIB_DIR/rits_messages_proxy.sh"
+  start_rits_messages_proxy "$OPTIMIZER_MODEL_WIRE" "$OPTIMIZER_API_KEY" || exit 1
+  # Kept for the artifacts; the proxy log holds requests and errors, never the key.
+  trap 'cp "$RITS_PROXY_DIR/proxy.log" "$OUT/rits-messages-proxy.log" 2>/dev/null; stop_rits_messages_proxy' EXIT
+fi
 # NB: OPTIMIZER_MODEL itself is NEVER reassigned to the wire form here — it stays the
 # CI-facing "ibm-ete-int/…"/"ibm-ete/…"/"ibm-rits/…"-prefixed alias, used for the
 # progress line below and metrics.py's provenance display further down. resolve_provider
