@@ -22,6 +22,25 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from . import selection
+
+#: Default objectives for ``mode="pareto"`` when the caller/config does not supply
+#: ``objectives`` — reward is always maximized; cost is the default second objective,
+#: subject to the fallback chain below.
+_DEFAULT_PARETO_OBJECTIVES = [
+    {"name": "reward", "direction": "maximize"},
+    {"name": "cost", "direction": "minimize"},
+]
+
+#: cost -> latency -> tokens: if a declared/default objective named "cost" has no
+#: value on this run, try these in order rather than silently dropping to
+#: single-objective (the issue is explicit: refuse, don't silently degrade).
+_COST_FALLBACK_CHAIN = ("cost", "latency", "tokens")
+
+#: Below this a signed delta/SE comparison is treated as a tie rather than a win/loss
+#: in either direction — avoids float-noise flipping a dominance verdict.
+_PARETO_TIE_EPS = 1e-9
+
 
 @dataclass
 class GateDecision:
@@ -70,6 +89,77 @@ class GateDecision:
 
 class TrainGateError(RuntimeError):
     """Raised if someone tries to gate acceptance on the train split."""
+
+
+class ParetoObjectiveError(ValueError):
+    """Raised when ``mode="pareto"`` cannot resolve the metrics it needs.
+
+    Deliberately a hard error, not a silent drop to single-objective: the issue this
+    gate mode implements is explicit that an unresolvable secondary objective must
+    refuse pareto mode rather than quietly gate on reward alone.
+    """
+
+
+def _resolve_pareto_objectives(objectives, metrics_candidate, metrics_current) -> list[dict]:
+    """Normalize ``objectives`` and apply the cost->latency->tokens fallback chain.
+
+    ``reward`` is always resolvable (it comes from ``current_val``/``candidate_val``,
+    not from the metrics dicts). Any other named objective must have a value in
+    ``metrics_candidate`` or ``metrics_current``; a missing ``cost`` tries ``latency``
+    then ``tokens`` (same declared direction) before giving up.
+    """
+    objectives = objectives or _DEFAULT_PARETO_OBJECTIVES
+    available = set(metrics_candidate or {}) | set(metrics_current or {})
+    resolved = []
+    for obj in objectives:
+        name, direction = obj["name"], obj.get("direction", "maximize")
+        if name == "reward" or name in available:
+            resolved.append({"name": name, "direction": direction})
+            continue
+        if name == "cost":
+            for fallback in _COST_FALLBACK_CHAIN[1:]:
+                if fallback in available:
+                    resolved.append({"name": fallback, "direction": direction})
+                    break
+            else:
+                raise ParetoObjectiveError(
+                    f"pareto gate: objective 'cost' has no value on this run and "
+                    f"neither fallback ({', '.join(_COST_FALLBACK_CHAIN[1:])}) is "
+                    f"present either (have metrics: {sorted(available)!r}) — refusing "
+                    "pareto mode rather than silently gating on reward alone")
+            continue
+        raise ParetoObjectiveError(
+            f"pareto gate: objective {name!r} has no value on this run "
+            f"(have metrics: {sorted(available)!r})")
+    return resolved
+
+
+def _paired_mean_se(deltas: list[float], se_floor: float = 0.0) -> tuple[float, float]:
+    """Mean and SE of a per-task delta vector — same estimator the ``paired`` mode uses."""
+    n = len(deltas)
+    mean_d = sum(deltas) / n
+    if n >= 2:
+        var = sum((d - mean_d) ** 2 for d in deltas) / (n - 1)
+        se = math.sqrt(var / n)
+    else:
+        se = 0.0
+    return mean_d, max(se, float(se_floor or 0.0))
+
+
+def _objective_state(delta_signed: float, se: float, k_se: float) -> str:
+    """"better" / "worse" / "tie" for one objective, already signed so + means improvement.
+
+    Noise floor: with a usable ``se`` the bar is ``k_se * se`` in either direction (same
+    bar the ``paired``/``significant`` modes use); with no ``se`` at all (e.g. a scalar
+    metric with no stderr), fall back to a tiny epsilon so float noise doesn't register
+    as a win/loss, but any real difference still does.
+    """
+    thresh = k_se * se if se > 0 else _PARETO_TIE_EPS
+    if delta_signed > thresh:
+        return "better"
+    if -delta_signed > thresh:
+        return "worse"
+    return "tie"
 
 
 def _warn_se_zero(run_dir, mode: str, context: str) -> None:
@@ -134,6 +224,11 @@ def decide(
     broke: list | None = None,
     fixed: list | None = None,
     gate_max_broke: int | None = None,
+    objectives: list[dict] | None = None,
+    metrics_candidate: dict | None = None,
+    metrics_current: dict | None = None,
+    metrics_stderr_candidate: dict | None = None,
+    metrics_stderr_current: dict | None = None,
 ) -> GateDecision:
     """Decide whether to accept the candidate — see ``_verdict`` for the statistics.
 
@@ -163,7 +258,11 @@ def decide(
                  candidate_stderr=candidate_stderr, current_stderr=current_stderr,
                  threshold=threshold, paired_deltas=paired_deltas,
                  paired_se_floor=paired_se_floor, coverage=coverage,
-                 min_coverage=min_coverage, run_dir=run_dir)
+                 min_coverage=min_coverage, run_dir=run_dir,
+                 objectives=objectives, metrics_candidate=metrics_candidate,
+                 metrics_current=metrics_current,
+                 metrics_stderr_candidate=metrics_stderr_candidate,
+                 metrics_stderr_current=metrics_stderr_current)
     d.broke = [str(t) for t in (broke or [])]
     d.fixed = [str(t) for t in (fixed or [])]
     if gate_max_broke is None or d.indecisive or not d.accept:
@@ -194,6 +293,11 @@ def _verdict(
     coverage: float | None = None,
     min_coverage: float = 0.6,
     run_dir=None,
+    objectives: list[dict] | None = None,
+    metrics_candidate: dict | None = None,
+    metrics_current: dict | None = None,
+    metrics_stderr_candidate: dict | None = None,
+    metrics_stderr_current: dict | None = None,
 ) -> GateDecision:
     """The gate's STATISTICS — the accept/reject test itself, and nothing else.
 
@@ -214,6 +318,21 @@ def _verdict(
       - ``threshold``:   accept iff delta > ``threshold`` (a flat margin).
       - ``strict``:      accept iff delta > 0 (any improvement). Only safe with a
         near-zero-variance scorer: with a noisy one it banks noise as progress.
+      - ``pareto``:      multi-objective. Accept iff the candidate is NOT dominated by
+        ``current`` on the declared ``objectives`` (default: reward maximize + cost
+        minimize, with a cost -> latency -> tokens fallback — see
+        ``_resolve_pareto_objectives``) AND it shows a real, noise-floor-clearing win on
+        at least one of them. Each objective still has to clear its own ``k_se * SE``
+        bar (reward reuses the ``paired``/``significant`` estimator; other objectives
+        use ``metrics_stderr_candidate``/``metrics_stderr_current``) — nominal
+        dominance from measurement noise alone does not count. See
+        ``_objective_state`` / ``selection.dominates``, which this reuses rather than
+        reimplementing. Requires ``metrics_candidate``/``metrics_current`` for any
+        objective beyond ``reward``, with the key present on BOTH sides (one side
+        missing raises ``ParetoObjectiveError`` rather than reading it as 0.0), and
+        requires ``metrics_stderr_candidate``/``metrics_stderr_current`` for that same
+        key on both sides too — without a real SE, a non-reward objective has no
+        noise floor and pure float noise could flip the verdict.
 
     ``coverage`` is the fraction of val tasks that produced a real measurement
     (``SplitResult.coverage``). Below ``min_coverage`` the gate REFUSES TO JUDGE and
@@ -326,5 +445,69 @@ def _verdict(
     if mode == "strict":
         ok = delta > 0
         return GateDecision(ok, f"Δ={delta:+.4f} {'>' if ok else '<='} 0", delta, 0.0)
+
+    if mode == "pareto":
+        resolved = _resolve_pareto_objectives(
+            objectives, metrics_candidate, metrics_current)
+
+        states: dict[str, str] = {}
+        reward_delta, reward_se, reward_threshold = delta, 0.0, 0.0
+        for obj in resolved:
+            name = obj["name"]
+            if name == "reward":
+                if paired_deltas:
+                    reward_delta, reward_se = _paired_mean_se(
+                        list(paired_deltas), paired_se_floor)
+                else:
+                    reward_delta = delta
+                    reward_se = math.sqrt(candidate_stderr ** 2 + current_stderr ** 2)
+                reward_threshold = k_se * reward_se
+                states[name] = _objective_state(reward_delta, reward_se, k_se)
+                continue
+            mc, mcur = metrics_candidate or {}, metrics_current or {}
+            if name not in mc or name not in mcur:
+                # _resolve_pareto_objectives only checks the UNION of both sides, so a
+                # key present on one side and absent on the other still passes that
+                # check. Reading it as 0.0 here would fabricate a fake delta — refuse
+                # instead (same "refuse, don't silently degrade" rule as the fallback
+                # chain above).
+                raise ParetoObjectiveError(
+                    f"pareto gate: objective {name!r} is missing from "
+                    f"metrics_candidate or metrics_current (present: "
+                    f"candidate={name in mc}, current={name in mcur}) — refusing to "
+                    "treat the missing side as 0.0")
+            cand_v, cur_v = float(mc[name]), float(mcur[name])
+            raw_delta = cand_v - cur_v
+            signed_delta = raw_delta if obj["direction"] == "maximize" else -raw_delta
+            msc, mscur = metrics_stderr_candidate or {}, metrics_stderr_current or {}
+            if name not in msc or name not in mscur:
+                # Without a real stderr, _objective_state falls back to a fixed
+                # epsilon — fine for reward (SE is always derivable from the paired/
+                # independent samples) but for cost/latency/tokens that silently lets
+                # pure float noise flip the verdict. Refuse rather than lower the bar.
+                raise ParetoObjectiveError(
+                    f"pareto gate: objective {name!r} has no stderr supplied via "
+                    "metrics_stderr_candidate/metrics_stderr_current — refusing to "
+                    "fall back to a float-noise epsilon bar for a non-reward objective")
+            se = math.sqrt(float(msc[name]) ** 2 + float(mscur[name]) ** 2)
+            states[name] = _objective_state(signed_delta, se, k_se)
+
+        # Reuse selection.dominates rather than reimplementing dominance: encode each
+        # objective as a 0/1 "maximize" score (1 = this side is significantly ahead),
+        # so a tie contributes to neither side and real noise never counts as a win.
+        cur_score = {name: (1.0 if st == "worse" else 0.0) for name, st in states.items()}
+        cand_score = {name: (1.0 if st == "better" else 0.0) for name, st in states.items()}
+        current_dominates = selection.dominates(cur_score, cand_score)
+        any_better = any(st == "better" for st in states.values())
+        accept = (not current_dominates) and any_better
+
+        summary = ", ".join(f"{name}={st}" for name, st in states.items())
+        reason = (
+            f"pareto[{summary}] -> {'ACCEPT (non-dominated, real win on >=1 objective)' if accept else ('REJECT (dominated by current)' if current_dominates else 'REJECT (no significant win on any objective)')}"
+        )
+        return GateDecision(
+            accept=accept, reason=reason, delta=reward_delta, threshold=reward_threshold,
+            resolvable_effect_size=(round(2 * reward_se, 6) if reward_se else None),
+        )
 
     raise ValueError(f"unknown gate mode: {mode!r}")
