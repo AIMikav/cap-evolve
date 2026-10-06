@@ -1,4 +1,4 @@
-# scripts/v4_t2_e1/tests/test_preflight_check.py
+# scripts/parsec/v4_t2_e1/tests/test_preflight_check.py
 from __future__ import annotations
 
 import subprocess

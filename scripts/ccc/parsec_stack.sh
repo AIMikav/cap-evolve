@@ -61,7 +61,7 @@ SKILLS_DIR="$PARSEC_V4N/_run/skills"
 PARSEC_SIM_TRACE="${PARSEC_SIM_TRACE:-$PARSEC_V4N/_run/logs/parsec-trace/trace.jsonl}"
 
 # name:published_port:kind. The port numbers are the single source of truth in
-# scripts/v4_t2_e1/common/parsec_paths.py's MCP_PORTS — change them there.
+# scripts/parsec/v4_t2_e1/common/parsec_paths.py's MCP_PORTS — change them there.
 SERVICES=(
   "platform:8086:sim"
   "github:8087:sim"

@@ -6,8 +6,8 @@ the original design doc):
 
     .capevolve/
       v4_t2_e1_common/
-        adapters  -> ../../scripts/v4_t2_e1/common/adapters   (symlink)
-        optimizer -> ../../scripts/v4_t2_e1/common/optimizer  (symlink)
+        adapters  -> ../../scripts/parsec/v4_t2_e1/common/adapters   (symlink)
+        optimizer -> ../../scripts/parsec/v4_t2_e1/common/optimizer  (symlink)
       v4_t2_e1_<task-id>/
         project/
           seed_capability/*.md   (8 files, real copies — a frozen snapshot)
@@ -28,7 +28,7 @@ import shutil
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 CAPEVOLVE_DIR = REPO_ROOT / ".capevolve"
 COMMON_ADAPTERS_SRC = Path(__file__).resolve().parent / "common" / "adapters"
 COMMON_OPTIMIZER_SRC = Path(__file__).resolve().parent / "common" / "optimizer"
@@ -85,7 +85,7 @@ TASK_IDS = [
 def render_capevolve_yaml(task_id: str) -> str:
     return f"""\
 # v4_t2_e1 — single-task optimization project for {task_id}.
-# See docs/superpowers/plans/2026-09-17-parsec-v4-task-by-task-optimization.md
+# See docs/plans/2026-09-17-parsec-v4-task-by-task-optimization.md on the parsec-history branch
 optimizer_skill: claude-code
 optimizer_model: claude-opus-5
 algorithm_skill: hill-climb

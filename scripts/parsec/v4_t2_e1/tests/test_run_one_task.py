@@ -1,4 +1,4 @@
-# scripts/v4_t2_e1/tests/test_run_one_task.py
+# scripts/parsec/v4_t2_e1/tests/test_run_one_task.py
 from __future__ import annotations
 
 import fcntl
