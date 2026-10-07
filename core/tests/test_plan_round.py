@@ -132,6 +132,60 @@ def test_high_stakes_bump_requires_a_clear_margin_over_the_runner_up():
     assert plan_round.estimate_branches(alpha_group, groups) == 1  # no bump: too close to beta
 
 
+def test_overlap_min_lowered_bundles_related_but_not_near_identical_clusters():
+    """Issue #676: round 1 of the first real multi-objective run produced 3 small,
+    single-lever candidates because 3 related clusters each fell short of the old
+    OVERLAP_MIN=0.5 and so each got its own slot. These three pairwise share exactly
+    1 of 3 tokens each (overlap 0.333) -- genuinely related (same "write" mechanism),
+    but nowhere near half-overlapping -- so they must bundle into one slot at the
+    lowered default while still NOT bundling at the old 0.5 bar."""
+    clusters = [
+        _cluster("write payment flow", ["1"], 0.1),
+        _cluster("write seat error", ["2"], 0.1),
+        _cluster("write baggage check", ["3"], 0.1),
+    ]
+    assert plan_round.OVERLAP_MIN < 0.5  # the lowering this test is for
+
+    groups = plan_round.group_clusters(clusters)  # default (lowered) OVERLAP_MIN
+    assert len(groups) == 1
+    assert len(groups[0]) == 3
+
+    old_threshold_groups = plan_round.group_clusters(clusters, overlap_min=0.5)
+    assert len(old_threshold_groups) == 3  # the old bar kept them apart -- this is the bug
+
+    unrelated = plan_round.group_clusters([
+        _cluster("payment method count violation", ["1"], 0.1),
+        _cluster("basic economy change never attempted", ["2"], 0.1),
+    ])
+    assert len(unrelated) == 2  # genuinely disjoint vocabularies still don't bundle
+
+
+def test_generic_shared_token_alone_does_not_bundle_short_signatures():
+    """Review on #681: lowering OVERLAP_MIN to 0.3 means a single shared token now
+    clears the bar for 3-token signatures (1/3 = 0.333 >= 0.3) even when it is a
+    generic failure-handling word, not a shared implementation surface. Concrete
+    repro: "retry seat lock" and "retry refund amount" are unrelated failure
+    mechanisms (seat locking vs refund amount) that merely both involved a retry --
+    the raw ratio clears OVERLAP_MIN, but they must NOT bundle."""
+    a, b = frozenset("retry seat lock".split()), frozenset("retry refund amount".split())
+    assert len(a & b) / min(len(a), len(b)) >= plan_round.OVERLAP_MIN  # raw ratio clears it
+
+    groups = plan_round.group_clusters([
+        _cluster("retry seat lock", ["1"], 0.1),
+        _cluster("retry refund amount", ["2"], 0.1),
+    ])
+    assert len(groups) == 2  # must stay separate: "retry" alone isn't shared root cause
+
+    # The legitimate case this PR's lowered threshold exists for must still bundle --
+    # same 1/3 raw overlap, but "write" is a shared implementation surface, not a
+    # generic strategy word, so it is NOT filtered and the bundle still happens.
+    legit = plan_round.group_clusters([
+        _cluster("write payment flow", ["1"], 0.1),
+        _cluster("write seat error", ["2"], 0.1),
+    ])
+    assert len(legit) == 1
+
+
 def test_max_branches_per_slot_only_clamps_down_never_up():
     clusters = [_cluster(f"shared surface {i}", ["t"], 0.1) for i in range(6)]
     # Make them all overlap (shared "shared surface" tokens) -> one big group of 6.

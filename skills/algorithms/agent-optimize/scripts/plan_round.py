@@ -36,7 +36,30 @@ from cap_evolve.specfile import spec_for_run
 #: literally diagnose/cluster.py's own OVERLAP_MIN threshold and formula
 #: (|A∩B| / min(|A|,|B|)), reproduced here (not imported) to avoid a cross-skill-directory
 #: import for one three-line formula; keep the two in sync if either threshold moves.
-OVERLAP_MIN = 0.5
+#:
+#: Issue #676: the first real multi-objective run's round 1 produced 3 small, narrow,
+#: single-lever candidates (one per cluster) because every pairwise overlap fell short of
+#: the old 0.5 bar, so three related-but-not-identically-worded root causes each got their
+#: own slot instead of being bundled into one substantial, coherently-combined candidate.
+#: Lowered to 0.3 so clusters that share SOME of their implementation surface (not half of
+#: it) still bundle — the user wants fewer, bigger, more-impactful candidates per round, not
+#: many tiny ones; see algorithm.md's "Bucketing edits within a slot" for the companion
+#: guidance change.
+OVERLAP_MIN = 0.3
+
+#: Generic failure-handling-strategy words that must never be the SOLE reason two
+#: signatures overlap — same category as diagnose/cluster.py's own ``_GENERIC``
+#: ("names THAT something failed, never WHY"), reproduced minimally here for the same
+#: reason OVERLAP_MIN is: avoiding a cross-skill-directory import. cluster.py's own
+#: corpus-stopword pass only strips a word like "retry" when it recurs in >65% of a
+#: BATCH's feedbacks — a batch where two UNRELATED clusters each happen to mention
+#: "retry" but it stays under that bar would carry it straight into both signatures,
+#: and with short (3-4 token) signatures one such coincidental word alone can clear
+#: OVERLAP_MIN. Stripped before computing overlap (not from the signature's displayed
+#: label) so bundling decisions ignore it but the printed label still shows it.
+_GENERIC_OVERLAP_TOKENS = frozenset("retry retried retries retrying attempt attempted "
+                                     "attempts again".split())
+
 
 #: Safety CEILING on branches per slot, not a target — a slot's estimate climbs with its
 #: own cluster count/uncertainty (see ``estimate_branches``) and is only ever clamped
@@ -51,7 +74,9 @@ HIGH_STAKES_SHARE = 0.4
 
 
 def _tokens(signature: str | None) -> frozenset[str]:
-    return frozenset((signature or "").split())
+    """Overlap-comparison tokens for a signature — generic strategy words excluded
+    (see ``_GENERIC_OVERLAP_TOKENS``) so they can't be the sole basis for bundling."""
+    return frozenset((signature or "").split()) - _GENERIC_OVERLAP_TOKENS
 
 
 def _overlap(a: frozenset[str], b: frozenset[str]) -> float:
