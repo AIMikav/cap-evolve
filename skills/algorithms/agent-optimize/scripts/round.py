@@ -49,6 +49,8 @@ import _bootstrap  # noqa: F401  # side-effect import: seeds sys.path for cap_ev
 import gate_check
 
 from cap_evolve import RunDir, harness
+from cap_evolve.gate import ParetoObjectiveError, _DEFAULT_PARETO_OBJECTIVES
+from cap_evolve.pareto_archive import ArchivePoint, ParetoArchive
 from cap_evolve.specfile import spec_for_run
 
 #: Gate measurement concurrency. The default is deliberately low; the ceiling is where the
@@ -56,6 +58,32 @@ from cap_evolve.specfile import spec_for_run
 #: it a verdict cannot resolve the effect the round is looking for and the round is refused.
 DEFAULT_CONCURRENCY = 8
 MAX_RESOLVING_CONCURRENCY = 25
+
+#: Issue #676: round 1 of the abandoned multi-objective run defaulted to --max-parallel 2
+#: (SKILL.md's own worked example), serializing a 3-candidate round for no reason — the
+#: round only had 3 candidates, nowhere near enough to need throttling. Separately, a human
+#: running 4 full-val evals BY HAND (outside round.py) at once hit real gateway
+#: contention/timeouts. Both point at the same fix: --max-parallel should default to running
+#: every candidate THIS round actually has, not a fixed low number, while the TOTAL
+#: concurrent rollout requests across all of them stays under one shared ceiling — so N
+#: candidates each get budget/N connections instead of N independent copies of
+#: --concurrency (which is how the 4-at-once contention happened). ponytail: a flat number,
+#: not measured per-gateway; raise it once real headroom is measured.
+DEFAULT_TOTAL_CONCURRENCY_BUDGET = 24
+
+
+def effective_concurrency(concurrency: int | None, max_parallel: int, budget: int) -> int | None:
+    """Per-eval rollout concurrency when up to ``max_parallel`` evals run at once.
+
+    Divides the shared TOTAL budget across the evals actually running concurrently (the
+    ThreadPoolExecutor's own worker count), so ``max_parallel`` candidates never each
+    independently open ``concurrency`` connections for ``max_parallel * concurrency`` total
+    — the real-world failure mode this exists to prevent (#676). Never raises ``concurrency``
+    above what was asked; only ever scales it down to fit the shared budget.
+    """
+    if not concurrency:
+        return concurrency
+    return max(1, min(concurrency, budget // max(1, max_parallel)))
 
 #: issue #585: --skip-screen-justification stopped being a fresh per-candidate judgment and
 #: became copy-pasted boilerplate ("consistent with cand_1/2/...", "...consistent with prior
@@ -607,20 +635,35 @@ def dominated_siblings(base_dir: Path, work: Path, tags: list[str]) -> dict[str,
             } if len(tags) >= 2 else {}
 
 
-def mergeable_pairs(run_dir, plan: dict, survivors: list[str]) -> tuple[list, list]:
-    """(pairs merge_stage tries to build, pairs it skips as same-cluster alternatives).
+def mergeable_pairs(run_dir, plan: dict, survivors: list[str], best: str) -> tuple[list, list]:
+    """(pairs merge_stage tries to build, pairs it skips as structurally conflicting).
 
     The ONE definition of "a merge applied this round", shared by merge_stage and #630's
     --no-merge budget, so the budget can never count a pair the merge stage would not try.
+
+    Disjointness is GEPA's Appendix D mergeable-ness check (``merge_search.is_mergeable``):
+    two siblings are attempted iff, for every module (file / per-function block — see that
+    function), at most one of them diverged from the round's parent ``best`` (their common
+    ancestor). This replaced an earlier same-diagnose-cluster heuristic that skipped siblings
+    sharing a cluster WITHOUT ever looking at their files — the common real case (two children
+    of one parent fixing the same cluster via different, disjoint files/components) was never
+    even attempted under that heuristic (#684 item 4's confirmed gap).
     """
     import itertools
 
+    import merge_search
+
+    base_dir = run_dir.candidate_dir(best)
+    work = run_dir.root / "work"
     pairs, skipped = [], []
     for a, b in itertools.combinations(sorted(survivors), 2):
         ca, cb = set(cluster_ids_for(run_dir, plan, a)), set(cluster_ids_for(run_dir, plan, b))
-        if ca & cb:
-            skipped.append({"pair": [a, b], "reason": f"same diagnose cluster(s) "
-                            f"{sorted(ca & cb)} — alternative fixes, not complementary ones"})
+        check = merge_search.is_mergeable(work / a, work / b, base_dir)
+        if not check["mergeable"]:
+            skipped.append({"pair": [a, b], "reason": "both independently diverged from the "
+                            f"round parent {best!r} on the same module(s) — a real edit "
+                            "collision, not a complementary pair",
+                            "conflicts": check["conflicts"]})
         else:
             pairs.append((a, b, ca, cb))
     return pairs, skipped
@@ -639,7 +682,7 @@ def merge_stage(run_dir, project: Path, best: str, survivors: list[str], plan: d
     seed = int(run_dir.read_splits().seed)
     screens = {t: latest_screen(run_dir, t) for t in survivors}
     merges = []
-    pairs, skipped = mergeable_pairs(run_dir, plan, survivors)
+    pairs, skipped = mergeable_pairs(run_dir, plan, survivors, best)
     for a, b, ca, cb in pairs:
         tag = f"merge_{a}_{b}"
         built = merge_mod.build_merge_dir(base_dir, work / a, work / b, work / tag)
@@ -722,14 +765,54 @@ class GateCheckFailed(RuntimeError):
             "already on disk, so re-gating costs nothing.")
 
 
+def _objective_metrics(run_dir: RunDir, tags, split: str, names: set[str]) -> tuple[dict, dict]:
+    """``({name: value}, {name: stderr})`` for every declared non-reward objective/constraint
+    NAME this script can actually source, for ``--mode pareto``/``epsilon_constraint``
+    (issue #684 items 1-2).
+
+    Only "cost" is derivable today — ``harness.candidate_cost_objective`` is the only
+    per-task secondary metric #676 persisted alongside reward (see its docstring for why
+    latency/tokens are not). Any OTHER declared name is simply left out of both dicts, which
+    makes ``gate.py``'s own ``ParetoObjectiveError`` fire with its existing "no value on this
+    run" refusal — the same hard-refuse discipline gate.py already applies, not a new one
+    invented here. ``tags`` may be a sequence (pooled control replicates), same as
+    ``harness.split_result_from_rollouts``.
+    """
+    values, stderrs = {}, {}
+    if "cost" in names:
+        mean_c, se_c = harness.candidate_cost_objective(run_dir, tags, split)
+        if mean_c is not None:
+            values["cost"], stderrs["cost"] = mean_c, se_c
+    return values, stderrs
+
+
 def _gate(run_dir: Path, tag: str, k_se: float, mode: str, veto: bool,
-          current: str | None = None) -> dict:
+          current: str | None = None, *, objectives: list | None = None,
+          metrics_candidate: dict | None = None, metrics_current: dict | None = None,
+          metrics_stderr_candidate: dict | None = None, metrics_stderr_current: dict | None = None,
+          constraints: list | None = None) -> dict:
+    """Run gate_check.py for one tag. ``objectives``/``metrics-*``/``constraints`` are forwarded
+    verbatim for ``--mode pareto``/``epsilon_constraint`` (issue #684 items 1-2) — see
+    ``_objective_metrics`` for where the candidate's own ``metrics_candidate`` values come from.
+    """
     cmd = [sys.executable, str(HERE / "gate_check.py"), "--run-dir", str(run_dir),
            "--candidate", tag, "--k-se", str(k_se), "--mode", mode]
     if current:
         cmd += ["--current", current]
     if veto:
         cmd.append("--veto-regressions")
+    if objectives is not None:
+        cmd += ["--objectives", json.dumps(objectives)]
+    if metrics_candidate is not None:
+        cmd += ["--metrics-candidate", json.dumps(metrics_candidate)]
+    if metrics_current is not None:
+        cmd += ["--metrics-current", json.dumps(metrics_current)]
+    if metrics_stderr_candidate is not None:
+        cmd += ["--metrics-stderr-candidate", json.dumps(metrics_stderr_candidate)]
+    if metrics_stderr_current is not None:
+        cmd += ["--metrics-stderr-current", json.dumps(metrics_stderr_current)]
+    if constraints is not None:
+        cmd += ["--constraints", json.dumps(constraints)]
     p = subprocess.run(cmd, capture_output=True, text=True)
     # A non-zero rc is a failure whether or not its stdout parses. gate_check.py's own two
     # `return 2` paths (no --current and no best_id; no rollouts for the tag) print WELL-FORMED
@@ -747,16 +830,19 @@ def _gate(run_dir: Path, tag: str, k_se: float, mode: str, veto: bool,
 
 
 def gate_unless_eval_failed(ev: dict, run_dir: Path, tag: str, k_se: float, mode: str,
-                            veto: bool, current: str | None = None) -> dict:
+                            veto: bool, current: str | None = None, **gate_kwargs) -> dict:
     """Gate a tag, unless its own EVALUATION failed — then there was never anything to gate.
 
     The distinction the round needs and did not have. A candidate whose eval died has no
     rollouts, so ``gate_check.py`` exits 2 for a legitimate reason and the row belongs in the
     table carrying its ``eval_rc``/``eval_error``. A candidate whose eval SUCCEEDED and whose
     gate still failed is a framework bug, and the round stops.
+
+    ``**gate_kwargs`` (``objectives``/``metrics_*``/``constraints``) are forwarded to ``_gate``
+    verbatim — see its docstring.
     """
     try:
-        return _gate(run_dir, tag, k_se, mode, veto, current)
+        return _gate(run_dir, tag, k_se, mode, veto, current, **gate_kwargs)
     except GateCheckFailed:
         if ev.get("rc") or ev.get("error"):
             return {}
@@ -891,9 +977,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="comma-separated tags that already exist under $R/work/")
     p.add_argument("--n-trials", type=int, required=True)
     p.add_argument("--k-se", type=float, default=1.0)
-    # choices= imported from gate_check.py, never repeated here: this value is forwarded to it
-    # verbatim, so a value only one side accepts empties the whole round table (run 33492876620
+    # choices= derived from gate_check.py's GATE_MODES verbatim: this value is forwarded to
+    # _gate() and a value only one side accepts empties the whole round table (run 33492876620
     # round 3, `--mode val` — the caller meant `--split val`, which is the default anyway).
+    # "pareto" and "epsilon_constraint" (issue #684 items 1-2) are first-class choices here:
+    # _gate() forwards --objectives/--metrics-*/--constraints to gate_check.py, and --mode
+    # pareto additionally builds/updates a persistent cap_evolve.pareto_archive.ParetoArchive
+    # (see the gate stage below) rather than a one-shot pairwise comparison.
     p.add_argument("--mode", default="paired", choices=gate_check.GATE_MODES)
     p.add_argument("--split", default="val")
     p.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY,
@@ -904,8 +994,20 @@ def build_parser() -> argparse.ArgumentParser:
                         "0.100 at conc 8, tasks moving 10/12 vs 5/12, arm-level |delta| 0.1167 "
                         "vs 0.0333. A gate at conc 25 cannot resolve any effect smaller than "
                         "0.08, which is larger than most real edits. Explore fast, gate slow.")
-    p.add_argument("--max-parallel", type=int, default=4,
-                   help="how many candidate evals run at once")
+    p.add_argument("--max-parallel", type=int, default=None,
+                   help="how many candidate evals run at once. Default: this round's own "
+                        "candidate count (every tag passed to --candidates runs concurrently) "
+                        "— never throttled down just because N is small. --concurrency is then "
+                        "scaled down per eval (see --max-total-concurrency) so this is NOT "
+                        "max_parallel independent copies of --concurrency.")
+    p.add_argument("--max-total-concurrency", type=int, default=DEFAULT_TOTAL_CONCURRENCY_BUDGET,
+                   help=f"shared ceiling on TOTAL concurrent rollout requests across every "
+                        f"simultaneously-running eval this invocation starts (default "
+                        f"{DEFAULT_TOTAL_CONCURRENCY_BUDGET}). --concurrency is divided across "
+                        "the --max-parallel evals actually running at once rather than applied "
+                        "to each independently, so running more candidates in parallel lowers "
+                        "each one's own concurrency instead of multiplying the total load (#676: "
+                        "4 full-val evals run by hand at once caused real gateway contention).")
     p.add_argument("--gate-against", choices=["parent", "control"], default="parent",
                    help="'control' pairs each candidate against THIS round's null control "
                         "instead of the stored parent rollouts. Use it whenever this round's "
@@ -991,6 +1093,12 @@ def main(argv=None) -> int:
     except SingleCandidateUnjustified as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+    except ParetoObjectiveError as exc:
+        # Same hard-refuse discipline gate_check.py's own --mode pareto/epsilon_constraint
+        # CLI path already uses (issue #684 items 1-2): a declared objective/constraint this
+        # script cannot source a value for is refused, not silently gated on reward alone.
+        print(json.dumps({"error": f"pareto/epsilon_constraint gate: {exc}"}, indent=2))
+        return 2
 
 
 def _main(argv=None) -> int:
@@ -1033,6 +1141,14 @@ def _main(argv=None) -> int:
     if missing:
         print(json.dumps({"error": f"tags not found under {work}: {missing}"}, indent=2))
         return 2
+
+    # #676: default to running every candidate THIS round has, never a fixed low number —
+    # the bottleneck was serializing small (2-3 candidate) rounds for no reason. An explicit
+    # --max-parallel is always honored verbatim.
+    if args.max_parallel is None:
+        args.max_parallel = max(1, len(tags))
+    EFFECTIVE_CONCURRENCY = effective_concurrency(
+        args.concurrency, args.max_parallel, args.max_total_concurrency)
 
     # Default N>=3 sibling candidates per round, ENFORCED rather than merely recommended
     # (SKILL.md step 2) — see SingleCandidateUnjustified's docstring for why. Resolved before
@@ -1138,7 +1254,7 @@ def _main(argv=None) -> int:
             res = list(pool.map(lambda t: _screen(
                 Path(args.run_dir), project, t, ids=(plan.get(t) or {}).get("ids"),
                 tier=args.screen_tier, rationale=(plan.get(t) or {}).get("rationale"),
-                concurrency=args.concurrency), unscreened))
+                concurrency=EFFECTIVE_CONCURRENCY), unscreened))
         for t, r in zip(unscreened, res):
             auto_screened[t] = r
             screened_by_tag[t] = not r.get("rc") and latest_screen(run_dir, t) is not None
@@ -1166,7 +1282,7 @@ def _main(argv=None) -> int:
     # skipped by merge_stage for zero rollouts. (An unscreened survivor means no merge applied,
     # so the screen budget above and this one never charge the same round twice.)
     merge_applies = len(survivors) >= 2 and all(screened_by_tag[t] for t in survivors)
-    eligible_pairs = ([[a, b] for a, b, _, _ in mergeable_pairs(run_dir, plan, survivors)[0]]
+    eligible_pairs = ([[a, b] for a, b, _, _ in mergeable_pairs(run_dir, plan, survivors, best)[0]]
                       if merge_applies else [])
     MERGE_SKIP = None
     if args.no_merge and eligible_pairs:
@@ -1182,7 +1298,7 @@ def _main(argv=None) -> int:
         run_dir.log_event("merge_compliance_warning", **MERGE_SKIP)
         if refused:
             print(json.dumps({
-                "error": f"--no-merge declines merging screened, cluster-disjoint survivors "
+                "error": f"--no-merge declines merging screened, mergeable survivors "
                          f"{eligible_pairs}, and this run already spent its "
                          f"max_merge_skips={max_merge_skips} budget",
                 "why": "a merge costs one subset screen and gates two survivors' bytes once "
@@ -1262,7 +1378,7 @@ def _main(argv=None) -> int:
     # #438: pairwise merges of disjoint survivors, each screened, BEFORE any full-val gate.
     MERGE = None
     if not args.no_merge and merge_applies:
-        MERGE = merge_stage(run_dir, project, best, survivors, plan, args.concurrency,
+        MERGE = merge_stage(run_dir, project, best, survivors, plan, EFFECTIVE_CONCURRENCY,
                             args.max_parallel, pregate_cmd=PREGATE)
         for m in MERGE["merges"]:
             node_parents[m["tag"]] = m["parents"]
@@ -1278,7 +1394,7 @@ def _main(argv=None) -> int:
     STEM = table_stem(run_dir)
     PRIOR_CTL = prior_attempt_controls(run_dir)
     CTL = control_tag(run_dir)
-    MEASUREMENT = measurement_context(args.split, args.n_trials, args.concurrency)
+    MEASUREMENT = measurement_context(args.split, args.n_trials, EFFECTIVE_CONCURRENCY)
     # One shared identifier for every candidate THIS invocation gates, so the dashboard can
     # group same-round candidates instead of showing them as if they had run sequentially
     # (they are gated together but committed one at a time, serially, by the driver).
@@ -1355,13 +1471,25 @@ def _main(argv=None) -> int:
     with ThreadPoolExecutor(max_workers=max(1, args.max_parallel)) as pool:
         evals = list(pool.map(
             lambda t: _evaluate(Path(args.run_dir), project, t, args.split,
-                                args.n_trials, args.concurrency), tags))
+                                args.n_trials, EFFECTIVE_CONCURRENCY), tags))
     if REUSED:
         # Reused replicates are gated exactly like measured ones (gate_check reads persisted
         # rollouts), so they join the row set here without an eval behind them.
         evals = [{"tag": t, "rc": 0, "reused": True} for t in ctl_tags] + evals
 
     # Gate serially against the CURRENT best; the driver commits, so best_id is stable here.
+    #
+    # issue #684 item 6: PRIMARY reference, inverted. Measurement drift between rounds
+    # (~0.10 on a real run) is comparable in magnitude to the real effects being chased
+    # (~0.02-0.09), so a verdict computed against the stored PARENT reward carries that
+    # drift baked in as if it were the edit. When this round measured null-control
+    # replicates (the standard case — ``--control-replicates 2`` is the default), gate
+    # PRIMARILY against them instead: byte-identical copies of the parent measured in
+    # THIS round, pooled per task, so drift is cancelled by construction. The
+    # raw-vs-stored-parent comparison is kept below as a SECONDARY diagnostic
+    # (``r["raw_vs_parent"]``) — useful for detecting drift itself, no longer the
+    # deciding factor. Falls back to the stored parent, unchanged, whenever no control
+    # was measured this round (``--no-control``) — nothing to be control-relative to.
     gate_ref = best
     if args.gate_against == "control":
         if args.no_control:
@@ -1369,9 +1497,11 @@ def _main(argv=None) -> int:
                                        "--no-control"}, indent=2))
             return 2
         gate_ref = CTL
+    elif ctl_tags:
+        gate_ref = list(ctl_tags)  # pooled control replicates — now the PRIMARY reference
     # TWO distinct objects, kept distinct. `gate_res` is what deltas and thresholds are measured
-    # against (the concurrent control under --gate-against control); `parent_res` is the
-    # candidate this round is climbing from. Under --gate-against parent they coincide.
+    # against (the control, pooled, whenever one was measured this round); `parent_res` is the
+    # candidate this round is climbing from. They coincide only when no control exists.
     #
     # Conflating them reported the CONTROL's reward under the PARENT's tag: on run 32871360361
     # the table said `parent: {tag: 'seed', reward: 0.34}` while baseline.json said the seed
@@ -1383,17 +1513,58 @@ def _main(argv=None) -> int:
     parent_res = (gate_res if gate_ref == best
                   else harness.split_result_from_rollouts(run_dir, best, args.split))
     parent = gate_res  # deltas/thresholds are always against the gate reference
+
+    # #684 items 1-2: declared multi-objective config, resolved ONCE for this round. Native
+    # support in round.py — no longer "pareto excluded from --mode, gate by hand" — forwards
+    # these through _gate() to gate_check.py exactly as --objectives/--metrics-*/--constraints
+    # already accept when called directly.
+    PARETO_OBJECTIVES = None
+    CONSTRAINTS = None
+    OBJ_NAMES: set[str] = set()
+    if args.mode in ("pareto", "epsilon_constraint"):
+        if args.mode == "pareto":
+            PARETO_OBJECTIVES = spec.get("objectives") or [dict(o) for o in _DEFAULT_PARETO_OBJECTIVES]
+            OBJ_NAMES = {o["name"] for o in PARETO_OBJECTIVES if o["name"] != "reward"}
+        else:
+            CONSTRAINTS = spec.get("constraints")
+            if not CONSTRAINTS:
+                print(json.dumps({
+                    "error": "gate_mode epsilon_constraint requires a non-empty `constraints:` "
+                             "list in capevolve.yaml, e.g. constraints: [{name: cost, max: 1.0}]",
+                }, indent=2))
+                return 2
+            OBJ_NAMES = {c["name"] for c in CONSTRAINTS}
+
+    # The subprocess `--current` flag for gate_check.py — a comma-joined tag list when
+    # gate_ref is the pooled control, else the single tag, else unset (gate_check.py's own
+    # default: the run's stored best_id).
+    gate_ref_arg = (",".join(gate_ref) if isinstance(gate_ref, list)
+                    else (gate_ref if gate_ref != best else None))
     rows = []
     for ev in evals:
         tag = ev["tag"]
+        # The candidate's own non-reward objective/constraint values (e.g. cost), sourced
+        # from its own persisted rollouts — never from the reference side, which gets its
+        # OWN call below with ITS tag.
+        cand_values, cand_stderrs = ((_objective_metrics(run_dir, tag, args.split, OBJ_NAMES))
+                                     if OBJ_NAMES else ({}, {}))
+        gate_kwargs = {}
+        if args.mode == "pareto":
+            ref_values, ref_stderrs = _objective_metrics(run_dir, gate_ref, args.split, OBJ_NAMES)
+            gate_kwargs = dict(objectives=PARETO_OBJECTIVES,
+                               metrics_candidate=cand_values, metrics_current=ref_values,
+                               metrics_stderr_candidate=cand_stderrs,
+                               metrics_stderr_current=ref_stderrs)
+        elif args.mode == "epsilon_constraint":
+            gate_kwargs = dict(constraints=CONSTRAINTS, metrics_candidate=cand_values,
+                               metrics_stderr_candidate=cand_stderrs)
         if tag == CTL:
             g = gate_unless_eval_failed(ev, Path(args.run_dir), tag, args.k_se, args.mode,
-                                        args.veto_regressions)
+                                        args.veto_regressions, **gate_kwargs)
         else:
             g = gate_unless_eval_failed(ev, Path(args.run_dir), tag, args.k_se, args.mode,
                                         args.veto_regressions,
-                                        current=gate_ref if args.gate_against == "control"
-                                        else None)
+                                        current=gate_ref_arg, **gate_kwargs)
         rows.append({
             "tag": tag,
             "reward": (g.get("candidate") or {}).get("reward"),
@@ -1428,47 +1599,101 @@ def _main(argv=None) -> int:
             "eval_error": ev.get("error"),
             # True only for a control replicate this round read back instead of measuring.
             "reused": bool(ev.get("reused")),
+            # #684 items 1-2: this candidate's own non-reward objective/constraint values
+            # (e.g. {"cost": 0.42}), sourced from ITS persisted rollouts — {} on every
+            # single-metric mode, unchanged from before this feature existed.
+            **({"objective_values": cand_values, "objective_stderrs": cand_stderrs}
+               if OBJ_NAMES else {}),
         })
 
     # Nothing derived from these rows — the drift-free re-gate, the evidence bar, the noise
     # floor, the written table — is meaningful if a row was never judged. Check before any of it.
     assert_rows_were_judged(rows)
 
-    # A parent-gated round has ALREADY measured the drift-free comparison — it just was not
-    # reporting it. On run 32871360361 round 4 the table showed cand4 at +0.15 against the seed's
-    # stored 0.38 with a bar of 0.11 (drift), i.e. marginal; the same round's two concurrent
-    # controls both read exactly 0.27, so the drift-free answer from the identical rollouts is
-    # +0.26 against a bar of 0.00. The 0.11 belongs to WHEN the seed was measured, not to cand4,
-    # so parent-mode gating understated the effect and inflated the bar at the same time.
+    # #684 item 1: the NATIVE pareto gate. gate_check.py's own --mode pareto verdict (above,
+    # per row) is still a one-shot pairwise comparison against gate_ref — useful as a sanity
+    # diagnostic, but it is not what decides acceptance here. The archive IS: a candidate is
+    # accepted iff it actually gets a slot in the run's persistent frontier, which is the
+    # structural fix issue #684 asked for (today's gate had no persistent frontier at all).
+    PARETO_ARCHIVE_RESULT = None
+    if args.mode == "pareto":
+        archive_path = run_dir.root / "pareto_archive.json"
+        archive = ParetoArchive.load_or_create(archive_path, PARETO_OBJECTIVES)
+        if not archive.points:
+            # First pareto gate of this run: seed the archive with the current gate reference
+            # (parent or control) itself, so the first candidate is judged against a real
+            # baseline point rather than joining an empty frontier for free.
+            ref_obj_values, ref_obj_stderrs = _objective_metrics(
+                run_dir, gate_ref, args.split, OBJ_NAMES)
+            archive.points.append(ArchivePoint(
+                tag=gate_ref,
+                values={"reward": gate_res.reward, **ref_obj_values},
+                stderr={"reward": gate_res.stderr, **ref_obj_stderrs},
+                round=int(run_dir.spent.iterations)))
+        for r in rows:
+            if r["tag"] in ctl_tags or r.get("reward") is None:
+                continue
+            values = {"reward": r["reward"], **(r.get("objective_values") or {})}
+            stderrs = {"reward": r.get("stderr") or 0.0, **(r.get("objective_stderrs") or {})}
+            inserted, reason = archive.try_insert(
+                r["tag"], values, stderrs, k_se=args.k_se,
+                round_num=int(run_dir.spent.iterations))
+            # THE verdict for pareto mode: accept iff the archive insertion succeeded. This
+            # overrides gate_check.py's own one-shot pairwise verdict recorded above.
+            r["verdict"] = "accept" if inserted else "reject"
+            r["pareto_archive"] = {"inserted": inserted, "reason": reason, "values": values,
+                                   "stderrs": stderrs, "capacity": archive.capacity,
+                                   "size_after": len(archive.points)}
+        archive.save(archive_path)
+        PARETO_ARCHIVE_RESULT = archive.to_dict()
+
+    # issue #684 item 6: TWO cross-checks, kept distinct, with the PRIMARY/secondary roles
+    # inverted from before. `verdict`/`gate_delta`/`gate_threshold` on each row are now
+    # computed primarily against the pooled control (set via `gate_ref`/`gate_ref_arg`
+    # above) whenever one was measured this round — see the comment at `gate_ref`'s
+    # assignment. The two blocks below:
     #
-    # Reported rather than made the default: changing the default gate mode on one benchmark's
-    # drift would be a guess about every other workload, while an extra comparison is strictly
-    # more information and simply agrees with the primary one where there is no drift. Costs no
-    # rollouts — the controls are already evaluated and gate_check reads stored data.
-    if args.gate_against != "control" and ctl_tags:
+    #   * `control_relative` — kept at its PRE-#684 field name/shape for backward
+    #     compatibility (commit.py's `--reject-basis drift_control`, the dashboard's
+    #     control_relative_verdict/_delta panels). It is the SAME control-pooled
+    #     comparison the top-level fields now use as primary, so under the new default it
+    #     is intentionally REDUNDANT with `verdict`/`gate_delta` — there is no longer a
+    #     disagreement for `drift_control` to resolve, because the thing it used to
+    #     escalate TO is now what decided in the first place.
+    #   * `raw_vs_parent` — NEW: the comparison that used to be primary (against the
+    #     parent's STORED reward from an earlier round), demoted to secondary. Where it
+    #     disagrees with the (now-primary) control-relative verdict, the gap IS drift, not
+    #     the edit — useful for detecting drift itself, never for deciding.
+    #
+    # On run 32871360361 round 4 the table showed cand4 at +0.15 against the seed's stored
+    # 0.38 with a bar of 0.11 (drift), i.e. marginal; the same round's two concurrent
+    # controls both read exactly 0.27, so the drift-free (now PRIMARY) answer from the
+    # identical rollouts is +0.26 against a bar of 0.00 — the 0.11 belonged to WHEN the
+    # seed was measured, not to cand4. Costs no rollouts — both sides are already evaluated
+    # and gate_check reads stored data.
+    #
+    # Skipped for pareto/epsilon_constraint (#684 items 1-2): this diagnostic re-gates against
+    # the control with the SAME --mode but no objective/constraint metrics threaded through —
+    # ponytail: a real drift-free multi-objective comparison would need the control's own
+    # cand_values too; add if a multi-objective run's drift turns out to matter in practice.
+    # pareto's real verdict is decided by the archive above, not by this diagnostic anyway.
+    if args.mode not in ("pareto", "epsilon_constraint") and args.gate_against != "control" and ctl_tags:
         for r in rows:
             if r["tag"] in ctl_tags or r.get("reward") is None:
                 continue
             # POOLED over every control replicate this round has, not just the one carrying
-            # the round-scoped tag. They are byte-identical copies of the same parent measured
-            # in the same round, so they are draws from one distribution and pooling their
-            # trials per task is the lower-variance estimate of the same quantity — for free,
-            # since these rollouts are already on disk. Measuring against a single replicate is
-            # what made this comparison a coin flip: the same candidate read +0.0867 against
-            # one replicate and +0.0067 against the other.
-            g = _gate(Path(args.run_dir), r["tag"], args.k_se, args.mode,
-                      args.veto_regressions, current=",".join(ctl_tags))
+            # the round-scoped tag — the same reference the primary verdict above now uses.
+            g_ctl = _gate(Path(args.run_dir), r["tag"], args.k_se, args.mode,
+                         args.veto_regressions, current=",".join(ctl_tags))
             r["control_relative"] = {
                 "reference": ctl_tags if len(ctl_tags) > 1 else CTL,
-                "gate_delta": (g.get("gate") or {}).get("delta"),
-                "gate_threshold": (g.get("gate") or {}).get("threshold"),
-                "verdict": g.get("verdict"),
-                "reading": ("the same comparison with the DRIFT removed: this candidate against "
-                            f"{len(ctl_tags)} byte-identical control(s) measured in this round — "
-                            "their trials POOLED per task, so the reference carries less of its "
-                            "own measurement error than any single replicate — rather than "
-                            "against a reward measured earlier. Where the two disagree, the "
-                            "difference is drift, not the edit."
+                "gate_delta": (g_ctl.get("gate") or {}).get("delta"),
+                "gate_threshold": (g_ctl.get("gate") or {}).get("threshold"),
+                "verdict": g_ctl.get("verdict"),
+                "reading": ("this is now the PRIMARY comparison (issue #684 item 6): the same "
+                            "numbers as `verdict`/`gate_delta` above, kept under this field name "
+                            "for backward compatibility with commit.py's --reject-basis "
+                            "drift_control and the dashboard's control_relative panels."
                             if not REUSED else
                             f"this candidate against a byte-identical control of the SAME parent "
                             f"measured in iteration {REUSED['from_iteration']} and reused here. "
@@ -1476,6 +1701,21 @@ def _main(argv=None) -> int:
                             "since that iteration, so it is not the drift-free comparison a "
                             "concurrent control gives — re-run with --no-reuse-control (or "
                             "--gate-against control, which never reuses) to buy that."),
+            }
+            g_par = _gate(Path(args.run_dir), r["tag"], args.k_se, args.mode,
+                         args.veto_regressions, current=best)
+            r["raw_vs_parent"] = {
+                "reference": best,
+                "gate_delta": (g_par.get("gate") or {}).get("delta"),
+                "gate_threshold": (g_par.get("gate") or {}).get("threshold"),
+                "verdict": g_par.get("verdict"),
+                "reading": ("SECONDARY — no longer the deciding comparison (issue #684 item "
+                            "6). This candidate against the parent's reward as STORED from an "
+                            "earlier round, carrying whatever re-measurement drift happened "
+                            "since. The PRIMARY verdict (`verdict`/`gate_delta` above, == "
+                            "`control_relative`) cancels that drift by construction. Where the "
+                            "two disagree, the difference is drift, not the edit; this field "
+                            "exists to show you that gap, not to override the primary verdict."),
             }
 
     # Would the verdict have survived a different control replicate? On run 32871360361 round 3
@@ -1491,7 +1731,10 @@ def _main(argv=None) -> int:
     # null result positive exactly that way, unchecked because the round gated against the stored
     # parent. With --control-replicates 2 the default, this check now always runs whenever there
     # is more than one control block, in EITHER gate mode.
-    if len(ctl_tags) > 1:
+    #
+    # Skipped for pareto/epsilon_constraint, same reason as the control_relative block above:
+    # this diagnostic's re-gate carries no objective/constraint metrics.
+    if args.mode not in ("pareto", "epsilon_constraint") and len(ctl_tags) > 1:
         for r in rows:
             if r["tag"] in ctl_tags or r.get("reward") is None:
                 continue
@@ -1506,14 +1749,20 @@ def _main(argv=None) -> int:
             if not r["verdict_stable"]:
                 r["verdict"] = "inconclusive"
 
+    # issue #684 item 6: true whenever the PRIMARY verdict above is control-relative — the
+    # explicit --gate-against control mode, or (now the default) a parent-mode round that
+    # measured null-control replicates. False only when no control exists at all this round
+    # (--no-control), in which case gate_ref falls back to best, unchanged from before.
+    CONTROL_PRIMARY = gate_ref != best
+
     ctl = next((r for r in rows if r["tag"] == CTL), None)
     # The floor must be the control's delta against the STORED parent, never against whatever
-    # this round gated on. With --gate-against control the control IS the reference, so
+    # this round gated on. Under a control-primary verdict the control IS the reference, so
     # delta_vs_parent is 0.0 by construction — reporting that as the noise floor would claim
     # zero re-measurement noise, the single most dangerous number this script can print.
     floor = None
     if ctl is not None:
-        if args.gate_against == "control":
+        if CONTROL_PRIMARY:
             floor = abs(ctl["gate_delta"]) if ctl.get("gate_delta") is not None else None
         elif ctl["delta_vs_gate_ref"] is not None:
             floor = abs(ctl["delta_vs_gate_ref"])
@@ -1534,16 +1783,17 @@ def _main(argv=None) -> int:
         rewards = [r["reward"] for r in pooled_rows]
         null_delta = round(max(rewards) - min(rewards), 4)
     conc_warning = None
-    if args.concurrency and args.concurrency > 12:
+    if EFFECTIVE_CONCURRENCY and EFFECTIVE_CONCURRENCY > 12:
         conc_warning = (
-            f"GATE RAN AT CONCURRENCY {args.concurrency}. Measured on this benchmark, "
+            f"GATE RAN AT CONCURRENCY {EFFECTIVE_CONCURRENCY}. Measured on this benchmark, "
             "byte-identical code at identical seeds moves ~0.08 at the arm level above conc 25 "
             "and ~0.03 at conc 8. A verdict from this round can therefore not resolve an effect "
             "smaller than roughly 0.08. Re-run the gate at --concurrency 8 before believing an "
             "accept.")
 
     prior_settings = prior_round_settings(run_dir)
-    parallel_warning = parallel_drift_warning(prior_settings, args.concurrency, args.max_parallel)
+    parallel_warning = parallel_drift_warning(prior_settings, EFFECTIVE_CONCURRENCY,
+                                              args.max_parallel)
     out = {
         # Which gate of this iteration this is. On the live run nothing in the output
         # distinguished "second opinion on iteration 1" from "iteration 1", so an operator
@@ -1563,6 +1813,11 @@ def _main(argv=None) -> int:
         # What the deltas and thresholds in `candidates` are actually measured against.
         "gate_reference": {"tag": gate_ref, "mode": args.gate_against,
                            "reward": gate_res.reward, "stderr": gate_res.stderr},
+        # issue #684 item 6: the de-facto PRIMARY accept/reject signal this round actually
+        # used — distinct from `gate_reference.mode`, which only echoes the --gate-against
+        # flag. "control" whenever a control was measured (the default, now), "parent" only
+        # when none exists (--no-control) and the stored-parent fallback applies.
+        "primary_signal": "control" if CONTROL_PRIMARY else "parent",
         # The round's OWN drift: identical-or-parent bytes measured now versus what the parent
         # measured when it was scored. Non-null only when they are different measurements.
         "parent_vs_gate_ref_drift": (None if gate_ref == best else
@@ -1601,7 +1856,9 @@ def _main(argv=None) -> int:
                                       "no earlier round measured THIS parent's replicates under "
                                       "this same measurement context — a new parent has no "
                                       "established noise floor, so it must be measured")}),
-        "measurement_concurrency": args.concurrency,
+        "measurement_concurrency": EFFECTIVE_CONCURRENCY,
+        "requested_concurrency": args.concurrency,
+        "max_total_concurrency": args.max_total_concurrency,
         "concurrency_warning": conc_warning,
         "measurement_max_parallel": args.max_parallel,
         "parallel_warning": parallel_warning,
@@ -1618,8 +1875,8 @@ def _main(argv=None) -> int:
         "gated_against": {"tag": gate_ref, "mode": args.gate_against},
         "noise_floor_from_control": floor,
         "noise_floor_basis": ("control vs the STORED parent rollouts (differing trial counts are "
-                              "part of this floor, which is the point)" if args.gate_against ==
-                              "control" else "control vs the parent it was copied from"),
+                              "part of this floor, which is the point)" if CONTROL_PRIMARY
+                              else "control vs the parent it was copied from"),
         # ONE bar, matched to how this round actually gated. Reporting several numbers and
         # leaving the driver to choose is not neutral: on run 32871360361 round 2 the table
         # showed cand2 beating its CONCURRENT control by +0.19 (three times the k_se threshold,
@@ -1630,18 +1887,21 @@ def _main(argv=None) -> int:
         # resolved the contradiction conservatively, and booked a REJECT on the best candidate of
         # the run.
         #
-        # Which bar is right depends entirely on what the delta was measured against:
-        #   * control mode — the delta is against a control measured in THIS round, so drift is
-        #     already cancelled and the bar is the gap between identical replicates.
-        #   * parent mode  — the delta is against a reward measured in an earlier round, so drift
-        #     is inside it and the bar has to include the control's drift as well.
+        # Which bar is right depends entirely on what the delta was measured against (issue
+        # #684 item 6: now a function of CONTROL_PRIMARY, not literally args.gate_against —
+        # the default parent-mode round is control-primary too, whenever it measured one):
+        #   * control-primary — the delta is against a control measured in THIS round, so
+        #     drift is already cancelled and the bar is the gap between identical replicates.
+        #   * parent-primary  — the delta is against a reward measured in an earlier round
+        #     (only when no control exists at all this round), so drift is inside it and the
+        #     bar has to include the control's drift as well.
         "evidence_bar": {
-            "value": (null_delta if args.gate_against == "control"
+            "value": (null_delta if CONTROL_PRIMARY
                       else (None if (null_delta is None and floor is None)
                             else max(null_delta or 0.0, floor or 0.0))),
             "basis": ("gap between byte-identical control replicates measured in THIS round — "
-                      "drift is cancelled by gating against a concurrent control"
-                      if args.gate_against == "control" else
+                      "drift is cancelled by gating against the (now primary) control"
+                      if CONTROL_PRIMARY else
                       "the larger of the replicate gap and the control's drift against the "
                       "stored parent, because this round's deltas ARE against that stored "
                       "reward and carry its drift"),
@@ -1681,12 +1941,13 @@ def _main(argv=None) -> int:
             "a candidate gated against a concurrent control has to clear, because that "
             "comparison never contained the drift. Do not re-derive a delta against the stored "
             "parent and reject on it; that puts the drift back in."
-            if args.gate_against == "control" else
+            if CONTROL_PRIMARY else
             "ctl_null is a byte-identical copy of the parent, so its delta is what ZERO change "
-            "measures today. This round gated against the parent's STORED reward, so that drift "
-            "is inside every candidate delta here: treat any candidate at or below "
-            "`evidence_bar` as no evidence, even if its verdict is accept. Gating against the "
-            "control instead removes the drift from the comparison."
+            "measures today. No control exists this round (--no-control), so every verdict "
+            "fell back to the parent's STORED reward and that drift is inside every candidate "
+            "delta here: treat any candidate at or below `evidence_bar` as no evidence, even if "
+            "its verdict is accept. Drop --no-control to get the drift-free, control-primary "
+            "verdict instead."
             if floor is not None or null_delta is not None else
             "no null control in this round — you cannot separate a small gain from re-measurement."
         ),
@@ -1698,6 +1959,13 @@ def _main(argv=None) -> int:
         # count attempt 0's replicates twice. The pooled view is reported separately.
         "control_replicates": ctl_rows,
         "pooled_control_replicates": pooled_rows if PRIOR_CTL else None,
+        # #684 items 1-2: present (non-None) only for the two multi-objective modes. For
+        # pareto, `pareto_archive` is the authoritative frontier state this round wrote to
+        # `pareto_archive.json` — each candidate row's own `pareto_archive`/`verdict` is what
+        # actually decided it, not `gate_delta`/`gate_threshold` (those stay as diagnostics).
+        "objectives": PARETO_OBJECTIVES,
+        "constraints": CONSTRAINTS,
+        "pareto_archive": PARETO_ARCHIVE_RESULT,
         **CASCADE,
         "next": _next_steps(killed, MERGE, dominated),
     }

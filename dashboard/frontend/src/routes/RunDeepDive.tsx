@@ -11,6 +11,8 @@ import { Tabs, type TabDef } from '../components/ui/Tabs'
 import { RunHeader } from '../components/RunHeader'
 import { KpiStrip } from '../components/KpiStrip'
 import { BestCurveChart } from '../components/BestCurveChart'
+import { ParetoScatter, isMultiObjective } from '../components/ParetoScatter'
+import { ObjectiveTimeSeries } from '../components/ObjectiveTimeSeries'
 import { CandidatesPanel } from '../components/CandidatesPanel'
 import { PhasesTimeline } from '../components/PhasesTimeline'
 import { Trajectories } from '../components/Trajectories'
@@ -21,6 +23,7 @@ import { BudgetPanel, PerIterationCostTime } from '../components/CostPanel'
 import { CostLedger } from '../components/CostLedger'
 import { GatePanel } from '../components/GatePanel'
 import { TaskMatrix, SealedTestMatrix } from '../components/TaskMatrix'
+import { TaskOwnership } from '../components/TaskOwnership'
 import { LogStream } from '../components/LogStream'
 import {
   EvographPanel,
@@ -218,6 +221,8 @@ function TabBody({
       return (
         <div className="space-y-5">
           <BestCurveChart nodes={data.graph.nodes} />
+          {isMultiObjective(s) && <ParetoScatter nodes={data.graph.nodes} />}
+          {isMultiObjective(s) && <ObjectiveTimeSeries nodes={data.graph.nodes} summary={s} />}
           <PhasesTimeline detail={data} />
         </div>
       )
@@ -241,6 +246,7 @@ function TabBody({
             selectedId={selectedCandidate}
             screens={extra.screens}
           />
+          <TaskOwnership nodes={data.graph.nodes} />
           <SealedTestMatrix summary={s} />
         </div>
       )
@@ -297,7 +303,7 @@ function TabBody({
         }
       }
       
-      return <RunTimeline summary={s} nodes={data.graph.nodes} onActivityClick={(activityId) => {
+      return <RunTimeline summary={s} nodes={data.graph.nodes} graph={data.graph} onActivityClick={(activityId) => {
         // Parse activity ID to extract iteration number
         const match = activityId.match(/iter-(\d+)/)
         if (match) {

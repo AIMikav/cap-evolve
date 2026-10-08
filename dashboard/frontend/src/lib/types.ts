@@ -269,6 +269,10 @@ export interface GraphNode {
   val: number | null
   stderr?: number | null
   per_task?: Record<string, number>
+  /** Secondary objectives' per-task values for a multi-objective run (e.g. {t1: {cost:
+   *  0.02}}) — currently just "cost" (mean cost_usd over the task's trials). Empty/absent
+   *  on every single-objective run, or when nothing was priced per task (#676). */
+  per_task_metrics?: Record<string, Record<string, number>>
   feedback?: Record<string, string>
   /** Tasks this candidate fixed / broke vs its parent, when the run recorded the
    *  movement. Empty (not absent-as-zero) when nothing was recorded. */
@@ -287,6 +291,10 @@ export interface GraphNode {
   parent_val?: number | null
   epoch?: number
   merge_of?: string[]
+  /** Optimizer's self-reported classification of this edit (e.g. PROMPT_EDIT,
+   *  TOOL_CODE_EDIT, VALIDATOR_ADD, MIXED). Optional/nullable — absent on runs that
+   *  predate this field or never set it. */
+  change_type?: string | null
   best_so_far?: boolean
   /** Which diagnose() failure cluster(s) this edit targeted (graph.jsonl, #446). */
   cluster_ids?: string[]
@@ -317,6 +325,21 @@ export interface GraphNode {
    *  round: the `reason`/`note` shown is reconstructed after the fact, not the
    *  optimizer's live reasoning. */
   context_warning?: { what: string | null; error: string | null } | null
+  /** commit.py's compliance check (#684 item 10): set when real wall-clock time passed
+   *  since the previous decision but this one still carries optimizer_seconds=0/
+   *  optimizer_usd=0 — nothing counted the proposer's own thinking time for it. */
+  optimizer_cost_warning?: string | null
+  /** gate_mode: pareto's own objective values (reward is already `val`), and whether/why
+   *  this candidate joined the persistent cross-round ParetoArchive (#684 item 9, read
+   *  from round.py's own gate table — see dashboard.py's `gate_table` lookup). Absent on
+   *  every paired/epsilon_constraint round. */
+  objective_values?: Record<string, number> | null
+  pareto_archive?: {
+    inserted?: boolean
+    reason?: string
+    values?: Record<string, number>
+    size_after?: number
+  } | null
   /** Which round.py invocation gated this candidate, when one did (agent-optimize).
    *  Nodes sharing this id were evaluated and gated TOGETHER, not sequentially —
    *  absent for candidates not gated via round.py. */
@@ -391,6 +414,10 @@ export interface RunSummaryDetail {
   }
   frontier?: number
   tasks?: string[]
+  /** Declared multi-objective config (pareto gate_mode), read from capevolve.yaml.
+   *  Absent/null on an ordinary single-objective run — the Tasks tab renders exactly
+   *  as before whenever this is unset or has one entry (#676). */
+  objectives?: { name: string; direction: 'maximize' | 'minimize' | string }[] | null
   wall_clock_seconds?: number | null
   optimizer_seconds?: number | null
   runner_seconds?: number | null

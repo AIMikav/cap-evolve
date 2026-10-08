@@ -31,6 +31,7 @@ from . import footprint as footprint_mod
 from . import gate as gate_mod
 from . import graph as graph_mod
 from . import integrity
+from . import stats
 from .cache import hash_candidate_dir
 from .memory import MemorySkill
 from .loop import SplitResult, aggregate_scores, has_valid_trials
@@ -352,6 +353,12 @@ def evaluate_candidate(
     per_task_metrics: dict[str, list] = {t.id: [] for t in tasks}  # per-trial metric catalogs
     per_task_errored: dict[str, bool] = {t.id: False for t in tasks}  # any trial an infra error?
     per_task_errored_trials: dict[str, int] = {t.id: 0 for t in tasks}  # how many trials errored
+    # #676: per-task cost, for the dashboard's multi-objective Tasks view. Every rollout
+    # already carries its own cost_usd (Rollout.cost_usd) — the run-level evaluate() cost
+    # is just the sum of these over tasks/trials, so attributing it per task is free. Every
+    # trial counts (even an errored one spent real money), unlike per_task_trials above
+    # which only keeps valid rewards.
+    per_task_cost: dict[str, list[float]] = {t.id: [] for t in tasks}
     task_by_id = {t.id: t for t in tasks}
     run_acc = {"cost": 0.0, "tokens": 0, "cost_source": {}}  # RUNNER spend, summed over rollouts
     t0 = time.time()
@@ -397,6 +404,7 @@ def evaluate_candidate(
                 per_task_errored_trials[tid] += 1
             run_acc["cost"] += float(getattr(rollout, "cost_usd", 0.0) or 0.0)
             run_acc["tokens"] += int(getattr(rollout, "tokens", 0) or 0)
+            per_task_cost[tid].append(float(getattr(rollout, "cost_usd", 0.0) or 0.0))
             # An adapter that cannot price its rollouts (e.g. an unmetered proxy
             # endpoint) tags this in metadata rather than silently reporting $0 as
             # "free" — count it so the eval record can say "unpriced", not "$0".
@@ -539,7 +547,10 @@ def evaluate_candidate(
             raw={"errored": per_task_errored[tid],
                  "errored_trials": per_task_errored_trials[tid],
                  "valid_trials": len(tr),
-                 "n_trials": n_trials},
+                 "n_trials": n_trials,
+                 # mean cost_usd over this task's trials (#676); None, not 0.0, when no
+                 # trial ran at all so a missing measurement never reads as free.
+                 "cost_usd": (mean(per_task_cost[tid]) if per_task_cost[tid] else None)},
             metrics=_aggregate_metrics(per_task_metrics[tid], mean(tr)),
         ))
 
@@ -588,12 +599,15 @@ def split_result_from_rollouts(run_dir: RunDir, tag, split: str = "val", ks=(1, 
     feedback: dict[str, str] = {}
     raw: dict[str, dict] = {}
     metrics_by_task: dict[str, list] = {}
+    cost_by_task: dict[str, list[float]] = {}  # #676: per-task cost, every trial counts
     if vdir.exists():
         for f in sorted(g for t in tags for g in vdir.glob(f"*__{t}__t*.json")):
             rec = _json.loads(f.read_text(encoding="utf-8"))
             sc = rec.get("score", {})
             tid = sc.get("task_id") or f.name.split("__")[0]
             feedback[tid] = sc.get("feedback", feedback.get(tid, ""))
+            cost_by_task.setdefault(tid, []).append(
+                float((rec.get("rollout") or {}).get("cost_usd") or 0.0))
             # carry the structured infra flag + trial counts forward across resume.
             # Each rollout file is one trial, so count an errored trial here and tally
             # the total trials seen — letting _is_infra_ignore reconstruct the
@@ -621,11 +635,42 @@ def split_result_from_rollouts(run_dir: RunDir, tag, split: str = "val", ks=(1, 
                 metrics_by_task.setdefault(tid, []).append(sc.get("metrics") or [])
     for tid, r0 in raw.items():
         r0["valid_trials"] = len(by_task.get(tid, []))
+        r0["cost_usd"] = mean(cost_by_task[tid]) if cost_by_task.get(tid) else None
     scores = [Score(task_id=t, reward=mean(r), feedback=feedback.get(t, ""),
                     n=len(r), stderr=stderr(r), trial_rewards=r, raw=raw.get(t, {}),
                     metrics=_aggregate_metrics(metrics_by_task.get(t, []), mean(r)))
               for t, r in by_task.items()]
     return aggregate_scores(split, scores, ks=ks)
+
+
+def candidate_cost_objective(run_dir: RunDir, tag, split: str = "val") -> tuple[float | None, float | None]:
+    """Mean + SE of a candidate's per-task cost — the "cost" objective for round.py's
+    native ``gate_mode: pareto``/``epsilon_constraint`` support (issue #684 items 1-2).
+
+    Reuses the per-task ``cost_usd`` MEAN already attached to each ``Score.raw`` dict by
+    #676's instrumentation (``split_result_from_rollouts``, above) — no new persisted field.
+    The mean/SE across tasks is the SAME estimator ``aggregate_scores`` uses for reward
+    (``stats.mean``/``stats.stderr`` over a per-task vector), applied to cost instead of
+    reward. ``tag`` may be a sequence (pooled control replicates), same as
+    ``split_result_from_rollouts``.
+
+    Returns ``(None, None)`` when no task has a priced cost at all (e.g. an unmetered
+    target) — the caller (``gate.ParetoObjectiveError``, via the pareto/epsilon_constraint
+    gate) is where that turns into a refusal, not here.
+
+    Only "cost" is derivable this way: unlike cost, neither "latency" nor "tokens" is
+    persisted per task (only cost_usd is, per #676) — a declared objective/constraint of
+    either name has no value this function can supply, which is the SAME "refuse, don't
+    silently drop" rule ``gate._resolve_pareto_objectives``'s own fallback chain already
+    applies to a run with no cost data at all.
+    """
+    from .stats import mean as _mean, stderr as _stderr
+    result = split_result_from_rollouts(run_dir, tag, split)
+    costs = [pt.get("raw", {}).get("cost_usd") for pt in (result.per_task or [])]
+    costs = [c for c in costs if c is not None]
+    if not costs:
+        return None, None
+    return _mean(costs), _stderr(costs)
 
 
 # ---- baseline -------------------------------------------------------------
@@ -1018,6 +1063,13 @@ _JOURNAL_SEED = (
     "    - High-value clusters still NOT cracked (and the guard/tool designs already tried):\n"
     "    - Plateau signal (are the last few RESULTs flat/negative? if so, which LEVER to switch\n"
     "      to — e.g. a NEW composite tool instead of another guard, or prompt instead of code):\n"
+    "    - Cost-reduction opportunity (if `cost`/`latency`/`num_messages` is a declared objective,\n"
+    "      run `detect_loop_patterns.py --run-dir $R --tag $BEST --split val` — free, no extra\n"
+    "      eval — and check its `by_tool` map for a same-tool-called-N-times-in-a-row pattern. A\n"
+    "      hit names the exact tool + repeat count: propose a composite/bulk tool (capability\n"
+    "      `tools`), a bundled script entrypoint (`skills-package`), or upfront-batched\n"
+    "      instructions (`prompt`/`system-prompt`) that replace the N calls with one. No hit\n"
+    "      (or cost/latency not a declared objective): say so plainly, do not leave this blank):\n"
     "    - Focus next iteration:\n"
 )
 
@@ -1459,6 +1511,37 @@ def movement(parent_per_task, cand_per_task) -> dict:
     return {**moves, "n_shared": len(shared)}
 
 
+def _pareto_metrics_kwargs(current_val: SplitResult, cand_val: SplitResult) -> dict:
+    """``metrics_candidate``/``metrics_current``/their stderrs for ``gate.decide(mode="pareto")``.
+
+    Hill-climb's per-iteration data (#684 item 8) has exactly one secondary objective
+    on offer: per-task ``cost_usd`` (written by ``evaluate_candidate`` into each
+    ``Score.raw``). Mean + between-task SE over the tasks BOTH sides validly measured —
+    same estimator ``aggregate_scores``/``stats.combined_stderr`` use for reward, applied
+    to cost instead. Any other declared objective name (e.g. ``latency``) is left for
+    ``gate._resolve_pareto_objectives`` to refuse on its own (missing from these dicts),
+    rather than fabricated here.
+
+    Returns ``{}`` when either side has no usable cost data — a single-objective
+    ``pareto`` config (``objectives: [{name: reward, ...}]`` only) never needs this, and a
+    multi-objective one that declares something other than ``cost``/``latency``/``tokens``
+    gets gate.py's own ``ParetoObjectiveError`` instead of a silently fabricated value.
+    """
+    def _costs(sr: SplitResult) -> list[float]:
+        return [float(pt["raw"]["cost_usd"]) for pt in (sr.per_task or [])
+                if has_valid_trials(pt) and (pt.get("raw") or {}).get("cost_usd") is not None]
+
+    cand_costs, cur_costs = _costs(cand_val), _costs(current_val)
+    if not cand_costs or not cur_costs:
+        return {}
+    return {
+        "metrics_candidate": {"cost": stats.mean(cand_costs)},
+        "metrics_current": {"cost": stats.mean(cur_costs)},
+        "metrics_stderr_candidate": {"cost": stats.stderr(cand_costs)},
+        "metrics_stderr_current": {"cost": stats.stderr(cur_costs)},
+    }
+
+
 def _journal_tail(workdir: Path) -> str:
     """The optimizer-authored text APPENDED below the journal marker this iteration.
 
@@ -1830,7 +1913,10 @@ def record_iteration(run_dir: RunDir, workdir: Path, cid: str, *,
             run_dir, node_id=cid,
             parents=list(parents) if parents else [parent_id or "seed"],
             edit_kind=edit_kind, status="accepted" if accepted else "rejected",
-            val_mean=val, note=reason, cluster_ids=cluster_ids, subset=subset)
+            val_mean=val, note=reason, cluster_ids=cluster_ids, subset=subset,
+            # Optimizer's self-reported edit classification (#665 workstream 4),
+            # optional/nullable — passed through from commit.py via **extra.
+            change_type=extra.get("change_type"))
     except Exception as e:  # noqa: BLE001 — a log write must never break a run
         run_dir.log_event("optimizer_context_warning", what="graph.jsonl", error=str(e)[:300])
 
@@ -2866,11 +2952,18 @@ def run_step(
     # under-including here would hide exactly the trade this records. It never touches the
     # verdict unless the caller set ``gate_max_broke`` in ``gate_kwargs``.
     mv = movement(current_val.per_task, cand_val.per_task)
+    # Multi-objective (#684 item 8): when the caller pinned ``mode="pareto"`` (via
+    # ``gate_kwargs``, itself from ``capevolve.yaml``'s ``gate_mode``/``objectives``),
+    # supply the non-reward metric gate.py's pareto mode needs. A no-op dict ({}) for
+    # every other mode, so an existing single-metric config's gate call is unchanged.
+    pareto_metrics = (_pareto_metrics_kwargs(current_val, cand_val)
+                      if gate_kwargs.get("mode") == "pareto" else {})
     decision = gate_mod.decide(
         current_val.reward, cand_val.reward, split="val",
         candidate_stderr=cand_val.stderr, current_stderr=current_val.stderr,
         paired_deltas=paired_deltas, coverage=cand_val.coverage, run_dir=run_dir,
         broke=mv["broke"], fixed=mv["fixed"],
+        **pareto_metrics,
         **gate_kwargs,
     )
 

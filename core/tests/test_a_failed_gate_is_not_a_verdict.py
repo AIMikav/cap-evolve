@@ -80,8 +80,17 @@ def test_mode_rejects_a_value_gate_check_cannot_accept():
         "script cannot accept must be refused here, before any rollout is read")
 
 
-def test_round_mode_choices_are_exactly_gate_check_mode_choices():
-    """The two lists must not be able to drift apart again."""
+def test_round_mode_choices_are_gate_check_mode_choices():
+    """The two lists must not be able to drift apart.
+
+    round.py's --mode is forwarded to gate_check.py verbatim via `_gate()`, so any value one
+    accepts and the other rejects is a silent round-emptying bug (same failure mode this file's
+    module docstring covers for `--mode val`). Issue #684 made "pareto" (and the new
+    "epsilon_constraint") first-class, fully-working choices in round.py too — `_gate()` now
+    forwards --objectives/--metrics-*/--constraints, and round.py maintains its own persistent
+    ParetoArchive for pareto mode — so there is no longer a deliberate gap between the two
+    lists at all.
+    """
     rnd, gc = _round(), _gate_check()
 
     def _choices(mod, flag):

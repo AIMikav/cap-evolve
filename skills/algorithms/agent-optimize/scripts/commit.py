@@ -53,6 +53,35 @@ from cap_evolve import RunDir, graph, harness
 import meter
 
 
+# #684 item 10: optimizer_seconds/optimizer_usd are always 0 across real agent-mode runs.
+# meter.py's automatic metering only works under host.py's headless driver (it reads a
+# claude-code session log that only exists there); in agent orchestration mode (this
+# script, called directly by the conversational agent) nothing captures the proposer's own
+# thinking time unless the agent passes --optimizer-seconds/--optimizer-usd itself — SKILL.md
+# step 7 asks for this but never required or checked it. This is a cheap, automatic sanity
+# check for that compliance gap: real wall-clock time clearly passed since the previous
+# decision, yet this commit still reports zero optimizer cost.
+_ZERO_OPTIMIZER_COST_WARN_S = 120  # ponytail: fixed heuristic threshold, tune if too noisy
+
+
+def _wallclock_since_last_decision(run_dir: RunDir) -> float | None:
+    """Seconds since this run's previous accept/reject/inconclusive/provisional decision,
+    or None when this is the first one (nothing to compare against)."""
+    last_t = None
+    try:
+        with run_dir.events_path.open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("kind") in ("accept", "reject", "inconclusive", "provisional"):
+                    last_t = rec.get("t")
+    except OSError:
+        return None
+    return (time.time() - last_t) if last_t is not None else None
+
+
 def _memory_skill_from_spec(run_dir: RunDir) -> str | None:
     """``memory_skill`` from the sibling project spec, or ``None``.
 
@@ -287,6 +316,27 @@ def _diagnosis_targets(src: Path) -> tuple[list[str], dict | None]:
                          "tier": None}
 
 
+#: Dashboard badge taxonomy for a candidate's self-reported edit classification (#665
+#: workstream 4). Advisory only — an unrecognized/missing value just renders as "—",
+#: never refuses a commit, since DIAGNOSIS.json's authoring is owned by SKILL.md
+#: (a different workstream) and this field is optional.
+CHANGE_TYPES = ("PROMPT_EDIT", "TOOL_CODE_EDIT", "VALIDATOR_ADD", "MIXED")
+
+
+def _diagnosis_change_type(src: Path) -> str | None:
+    """``change_type`` this edit self-reports, read from ``<from-dir>/DIAGNOSIS.json``.
+
+    ``None`` when the file is missing/unparseable or the field is absent/not one of
+    ``CHANGE_TYPES`` — optional and nullable, so an old DIAGNOSIS.json without it
+    (or any run that predates this field) just shows no badge."""
+    try:
+        diag = json.loads((src / "DIAGNOSIS.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    ct = diag.get("change_type") if isinstance(diag, dict) else None
+    return ct if isinstance(ct, str) and ct in CHANGE_TYPES else None
+
+
 def _ranked_issue_rows(src: Path) -> int:
     """Data rows in ``<from-dir>/PROCESS.md``'s "Ranked issue list" table (#634).
 
@@ -456,7 +506,12 @@ def main(argv=None) -> int:
                         "drift_control=the raw parent-relative gate ACCEPTED, but round.py's "
                         "drift-corrected control_relative comparison (vs a same-round "
                         "null-control replicate) says reject and is verdict-stable — a "
-                        "structured disagreement, not a one-off override; "
+                        "structured disagreement, not a one-off override. Since issue #684 "
+                        "item 6 the control-relative comparison IS round.py's primary "
+                        "verdict whenever a control was measured (the default), so this "
+                        "disagreement should rarely arise any more; it is kept for the "
+                        "--gate-against control / no-control-replicate edge cases and for "
+                        "older round tables; "
                         "driver_judgement=the gate ACCEPTED and you are overriding it for any "
                         "OTHER reason (say why in --note)")
     p.add_argument("--bypassed-gate-justification", default=None,
@@ -505,6 +560,10 @@ def main(argv=None) -> int:
     p.add_argument("--edit-kind", default=None, choices=["prompt", "code", "merge"],
                    help="graph.jsonl node kind; defaults to 'merge' when --parents has "
                         "2+ ids, else 'code'.")
+    p.add_argument("--change-type", default=None, choices=list(CHANGE_TYPES),
+                   help="dashboard badge for this edit's self-reported classification "
+                        "(#665). Optional: when omitted, read from <from-dir>/"
+                        "DIAGNOSIS.json's own 'change_type' field, else no badge is shown.")
     args = p.parse_args(argv)
 
     run_dir = RunDir.open(Path(args.run_dir))
@@ -700,6 +759,7 @@ def main(argv=None) -> int:
     # cluster_ids/subset and the dashboard's diagnosis view rendered nothing. Refuse rather
     # than silently book an unmapped change; a named escape hatch, logged as a warning.
     cluster_ids, diag_subset = _diagnosis_targets(src)
+    change_type = args.change_type or _diagnosis_change_type(src)
     if not provisional and not cluster_ids and not args.missing_diagnosis_justification:
         print(json.dumps({
             "error": f"no real DIAGNOSIS.json found for {args.candidate_id!r} — commit.py "
@@ -789,6 +849,18 @@ def main(argv=None) -> int:
         args.optimizer_tokens = metered["tokens"]
         args.optimizer_seconds = round(metered["seconds"], 3)
         meter_field["opt_meter"] = metered["meter"]
+    # #684 item 10: only fires when nothing else already accounted for the time (the host
+    # meter above, or the agent's own --optimizer-* flags) — a real metered/self-reported
+    # $0 round (e.g. a near-instant reject) is not a compliance problem.
+    wallclock_elapsed = _wallclock_since_last_decision(run_dir)
+    optimizer_cost_warning = None
+    if (metered is None and not args.optimizer_seconds and not args.optimizer_usd
+            and wallclock_elapsed is not None
+            and wallclock_elapsed > _ZERO_OPTIMIZER_COST_WARN_S):
+        optimizer_cost_warning = (
+            f"{wallclock_elapsed:.0f}s elapsed since the previous decision but this commit "
+            "carries optimizer_seconds=0/optimizer_usd=0 — pass --optimizer-seconds/"
+            "--optimizer-usd/--optimizer-tokens for your own proposal cost (SKILL.md step 7).")
     run_dir.log_event(args.decision, candidate=args.candidate_id, val=args.val,
                       gate_verdict=gate_verdict, overrode_gate=overrode_gate,
                       note=args.note,
@@ -801,6 +873,8 @@ def main(argv=None) -> int:
                       opt_cost_usd=args.optimizer_usd or None,
                       opt_tokens=args.optimizer_tokens or None,
                       opt_seconds=args.optimizer_seconds or None,
+                      optimizer_cost_warning=optimizer_cost_warning,
+                      wallclock_since_last_decision=wallclock_elapsed,
                       **meter_field, **gate)
     run_dir.update_spent(optimizer_usd=args.optimizer_usd,
                          optimizer_tokens=args.optimizer_tokens,
@@ -815,6 +889,8 @@ def main(argv=None) -> int:
     if indecisive:
         reason = f"indecisive (gate): {reason}"
     warnings: list[str] = []
+    if optimizer_cost_warning:
+        warnings.append(optimizer_cost_warning)
     if not provisional and not handover and args.missing_handover_justification:
         warnings.append(
             f"missing handover: {args.candidate_id!r} was committed with NO JOURNAL.md "
@@ -859,6 +935,7 @@ def main(argv=None) -> int:
                                  indecisive=indecisive, memory_skill=memory_skill,
                                  parents=parents, edit_kind=args.edit_kind,
                                  cluster_ids=cluster_ids, subset=diag_subset,
+                                 change_type=change_type,
                                  opt_cost_usd=args.optimizer_usd or None,
                                  opt_tokens=args.optimizer_tokens or None,
                                  optimizer_seconds=args.optimizer_seconds or None,

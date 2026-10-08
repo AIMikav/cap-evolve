@@ -24,12 +24,19 @@ The candidate **graph** schema (``reduced["graph"]``)::
     {"nodes": [
         {"id", "parent", "children": [...], "status": seed|accepted|rejected|failed,
          "val", "stderr", "per_task": {task_id: reward}, "feedback": {task_id: str},
+         "per_task_metrics"?: {task_id: {objective_name: value}},  # secondary objectives'
+                                       # per-task values (currently just "cost" = cost_usd),
+                                       # for a multi-objective (pareto gate_mode) run's Tasks
+                                       # tab — {} on every run with nothing priced per task (#676)
          "cost_usd", "tokens", "seconds", "optimizer_seconds", "runner_seconds",
          "iteration", "reason", "epoch"?, "merge_of"?, "best_so_far",
          "gate_delta"?, "gate_stderr"?, "gate_n"?, "gate_k_se"?, "gate_threshold"?,
          "gate_resolvable_effect_size"?, "screened": bool | None,
          "cluster_ids"?: [...], "subset"?: {"task_ids": [...], "tier": int | None},
-         "micro_tests"?: [...], "round_id"?: str | None}
+         "micro_tests"?: [...], "round_id"?: str | None,
+         "change_type"?: str | None}  # optimizer's self-reported edit classification
+                                       # (PROMPT_EDIT/TOOL_CODE_EDIT/VALIDATOR_ADD/MIXED/...),
+                                       # optional, absent on runs that predate it (#665)
      ],
      "root": "seed", "best_id": "..."}
 
@@ -55,7 +62,11 @@ The **summary** schema (``reduced["summary"]``)::
      "wall_clock_seconds", "optimizer_seconds", "runner_seconds",
      "cost": {optimizer_usd, runner_usd, total_usd}, "tokens": int,
      "gate_warnings": [...], "diagnoses": [...], "git_log": [...],
-     "controls": [{"tag", "reward", "stderr", "n", "iteration", "t"}, ...]}
+     "controls": [{"tag", "reward", "stderr", "n", "iteration", "t"}, ...],
+     "objectives"?: [{"name", "direction"}, ...]}  # declared multi-objective config, read
+                                                     # from capevolve.yaml's gate_mode/
+                                                     # objectives; None on a single-objective
+                                                     # run (#676)
 
 ``controls`` lists null-control replicate evaluations — evaluate-only measurements with no
 candidate-graph node — detected by ``_is_control_event``: the documented ``ctl_null`` TAG
@@ -219,19 +230,99 @@ def _read_json(path: Path | None) -> dict:
 
 
 def _per_task_from_rollouts(run_dir, tag: str, split: str = "val"):
-    """(per_task_reward, feedback) for ``tag`` rebuilt from persisted rollouts.
+    """(per_task_reward, feedback, per_task_cost_usd) for ``tag`` rebuilt from persisted rollouts.
 
-    Uses the canonical core helper so scores match the loop exactly. Returns two
+    Uses the canonical core helper so scores match the loop exactly. Returns three
     dicts keyed by task id; empty if no rollouts were persisted for this tag.
+    ``cost`` (#676) is per-task mean cost_usd over its trials, absent for a task with
+    no priced trial — read by ``reduce_run`` for the Tasks tab's per-objective view.
     """
     try:
         from . import harness
         sr = harness.split_result_from_rollouts(run_dir, tag, split)
     except Exception:  # noqa: BLE001 — degrade: a missing/odd rollout shouldn't crash the report
-        return {}, {}
-    per = {pt["task_id"]: pt["reward"] for pt in sr.to_dict().get("per_task", [])}
-    fb = {pt["task_id"]: pt.get("feedback", "") for pt in sr.to_dict().get("per_task", [])}
-    return per, fb
+        return {}, {}, {}
+    rows = sr.to_dict().get("per_task", [])
+    per = {pt["task_id"]: pt["reward"] for pt in rows}
+    fb = {pt["task_id"]: pt.get("feedback", "") for pt in rows}
+    cost = {pt["task_id"]: (pt.get("raw") or {}).get("cost_usd") for pt in rows
+            if (pt.get("raw") or {}).get("cost_usd") is not None}
+    return per, fb, cost
+
+
+def _parse_process_md_skipped(process_text: str) -> list:
+    """Parse PROCESS.md's ``## Deliberately skipped`` bullet list into
+    ``[{"title", "reason"}, ...]``. Real DIAGNOSIS.json files written by agent-optimize
+    runs rarely carry their own ``skipped`` field (#676), so this is the only place that
+    information exists on disk for most candidates. A bullet reading "N/A"/"none" (the
+    documented way to say nothing was skipped) yields no entries — never a fabricated one.
+    """
+    m = re.search(r"^#+\s*Deliberately skipped\b.*$", process_text, re.IGNORECASE | re.MULTILINE)
+    if not m:
+        return []
+    rest = process_text[m.end():]
+    section = rest
+    for header in re.finditer(r"^(#+\s|[-*_]{3,}\s*$)", rest, re.MULTILINE):
+        header_line = rest[header.start():rest.find("\n", header.start())]
+        # A repeat of the SAME "Deliberately skipped" header (template artifact seen in
+        # real archived PROCESS.md files) is still part of this section, not the next one.
+        if re.match(r"^#+\s*Deliberately skipped\b", header_line, re.IGNORECASE):
+            continue
+        section = rest[:header.start()]
+        break
+    out = []
+    for line in section.splitlines():
+        line = line.strip()
+        if not line.startswith(("-", "*")) or re.match(r"^[-*_]{3,}$", line):
+            continue  # not a bullet, or a markdown horizontal rule (e.g. a "---" divider)
+        line = line[1:].strip()
+        if not line or re.match(r"^n/?a\b|^none\b", line, re.IGNORECASE):
+            continue
+        if ":" in line:
+            title, reason = line.split(":", 1)
+        else:
+            title, reason = "Skipped", line
+        out.append({"title": title.strip(), "reason": reason.strip()})
+    return out
+
+
+def _normalize_diagnosis(diag: dict, parent_per_task: dict | None) -> dict:
+    """Fill the gaps between what real DIAGNOSIS.json files write and the richer schema
+    SKILL.md documents (and the dashboard renders), WITHOUT inventing data (#676).
+
+    Real agent-optimize candidates write ``clusters: [{id, signature, tasks, score_lost}]``
+    and ``edits: [{clusters, file, change}]`` — missing the documented ``name``/``id``/
+    ``title``/``files``. Here we derive the missing fields from what IS on disk:
+    cluster.name/detail <- signature, edit.id <- a stable index, edit.title <- change,
+    edit.files <- [file]. ``latent`` (a cluster naming no task that was failing in the
+    parent) is computed from the parent's own per_task, when available — never guessed.
+    """
+    clusters = diag.get("clusters") or []
+    for c in clusters:
+        if not isinstance(c, dict):
+            continue
+        if not c.get("name"):
+            c["name"] = c.get("signature") or c.get("id") or "cluster"
+        if not c.get("detail") and c.get("signature"):
+            c["detail"] = c["signature"]
+        if c.get("latent") is None and parent_per_task:
+            tasks = c.get("tasks") or []
+            was_failing = any(parent_per_task.get(t, 1) < 1 for t in tasks)
+            if tasks:
+                c["latent"] = not was_failing
+
+    edits = diag.get("edits")
+    if isinstance(edits, list):
+        for i, e in enumerate(edits):
+            if not isinstance(e, dict):
+                continue
+            if not e.get("id"):
+                e["id"] = f"e{i + 1}"
+            if not e.get("title"):
+                e["title"] = e.get("change") or "edit"
+            if not e.get("files") and e.get("file"):
+                e["files"] = [e["file"]]
+    return diag
 
 
 def _compute_outcomes(per_task: dict, parent_per_task: dict | None, fixed: list = None, broke: list = None) -> dict:
@@ -559,6 +650,36 @@ def _budget_exhausted(budget, spent) -> str | None:
     return None
 
 
+#: Mirrors ``gate.py``'s own ``_DEFAULT_PARETO_OBJECTIVES`` — used only as a fallback label
+#: set when ``gate_mode: pareto`` is declared but ``objectives:`` is absent from the spec.
+_DEFAULT_PARETO_OBJECTIVES = [
+    {"name": "reward", "direction": "maximize"},
+    {"name": "cost", "direction": "minimize"},
+]
+
+
+def _objectives_from_run(run_dir, root: Path) -> list[dict] | None:
+    """Declared ``objectives:`` list from THIS run's actual spec, or None (#676/#682).
+
+    Resolved via ``specfile.spec_for_run`` — the same ``--spec`` variant (``run_config``
+    event) that ``_read_config`` already uses for the Config tab — rather than a second,
+    separately hand-rolled reader of a hardcoded ``project/capevolve.yaml``: that used to
+    make a variant-spec run's Config tab correctly show pareto objectives while this
+    field silently read the wrong (generic) file.
+    """
+    from . import specfile
+    spec = specfile.spec_for_run(run_dir, _find_project_dir(root))
+    objs = spec.get("objectives")
+    if isinstance(objs, list) and objs:
+        parsed = [{"name": o["name"], "direction": o.get("direction", "maximize")}
+                  for o in objs if isinstance(o, dict) and o.get("name")]
+        if parsed:
+            return parsed
+    if spec.get("gate_mode") == "pareto":
+        return list(_DEFAULT_PARETO_OBJECTIVES)
+    return None
+
+
 def _orchestration_mode(root: Path) -> str | None:
     """``orchestration_mode`` from the sibling project spec (``agent`` / ``deterministic``)."""
     for spec in (_safe_subpath(root.parent, "project", "capevolve.yaml"),
@@ -609,6 +730,69 @@ def _spend_metered(total_usd: float, paid_calls: int) -> bool:
     return not (paid_calls > 0 and total_usd == 0.0)
 
 
+def _rollout_progress(run_dir, ev: dict, now: float) -> dict | None:
+    """Poll the filesystem for an in-flight eval's REAL progress (#676): how many of
+    the expected rollouts are actually on disk right now, and how long ago the
+    newest one was written. Re-read fresh on every call, no caching — same
+    "re-read the run dir" philosophy the rest of this module already uses.
+
+    The event log alone cannot show this: an adapter's ``run_batch``/``run_trials``
+    fast path (e.g. tau2) hands the WHOLE grid back in one call and logs nothing in
+    between (see ``_progress_emitter`` in harness.py, which only the per-rollout
+    serial/pool path can call), which is exactly the gap that left the dashboard
+    reporting an 8500s-old "last event" while rollout files on disk were updating
+    every few minutes.
+
+    Two sources, tried in order:
+      1. ``rollouts/<split>/<task>__<tag>__t*.json`` — written incrementally by the
+         serial/thread-pool path for adapters without a batch fast path.
+      2. ``native_sims/<tag>/<split>/results_*.json`` — tau2's own checkpoint file,
+         appended to after every simulation even while ``run_batch``/``run_trials``
+         is still one open Python call (every tau2 adapter in this repo writes it;
+         see ``templates/adapters/tau2_bench/adapter.py:_sim_save_path``).
+
+    Returns ``None`` when neither source has anything yet.
+
+    Re-evaluating a tag REPLACES its files in place rather than clearing the
+    directory first (see harness.py's ``rollout_overwrite_warning``), so a tag
+    that was previously evaluated (crashed/abandoned, then re-run) can have old
+    files already sitting on disk the instant ``ev`` (the currently open
+    ``eval_start``) fires. Both globs below are filtered to ``mtime >= ev["t"]``
+    so only files written since THIS eval started count as its progress --
+    otherwise a stale leftover from a prior attempt gets misreported as live
+    progress for an eval that has done zero work.
+    """
+    tag = ev.get("tag")
+    split = ev.get("split")
+    total = ev.get("rollouts")
+    if not tag or not split or not isinstance(total, (int, float)) or not total:
+        return None
+    try:
+        started = float(ev.get("t") or 0.0)
+    except (TypeError, ValueError):
+        started = 0.0
+
+    vdir = _safe_subpath(run_dir.rollouts, split)
+    if vdir is not None and vdir.is_dir():
+        files = [f for f in vdir.glob(f"*__{tag}__t*.json")
+                 if f.is_file() and f.stat().st_mtime >= started]
+        if files:
+            mtime = max(f.stat().st_mtime for f in files)
+            return {"completed": len(files), "total": int(total), "age": max(0.0, now - mtime)}
+
+    sims_dir = _safe_subpath(Path(run_dir.root), "native_sims", tag, split)
+    if sims_dir is not None and sims_dir.is_dir():
+        result_files = [f for f in sims_dir.glob("results_*.json")
+                         if f.is_file() and f.stat().st_mtime >= started]
+        if result_files:
+            latest = max(result_files, key=lambda f: f.stat().st_mtime)
+            sims = _read_json(latest).get("simulations")
+            if isinstance(sims, list) and sims:
+                return {"completed": len(sims), "total": int(total),
+                        "age": max(0.0, now - latest.stat().st_mtime)}
+    return None
+
+
 def _eval_busy(ev: dict, progress: dict | None = None) -> str:
     """"scoring <tag> on <split> (N rollouts)" — what an open ``eval_start`` is doing.
 
@@ -657,7 +841,7 @@ def _heartbeat_pid_alive(pid) -> bool:
 
 def _derive_status(*, events: list, now: float, budget, spent, agent_mode: bool,
                    has_candidates: bool, has_baseline: bool,
-                   heartbeat: dict | None = None) -> tuple[str, str]:
+                   heartbeat: dict | None = None, run_dir=None) -> tuple[str, str]:
     """``(status, reason)`` for a run — the six outcomes an operator must tell apart.
 
     ``completed`` (finalize sealed the test) · ``budget_exhausted`` (a cap was hit and
@@ -727,11 +911,24 @@ def _derive_status(*, events: list, now: float, budget, spent, agent_mode: bool,
     fresh = silent is not None and silent < window
     alive = fresh and not exhausted and not stopped
 
+    # #676: the event log's last-event timestamp is the LAST MILESTONE
+    # (eval_start/evaluate/...), which stays dark for the whole duration of a
+    # run_batch/run_trials eval — hours, for a real full-val tau2 run — even while
+    # rollout/results files are being written to disk every few minutes. When an
+    # eval is open, poll disk for the real in-flight count/freshness so the reason
+    # string reflects genuine progress instead of a stale milestone age.
+    fs_progress = _rollout_progress(run_dir, open_eval, now) if (open_eval and run_dir is not None) else None
+    eval_progress = dict(fs_progress) if fs_progress else open_eval_progress
+    if fs_progress and isinstance((open_eval_progress or {}).get("running_mean"), (int, float)):
+        eval_progress["running_mean"] = open_eval_progress["running_mean"]
+    freshness = (f"last rollout written {fs_progress['age']:.0f}s ago" if fs_progress
+                 else (f"last event {silent:.0f}s ago" if silent is not None else None))
+
     if not has_baseline and not has_candidates:
         if alive:
             # The phase that produces the very first number has not returned yet. That
             # is progress, not an outcome, and must never be reported as one.
-            return "running", (f"{_eval_busy(open_eval, open_eval_progress)}; last event {silent:.0f}s ago"
+            return "running", (f"{_eval_busy(open_eval, eval_progress)}; {freshness}"
                                if open_eval else
                                "the seed's baseline is still being scored — no candidate "
                                f"has been evaluated yet; last event {silent:.0f}s ago")
@@ -764,7 +961,7 @@ def _derive_status(*, events: list, now: float, budget, spent, agent_mode: bool,
             "phase script)")
 
     if alive:
-        return "running", (f"{_eval_busy(open_eval, open_eval_progress)}; last event {silent:.0f}s ago"
+        return "running", (f"{_eval_busy(open_eval, eval_progress)}; {freshness}"
                            if open_eval else f"last event {silent:.0f}s ago")
     if stopped:
         return "stalled", f"algorithm stopped ({stopped}) without finalizing the test split"
@@ -924,7 +1121,7 @@ _CONFIG_KEY_GROUPS = {
     "gate_k_se": "Budget & gate", "no_regression": "Budget & gate",
     "memory_skill": "Memory",
     "metric_primary": "Metrics & display", "metrics_display": "Metrics & display",
-    "metric_directions": "Metrics & display",
+    "metric_directions": "Metrics & display", "objectives": "Metrics & display",
     "github_integration": "GitHub",
 }
 _CONFIG_GROUP_ORDER = ("Capability", "Delivery", "Algorithm & optimizer", "Data & splits",
@@ -994,27 +1191,33 @@ def _read_project_files(project_dir: Path, skip: set) -> list[dict]:
     return out
 
 
-def _read_config(root: Path) -> dict:
+def _read_config(run_dir) -> dict:
     """The full run configuration, generically — every intake artifact on disk.
 
-    Reads the sibling ``project/`` dir's ``capevolve.yaml`` (the parsed spec, grouped
-    for display — see ``_CONFIG_KEY_GROUPS``), ``PROJECT.md`` (the intake-authored
-    narrative of what was resolved/defaulted), and every other file under the project
-    dir (adapters/, seed_capability/, split files, ...) as a generic listing/preview.
-    Returns ``{}`` when no project dir is found — the panel hides itself.
+    Reads the sibling ``project/`` dir's spec (the parsed spec, grouped for display —
+    see ``_CONFIG_KEY_GROUPS``), ``PROJECT.md`` (the intake-authored narrative of what
+    was resolved/defaulted), and every other file under the project dir (adapters/,
+    seed_capability/, split files, ...) as a generic listing/preview. Returns ``{}``
+    when no project dir is found — the panel hides itself.
+
+    The spec file is resolved via ``specfile.resolve_spec_path`` — THIS run's actual
+    ``--spec`` (``run_config`` event), not a hardcoded ``capevolve.yaml`` — so a variant
+    spec filename (e.g. ``capevolve.v2.multiobjective.yaml``) is the one actually read,
+    not whichever ``capevolve.yaml`` happens to sit next to it in the project dir (#676:
+    this is exactly how a real multi-objective run's ``objectives``/``gate_mode: pareto``
+    went missing from the Config tab — the project dir's generic ``capevolve.yaml`` has
+    neither, the variant spec the run was actually started with has both).
     """
+    root = Path(run_dir.root)
     project_dir = _find_project_dir(root)
     if project_dir is None:
         return {}
-    from .specfile import read_yaml
-    # Joined through _safe_subpath like every other path here: the spec is read (and its
-    # presence reported) only when it is proven inside the project dir, so a capevolve.yaml
-    # symlinked out of it is treated as absent rather than followed.
-    spec_file = _safe_subpath(project_dir, "capevolve.yaml")
+    from . import specfile
+    spec_file = specfile.resolve_spec_path(run_dir, project_dir)
     spec = {}
     if spec_file is not None:
         try:
-            spec = read_yaml(spec_file.read_text(encoding="utf-8")) or {}
+            spec = specfile.read_yaml(spec_file.read_text(encoding="utf-8")) or {}
         except OSError:
             spec = {}
     groups: dict[str, list] = {}
@@ -1032,14 +1235,16 @@ def _read_config(root: Path) -> dict:
         except OSError:
             project_md = None
 
-    files = _read_project_files(project_dir, {"capevolve.yaml", "PROJECT.md"})
+    skip = {"PROJECT.md"} | ({spec_file.name} if spec_file is not None else {"capevolve.yaml"})
+    files = _read_project_files(project_dir, skip)
     if not spec_groups and not project_md and not files:
         return {}
     return {
         "project_dir": str(project_dir),
-        # True ⇒ the project dir exists but has no capevolve.yaml. The section says so and still
-        # lists the artifacts that ARE there, instead of disappearing without explanation.
-        "spec_missing": spec_file is None or not spec_file.is_file(),
+        # True ⇒ no spec file could be resolved at all (neither the run's own recorded
+        # --spec nor project/capevolve.yaml). The section says so and still lists the
+        # artifacts that ARE there, instead of disappearing without explanation.
+        "spec_missing": spec_file is None,
         "spec_groups": spec_groups,
         "project_md": project_md,
         "files": files,
@@ -1251,6 +1456,10 @@ def reduce_run(run_dir) -> dict:
 
     per_task_file = _val_per_task_file(root)
 
+    # #676/#682: declared multi-objective config (pareto gate_mode), for the Tasks
+    # tab's per-objective view. None for every ordinary single-objective run.
+    objectives = _objectives_from_run(run_dir, root)
+
     base_val_obj = baseline.get("val") or {}
     baseline_val = base_val_obj.get("reward")
     tasks = [pt["task_id"] for pt in base_val_obj.get("per_task", [])]
@@ -1291,10 +1500,13 @@ def reduce_run(run_dir) -> dict:
 
     # --- nodes: start with the seed -------------------------------------
     nodes: dict[str, dict] = {}
-    seed_per, seed_fb = _per_task_from_rollouts(run_dir, "seed", "val")
+    seed_per, seed_fb, seed_cost = _per_task_from_rollouts(run_dir, "seed", "val")
     if not seed_per:  # no rollouts persisted (synthetic logs) → fall back to baseline.json
         seed_per = {pt["task_id"]: pt["reward"] for pt in base_val_obj.get("per_task", [])}
         seed_fb = {pt["task_id"]: pt.get("feedback", "") for pt in base_val_obj.get("per_task", [])}
+        seed_cost = {pt["task_id"]: (pt.get("raw") or {}).get("cost_usd")
+                     for pt in base_val_obj.get("per_task", [])
+                     if (pt.get("raw") or {}).get("cost_usd") is not None}
     if not seed_per and "seed" in per_task_file:
         seed_per = per_task_file["seed"]["per_task"]
         seed_fb = per_task_file["seed"]["feedback"] or seed_fb
@@ -1302,6 +1514,10 @@ def reduce_run(run_dir) -> dict:
         "id": "seed", "parent": None, "children": [], "status": "seed",
         "val": baseline_val, "stderr": base_val_obj.get("stderr"),
         "per_task": seed_per, "feedback": seed_fb,
+        # #676: per-task secondary-objective values (currently just cost_usd), additive —
+        # absent/empty on every run that predates this or has no priced rollouts.
+        "per_task_metrics": ({tid: {"cost": c} for tid, c in seed_cost.items()}
+                              if seed_cost else {}),
         "cost_usd": (base_val_obj.get("cost_usd") or 0.0),
         "tokens": (base_val_obj.get("tokens") or 0),
         "seconds": (base_val_obj.get("seconds") or 0.0),
@@ -1368,6 +1584,17 @@ def reduce_run(run_dir) -> dict:
                     "what": ev.get("what"), "error": ev.get("error"),
                 }
 
+    # optimizer_cost_warning (#684 item 10): commit.py's own cheap sanity check — real
+    # wall-clock time passed since the previous decision but THIS one still reports zero
+    # optimizer cost, so nothing counted the proposer's thinking time. Read generically off
+    # ANY event carrying this field, same pattern as ``context_warning_by_tag`` above.
+    optimizer_cost_warning_by_tag: dict = {}
+    for ev in events:
+        if ev.get("optimizer_cost_warning"):
+            tag = ev.get("candidate") or ev.get("tag")
+            if tag:
+                optimizer_cost_warning_by_tag[str(tag)] = ev.get("optimizer_cost_warning")
+
     # agent_optimize_round_batch: one event per round.py invocation naming every candidate
     # tag it gated together, so candidates committed serially (and possibly across a stall
     # or a later iteration bump) still know they were measured in the SAME round. Read
@@ -1421,7 +1648,7 @@ def reduce_run(run_dir) -> dict:
         val = ev.get("val")
         parent_val = ev.get("parent_val")
 
-        per, fb = _per_task_from_rollouts(run_dir, cid, "val")
+        per, fb, cost = _per_task_from_rollouts(run_dir, cid, "val")
         if not per and cid in per_task_file:
             per = per_task_file[cid]["per_task"]
             fb = per_task_file[cid]["feedback"] or fb
@@ -1500,6 +1727,9 @@ def reduce_run(run_dir) -> dict:
             "n_scored": val_n_scored.get(cid),
             "per_task": per,
             "feedback": fb,
+            # #676: per-task secondary-objective values (currently just cost_usd), additive —
+            # empty whenever no rollout for this candidate was priced.
+            "per_task_metrics": {tid: {"cost": c} for tid, c in cost.items()} if cost else {},
             "cost_usd": ev.get("cost_usd") or vev.get("cost_usd") or 0.0,
             "tokens": ev.get("tokens") or vev.get("tokens") or 0,
             # Per-iteration optimizer cost/tokens (RITS runner cost is often $0/null,
@@ -1549,6 +1779,8 @@ def reduce_run(run_dir) -> dict:
             # is reconstructed after the fact. Generic across drivers (see
             # ``context_warning_by_tag`` above).
             "context_warning": context_warning_by_tag.get(cid),
+            # Generic across drivers (see ``optimizer_cost_warning_by_tag`` above).
+            "optimizer_cost_warning": optimizer_cost_warning_by_tag.get(cid),
         }
         # Structured gate numbers, when the algorithm recorded them instead of leaving them
         # to be regexed out of a reason string (agent-optimize's commit.py reads them back
@@ -1584,10 +1816,28 @@ def reduce_run(run_dir) -> dict:
                 if isinstance(_c, dict) and _c.get("tag") == cid and "verdict_stable" in _c:
                     node["verdict_stable"] = _c["verdict_stable"]
                     break
+            # #684 item 9: `gate_mode: pareto`'s own fields (round.py, item 1/2) — the
+            # candidate's non-reward objective values and whether/why it joined the
+            # persistent cross-round ParetoArchive. Absent on every paired/epsilon_constraint
+            # round, and on a pareto round whose table predates this field.
+            for _c in (_gt.get("candidates") or []):
+                if isinstance(_c, dict) and _c.get("tag") == cid:
+                    if _c.get("objective_values") is not None:
+                        node["objective_values"] = _c["objective_values"]
+                    if _c.get("objective_stderrs") is not None:
+                        node["objective_stderrs"] = _c["objective_stderrs"]
+                    if _c.get("pareto_archive") is not None:
+                        node["pareto_archive"] = _c["pareto_archive"]
+                    break
         if "epoch" in ev:
             node["epoch"] = ev.get("epoch")
         if merge_of:
             node["merge_of"] = merge_of
+        # Optimizer's self-reported classification (PROMPT_EDIT/TOOL_CODE_EDIT/
+        # VALIDATOR_ADD/MIXED/...), when commit.py recorded one — optional/nullable,
+        # absent on runs that predate this field (#665 workstream 4).
+        if ev.get("change_type"):
+            node["change_type"] = ev["change_type"]
         # A candidate commonly emits TWO step-kind events for the same cid — e.g.
         # agent-optimize's ``reject`` (which carries gate_verdict/overrode_gate/
         # reject_basis) followed by its own ``step`` (which carries none of those). Each
@@ -1601,7 +1851,8 @@ def reduce_run(run_dir) -> dict:
                            "gate_table", "control_relative_verdict",
                            "control_relative_delta", "evidence_bar", "gate_verdict",
                            "overrode_gate", "reject_basis", "verdict_stable",
-                           "bypassed_screen_and_gate", "bypassed_gate_justification"):
+                           "bypassed_screen_and_gate", "bypassed_gate_justification",
+                           "change_type"):
                 if _carry not in node and _carry in nodes[cid]:
                     node[_carry] = nodes[cid][_carry]
             # Same problem, different shape: ``fixed``/``broke`` are ALWAYS set above (to []
@@ -1638,30 +1889,42 @@ def reduce_run(run_dir) -> dict:
         cand_dir = _safe_subpath(root, "candidates", nid)
         if cand_dir and cand_dir.exists():
             diag_path = cand_dir / "DIAGNOSIS.json"
+            process_path = cand_dir / "PROCESS.md"
             if diag_path.exists():
                 try:
                     diag_content = diag_path.read_text(encoding="utf-8")
                     n["diagnosis"] = json.loads(diag_content)
                 except Exception as e:  # noqa: BLE001
                     _diag_warning(nid, n, f"DIAGNOSIS.json unreadable: {str(e)[:200]}")
-            else:
+            elif process_path.exists():
                 # Fallback: try parsing PROCESS.md tables
-                process_path = cand_dir / "PROCESS.md"
-                if process_path.exists():
+                try:
+                    from . import harness
+                    process_text = process_path.read_text(encoding="utf-8")
+                    parsed = harness._parse_process_md_tables(process_text)
+                    if parsed:
+                        parsed["candidate"] = nid
+                        n["diagnosis"] = parsed
+                    else:
+                        _diag_warning(nid, n, "no DIAGNOSIS.json, and PROCESS.md's "
+                                      "'Ranked issue list' / 'Changes made' tables have "
+                                      "no data rows — no diagnosis was recorded")
+                except Exception as e:  # noqa: BLE001
+                    _diag_warning(nid, n, "no DIAGNOSIS.json, and PROCESS.md could not "
+                                  f"be parsed: {str(e)[:200]}")
+            # Normalize + fill `skipped` from PROCESS.md's own section, for either source
+            # above (#676: real DIAGNOSIS.json files rarely carry name/id/title/skipped).
+            diag = n.get("diagnosis")
+            if isinstance(diag, dict) and not diag.get("warnings"):
+                parent_per_task = nodes.get(n.get("parent"), {}).get("per_task")
+                n["diagnosis"] = _normalize_diagnosis(diag, parent_per_task)
+                if not diag.get("skipped") and process_path.exists():
                     try:
-                        from . import harness
-                        process_text = process_path.read_text(encoding="utf-8")
-                        parsed = harness._parse_process_md_tables(process_text)
-                        if parsed:
-                            parsed["candidate"] = nid
-                            n["diagnosis"] = parsed
-                        else:
-                            _diag_warning(nid, n, "no DIAGNOSIS.json, and PROCESS.md's "
-                                          "'Ranked issue list' / 'Changes made' tables have "
-                                          "no data rows — no diagnosis was recorded")
-                    except Exception as e:  # noqa: BLE001
-                        _diag_warning(nid, n, "no DIAGNOSIS.json, and PROCESS.md could not "
-                                      f"be parsed: {str(e)[:200]}")
+                        skipped = _parse_process_md_skipped(process_path.read_text(encoding="utf-8"))
+                        if skipped:
+                            diag["skipped"] = skipped
+                    except Exception:  # noqa: BLE001 — best effort, never fatal
+                        pass
 
     # --- wire parent → children edges -----------------------------------
     for nid, n in nodes.items():
@@ -2211,7 +2474,7 @@ def reduce_run(run_dir) -> dict:
         # rollout->per-task reconstruction a full-val node uses, so a screen shows up in
         # the Tasks matrix identically to any other scored node instead of being
         # invisible there.
-        per_task, per_task_fb = _per_task_from_rollouts(run_dir, screen_tag, "val")
+        per_task, per_task_fb, _per_task_cost = _per_task_from_rollouts(run_dir, screen_tag, "val")
         # Per-task delta vs the screen's own reference candidate (``current``), straight
         # from ``paired.deltas`` — the number the screen actually decided on.
         delta_ids = [str(x) for x in (paired.get("ids") or [])]
@@ -2298,7 +2561,7 @@ def reduce_run(run_dir) -> dict:
     if evograph:
         algo_extra["evograph"] = evograph
     narrative = _read_narrative(root, best_id)
-    config = _read_config(root)
+    config = _read_config(run_dir)
     host_session = _read_host_session(root)
     par = [e for e in events if e.get("kind") == "parallel"]
     if par:
@@ -2519,7 +2782,7 @@ def reduce_run(run_dir) -> dict:
         events=events, now=now, budget=(run_dir.budget if sp is not None else None),
         spent=sp, agent_mode=(_orchestration_mode(root) == "agent"),
         has_candidates=len(nodes) > 1, has_baseline=baseline_val is not None,
-        heartbeat=heartbeat)
+        heartbeat=heartbeat, run_dir=run_dir)
     ts = [float(e["t"]) for e in events if isinstance(e.get("t"), (int, float))]
 
     # Elapsed wall time. For a finished run that is first event → last event. For a run
@@ -2543,6 +2806,9 @@ def reduce_run(run_dir) -> dict:
     summary = {
         "run_id": root.name,
         "algorithm": algorithm,
+        # Declared multi-objective config (#676), for the Tasks tab's per-objective view.
+        # None for an ordinary single-objective run (today's dashboard, unchanged).
+        "objectives": objectives,
         # Where the identity came from: a distinguishing event kind, the run dir's own
         # evograph wiki, or the project spec. None ⇒ the UI shows "not recorded".
         "algorithm_source": algorithm_source,
@@ -2666,6 +2932,8 @@ def reduce_run(run_dir) -> dict:
             n["subset"] = gnode["subset"]
         if gnode.get("micro_tests"):
             n["micro_tests"] = gnode["micro_tests"]
+        if gnode.get("change_type") and not n.get("change_type"):
+            n["change_type"] = gnode["change_type"]
     
     # Compute prompt_map for each node with capability files
     cand_root = _safe_subpath(root, "candidates")
