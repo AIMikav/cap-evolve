@@ -47,8 +47,9 @@ import _bootstrap  # noqa: F401  # side-effect import: seeds sys.path for cap_ev
 # accepted values is the only correct source for ours. Importable on the same terms as
 # _bootstrap above — this directory is already on sys.path or that import would have failed.
 import gate_check
+import pregate
 
-from cap_evolve import RunDir, harness
+from cap_evolve import RunDir, eval_index, graph, harness, lineage, mdblocks, optimizer_config, posterior
 from cap_evolve.gate import ParetoObjectiveError, _DEFAULT_PARETO_OBJECTIVES
 from cap_evolve.pareto_archive import ArchivePoint, ParetoArchive
 from cap_evolve.specfile import spec_for_run
@@ -410,12 +411,11 @@ def _run_json(cmd: list[str], tag: str, concurrency: int | None) -> dict:
 
 
 def _evaluate(run_dir: Path, project: Path, tag: str, split: str, n_trials: int,
-              concurrency: int | None) -> dict:
-    """Run the evaluate phase for one tag in its own process."""
-    cmd = [sys.executable, str(SKILLS / "phases" / "evaluate" / "scripts" / "run.py"),
-           "--run-dir", str(run_dir), "--project", str(project),
-           "--candidate", str(Path(run_dir) / "work" / tag),
-           "--split", split, "--n-trials", str(n_trials)]
+              concurrency: int | None, ids: list[str] | None = None,
+              trial_offset: int = 0) -> dict:
+    """Run the evaluate phase for one tag in its own process (optionally a subset / top-up)."""
+    cmd = eval_index.eval_cmd(run_dir, project, tag, split, n_trials, ids=ids,
+                              trial_offset=trial_offset, skills_dir=SKILLS)
     return _run_json(cmd, tag, concurrency)
 
 
@@ -513,6 +513,37 @@ def run_pregate_check(cmd: str, cand_dir: Path) -> str | None:
     return None
 
 
+def pregate_failure(run_dir, project, parent_tag: str, cand_dir: Path, cmd: str | None) -> str | None:
+    """The built-in deterministic pre-gate (#708, ``ablation.pregate``) first, then the
+    agent-registered check (#632). ``None`` = valid; else the reason. With the ablation off only
+    the legacy check runs."""
+    spec = spec_for_run(run_dir, project)
+    if pregate.enabled(spec):
+        cfg = spec.get("pregate") if isinstance(spec.get("pregate"), dict) else {}
+        tk = cfg.get("toolkit")
+        if tk and ".py:" in tk and not os.path.isabs(tk):  # path relative to the project dir
+            tk = str(Path(project) / tk)
+        cfg = {**cfg, "toolkit": tk}
+        parent = run_dir.candidate_dir(parent_tag)
+        try:  # a broken pre-gate must never crash the round (fail-open, loudly)
+            res = pregate.run(
+                cand_dir, parent if parent.is_dir() else None,
+                fixtures=run_dir.root / "tool_fixtures.jsonl", toolkit=cfg.get("toolkit"),
+                traces=[Path(t) for t in cfg.get("traces") or []],
+                max_growth=None if cfg.get("max_policy_growth") is None
+                else float(cfg["max_policy_growth"]),
+                strict=bool(cfg.get("strict")), write_tools=cfg.get("write_tools"),
+                tool_dirs=tuple(cfg.get("tool_paths") or ("tools",)))
+        except Exception as e:  # noqa: BLE001
+            res = {"ok": True, "failure": "", "warnings": [f"built-in pre-gate crashed: {type(e).__name__}: {e}"]}
+        if res["warnings"]:  # surfaced in events.jsonl for the digest; never a refusal
+            run_dir.log_event("agent_optimize_pregate_warning", tag=cand_dir.name,
+                              warnings=res["warnings"])
+        if not res["ok"]:
+            return "built-in pre-gate: " + res["failure"]
+    return run_pregate_check(cmd, cand_dir) if cmd else None
+
+
 def known_invalid(run_dir) -> list[str]:
     """Tags an earlier round's pre-gate check already disqualified in this run."""
     if not run_dir.events_path.exists():
@@ -569,6 +600,16 @@ def _paired(payload: dict) -> dict[str, float]:
     return dict(zip([str(i) for i in pair.get("ids") or []], pair.get("deltas") or []))
 
 
+def _recorded_parents(run_dir, tag: str, best: str):
+    """Parent recorded at creation (``prepare_candidate --parent``, #714) when set, else
+    ``[best]`` (legacy). ``None`` (carry the prior record forward) if ``best`` is the tag
+    itself -- the self-parent seen on cand_4. ``optimizer.ablation.dag_parallel: false`` / ``CAPEVOLVE_DAG_PARALLEL=0`` forces legacy."""
+    prior = [p for p in (graph.latest_node(run_dir, tag) or {}).get("parents") or [] if p != tag]
+    if prior and optimizer_config.enabled("dag_parallel", spec_for_run(run_dir)):
+        return prior
+    return [best] if best != tag else None
+
+
 def keeps_parent_gain(merge_payload: dict, parent_payload: dict) -> bool:
     """Does the merge keep what ``parent`` showed on ITS OWN screened tasks?
 
@@ -586,7 +627,7 @@ def keeps_parent_gain(merge_payload: dict, parent_payload: dict) -> bool:
 def merge_canaries(parent_per_task: list, union_ids: list[str], seed: int) -> list[str]:
     """Fresh regression canaries for a merge screen, drawn from the WHOLE suite.
 
-    per-task-fanout.md's rule: a canary set that only covers what the branches aimed at
+    docs/archive/agent-optimize-legacy/per-task-fanout.md's rule: a canary set that only covers what the branches aimed at
     cannot catch what the merge hit by accident. Tasks the parent passes that neither
     parent's screen covered, seeded, about a third of the union's size (screen.py's own
     holdout fraction).
@@ -635,7 +676,8 @@ def dominated_siblings(base_dir: Path, work: Path, tags: list[str]) -> dict[str,
             } if len(tags) >= 2 else {}
 
 
-def mergeable_pairs(run_dir, plan: dict, survivors: list[str], best: str) -> tuple[list, list]:
+def mergeable_pairs(run_dir, plan: dict, survivors: list[str], best: str,
+                    md_blocks: bool | None = None) -> tuple[list, list]:
     """(pairs merge_stage tries to build, pairs it skips as structurally conflicting).
 
     The ONE definition of "a merge applied this round", shared by merge_stage and #630's
@@ -658,7 +700,7 @@ def mergeable_pairs(run_dir, plan: dict, survivors: list[str], best: str) -> tup
     pairs, skipped = [], []
     for a, b in itertools.combinations(sorted(survivors), 2):
         ca, cb = set(cluster_ids_for(run_dir, plan, a)), set(cluster_ids_for(run_dir, plan, b))
-        check = merge_search.is_mergeable(work / a, work / b, base_dir)
+        check = merge_search.is_mergeable(work / a, work / b, base_dir, md_blocks=md_blocks)
         if not check["mergeable"]:
             skipped.append({"pair": [a, b], "reason": "both independently diverged from the "
                             f"round parent {best!r} on the same module(s) — a real edit "
@@ -671,7 +713,7 @@ def mergeable_pairs(run_dir, plan: dict, survivors: list[str], best: str) -> tup
 
 def merge_stage(run_dir, project: Path, best: str, survivors: list[str], plan: dict,
                 concurrency: int | None, max_parallel: int,
-                pregate_cmd: str | None = None) -> dict:
+                pregate_cmd: str | None = None, md_blocks: bool | None = None) -> dict:
     """Build, screen and select pairwise merges among this round's screen survivors (#438)."""
     import merge as merge_mod
     from cap_evolve import graph
@@ -682,17 +724,18 @@ def merge_stage(run_dir, project: Path, best: str, survivors: list[str], plan: d
     seed = int(run_dir.read_splits().seed)
     screens = {t: latest_screen(run_dir, t) for t in survivors}
     merges = []
-    pairs, skipped = mergeable_pairs(run_dir, plan, survivors, best)
+    pairs, skipped = mergeable_pairs(run_dir, plan, survivors, best, md_blocks)
     for a, b, ca, cb in pairs:
         tag = f"merge_{a}_{b}"
-        built = merge_mod.build_merge_dir(base_dir, work / a, work / b, work / tag)
+        built = merge_mod.build_merge_dir(base_dir, work / a, work / b, work / tag,
+                                          md_blocks=md_blocks)
         if not built["built"]:
             skipped.append({"pair": [a, b], "reason": "edit collision",
                             "conflicts": built["conflicts"]})
             continue
         # #632: two valid parents can still compose into an invalid merge — check before its
         # screen spends a rollout, same as the round's own candidates.
-        bad = pregate_cmd and run_pregate_check(pregate_cmd, work / tag)
+        bad = pregate_failure(run_dir, project, best, work / tag, pregate_cmd)
         if bad:
             run_dir.log_event("agent_optimize_pregate_invalid", tag=tag, parents=[a, b],
                               output=bad)
@@ -902,7 +945,8 @@ class SingleCandidateUnjustified(RuntimeError):
 
 
 def sibling_justification(n_candidates: int, explicit: str | None,
-                          afford_check_file: str | None) -> tuple[str | None, str | None]:
+                          afford_check_file: str | None,
+                          new_engine: bool = False) -> tuple[str | None, str | None]:
     """Resolve why this round runs below MIN_SIBLINGS, or raise if it cannot.
 
     Returns ``(justification, source)`` — both ``None`` when ``n_candidates`` already meets
@@ -912,6 +956,8 @@ def sibling_justification(n_candidates: int, explicit: str | None,
     """
     if n_candidates >= MIN_SIBLINGS:
         return None, None
+    if new_engine:  # dag_parallel + active_eval: the ledger makes one good idea affordable
+        return "new engine: no sibling minimum", "new_engine"
     if explicit and explicit.strip():
         return explicit.strip(), "explicit"
     if afford_check_file:
@@ -1033,6 +1079,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "parent always gets fresh ones.")
     p.add_argument("--no-control", action="store_true",
                    help="skip the null control (NOT recommended — you lose the noise floor)")
+    p.add_argument("--steal-lock", action="store_true",
+                   help="take over $R/driver.lock even if its holder looks alive or is on "
+                        "another host (use only when that driver is known dead)")
     p.add_argument("--skip-screen-ladder", action="store_true",
                    help="run full-val on a candidate with no screen.py record for it. Unless "
                         "the run's frozen screening_structurally_uneconomical is true, each "
@@ -1130,13 +1179,23 @@ def _main(argv=None) -> int:
     project = Path(args.project)
     work = Path(args.run_dir) / "work"
     work.mkdir(parents=True, exist_ok=True)
-
     best = run_dir.best_id
     if not best:
         print(json.dumps({"error": "no best_id in the run dir — run baseline first"}, indent=2))
         return 2
+    try:
+        lineage.acquire_driver_lock(run_dir.root, steal=args.steal_lock)
+    except lineage.DriverBusy as e:
+        print(json.dumps({"error": str(e)}, indent=2))
+        return 2
 
     tags = [t.strip() for t in args.candidates.split(",") if t.strip()]
+    try:  # #713 B7: a second launch on the same tag(s) fails fast instead of clobbering
+        for t in tags:
+            run_dir.run_lock(f"round_{t}")
+    except RuntimeError as exc:
+        print(json.dumps({"error": str(exc)}, indent=2))
+        return 3
     missing = [t for t in tags if not (work / t).is_dir()]
     if missing:
         print(json.dumps({"error": f"tags not found under {work}: {missing}"}, indent=2))
@@ -1154,19 +1213,29 @@ def _main(argv=None) -> int:
     # (SKILL.md step 2) — see SingleCandidateUnjustified's docstring for why. Resolved before
     # any work-dir mutation or spend below, so an unjustified serial round fails fast with
     # nothing charged.
+    NEW_ENGINE = optimizer_config.new_engine(spec_for_run(run_dir, project))
+    if NEW_ENGINE and args.gate_against != "control":
+        args.no_control = True  # ledger pooling replaces the per-round null control
     JUSTIFICATION, JUSTIFICATION_SOURCE = sibling_justification(
-        len(tags), args.single_candidate_justification, args.afford_check_file)
+        len(tags), args.single_candidate_justification, args.afford_check_file, NEW_ENGINE)
 
     # #632: the registered pre-gate check (e.g. gold replay) is a HARD precondition, run on
     # every tag's bytes before any screen or eval is paid for. One invalid tag refuses the
     # whole round, the same idiom as the screen-ladder refusal below.
     PREGATE = resolve_pregate_check(run_dir, args.pregate_check)
-    if PREGATE:
+    if PREGATE or pregate.enabled(spec_for_run(run_dir, project)):  # #708: built-in needs no registration
         prior_invalid = known_invalid(run_dir)
-        invalid = {t: r for t in tags if (r := run_pregate_check(PREGATE, work / t))}
+        invalid = {t: r for t in tags if (r := pregate_failure(run_dir, project, best, work / t, PREGATE))}
         for t, r in invalid.items():
             run_dir.log_event("agent_optimize_pregate_invalid", tag=t, output=r,
                               iteration=int(run_dir.spent.iterations))
+        # #708: a sibling failing only the BUILT-IN pre-gate is dropped, not the whole round; the
+        # legacy registered check (#632) still refuses the round, and so does "every tag invalid".
+        builtin = {t: r for t, r in invalid.items() if r.startswith("built-in pre-gate:")}
+        if builtin and len(builtin) == len(invalid) and len(builtin) < len(tags):
+            tags = [t for t in tags if t not in builtin]
+            print(json.dumps({"pregate_dropped": builtin}), file=sys.stderr)
+            invalid = {}
         if invalid:
             print(json.dumps({
                 "error": f"candidate(s) {sorted(invalid)} fail the run's pre-gate check "
@@ -1282,7 +1351,8 @@ def _main(argv=None) -> int:
     # skipped by merge_stage for zero rollouts. (An unscreened survivor means no merge applied,
     # so the screen budget above and this one never charge the same round twice.)
     merge_applies = len(survivors) >= 2 and all(screened_by_tag[t] for t in survivors)
-    eligible_pairs = ([[a, b] for a, b, _, _ in mergeable_pairs(run_dir, plan, survivors, best)[0]]
+    MD_BLOCKS = mdblocks.enabled(spec)  # #709 ablation: merge.md_blocks / CAPEVOLVE_MD_BLOCKS
+    eligible_pairs = ([[a, b] for a, b, _, _ in mergeable_pairs(run_dir, plan, survivors, best, MD_BLOCKS)[0]]
                       if merge_applies else [])
     MERGE_SKIP = None
     if args.no_merge and eligible_pairs:
@@ -1359,18 +1429,18 @@ def _main(argv=None) -> int:
 
     input_tags = list(tags)
     screen_stage = {}
-    node_parents = {t: [best] for t in tags}
+    node_parents = {t: _recorded_parents(run_dir, t, best) for t in tags}
     for t in tags:
         payload = screen_payloads[t]
         screen_stage[t] = screen_summary(payload, auto=t in auto_screened)
         if payload is None:
             continue
-        graph.append_node(run_dir, node_id=t, parents=[best], status="screened", gate={},
+        graph.append_node(run_dir, node_id=t, parents=node_parents[t], status="screened", gate={},
                           cluster_ids=cluster_ids_for(run_dir, plan, t),
                           edit_kind=(plan.get(t) or {}).get("edit_kind"))
 
     for t, sup in dominated.items():
-        graph.append_node(run_dir, node_id=t, parents=[best], status="superseded", gate={},
+        graph.append_node(run_dir, node_id=t, parents=node_parents.get(t), status="superseded", gate={},
                           dominated_by=sup,
                           reason=f"its diff is a strict subset of sibling {sup}'s, which is "
                                  "gated instead")
@@ -1379,7 +1449,7 @@ def _main(argv=None) -> int:
     MERGE = None
     if not args.no_merge and merge_applies:
         MERGE = merge_stage(run_dir, project, best, survivors, plan, EFFECTIVE_CONCURRENCY,
-                            args.max_parallel, pregate_cmd=PREGATE)
+                            args.max_parallel, pregate_cmd=PREGATE, md_blocks=MD_BLOCKS)
         for m in MERGE["merges"]:
             node_parents[m["tag"]] = m["parents"]
         tags = [t for t in survivors if t not in MERGE["subsumed"]] + MERGE["chosen"]
@@ -1558,6 +1628,10 @@ def _main(argv=None) -> int:
         elif args.mode == "epsilon_constraint":
             gate_kwargs = dict(constraints=CONSTRAINTS, metrics_candidate=cand_values,
                                metrics_stderr_candidate=cand_stderrs)
+        elif args.mode == "reward_gated" and spec.get("objectives"):
+            # #711: role-tagged plug-in metrics (gate|pareto|display); the verdict is gate_check's
+            # own and is NOT overwritten by the archive below (that block is pareto-only).
+            gate_kwargs = dict(objectives=spec["objectives"])
         if tag == CTL:
             g = gate_unless_eval_failed(ev, Path(args.run_dir), tag, args.k_se, args.mode,
                                         args.veto_regressions, **gate_kwargs)
@@ -1587,6 +1661,10 @@ def _main(argv=None) -> int:
             # 0.022-0.035 on run_finalrun6 while real per-edit effects were 0.011-0.05.
             "footprint": g.get("footprint"),
             "verdict": g.get("verdict"),
+            # #706 ablation.active_eval (default off): advisory paired-posterior read-out from
+            # the evidence ledger; the gate verdict above is unchanged.
+            **({"posterior": posterior.safe_summarize(run_dir, tag, best, args.split)}
+               if tag != CTL and posterior.enabled(spec) else {}),
             "regressions": g.get("regressions"),
             # What the candidate TRADED (gate_check's `movement`): the broke ids AND the fixed
             # ids. Persisted so `commit.py` can put them on the step record instead of leaving

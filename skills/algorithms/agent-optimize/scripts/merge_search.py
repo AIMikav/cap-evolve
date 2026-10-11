@@ -16,13 +16,13 @@ own docstring is the reason overlapping edits are refused here rather than attem
 same-function collision is a genuine semantic disagreement funcmerge.py already declines to
 auto-resolve, and offering it to a human via a merge conflict is not "graph search", it is
 "ask a human what the graph search could not decide". Disjoint edits are exactly the
-provably-safe case per-task-fanout.md already describes.
+provably-safe case docs/archive/agent-optimize-legacy/per-task-fanout.md already describes.
 
 This script does NOT invent a new merge engine. Per pair it shells out to `integrate.py`
 (one branch at a time, measured after each — see that file for why a one-shot N-way merge
 does not compose) and forwards `--canary-auto` so the merge's objective is measured against
 canaries drawn from the WHOLE suite, never just the neighbourhood of the two branches'
-targets (per-task-fanout.md's "a canary set that only covers what you aimed at cannot catch
+targets (docs/archive/agent-optimize-legacy/per-task-fanout.md's "a canary set that only covers what you aimed at cannot catch
 what you hit by accident" — restated here because a merge is exactly the moment two
 neighbourhoods combine and the blast radius is not either one's alone).
 
@@ -124,7 +124,8 @@ def _mechanisms_targets(run_dir: Path, tag: str) -> list[str]:
     return sorted(ids)
 
 
-def is_mergeable(candidate_a: Path, candidate_b: Path, common_ancestor: Path) -> dict:
+def is_mergeable(candidate_a: Path, candidate_b: Path, common_ancestor: Path,
+                 md_blocks: bool | None = None) -> dict:
     """GEPA's mergeable-ness check (arXiv:2507.19457, Appendix D, Algorithms 3-4), adapted to
     this project's capability tree instead of GEPA's list-of-modules abstraction.
 
@@ -143,8 +144,21 @@ def is_mergeable(candidate_a: Path, candidate_b: Path, common_ancestor: Path) ->
     Desirable() check (Algorithm 4) only tests "did i change M" vs "did j change M" and would
     refuse this case too, but two edits that are not actually different cannot be a real
     disagreement, and refusing them would reject work that cannot possibly conflict.
+
+    ``md_blocks`` (ablation key ``merge.md_blocks``, default on, #709): ``.md``/``.txt`` files are
+    split into heading-section blocks (``cap_evolve.mdblocks``) instead of being one whole-file
+    module, so siblings editing different sections of one policy.md are not a false collision.
+    Off = legacy whole-file verdict. ``None`` resolves via ``mdblocks.enabled()`` (env
+    ``CAPEVOLVE_MD_BLOCKS=0`` turns it off; ``round.py`` passes the capevolve.yaml
+    ``merge.md_blocks`` value). ``merge.build_merge_dir`` builds the same blocks, so a pair judged
+    mergeable here is buildable. Block-disjoint is MECHANICAL mergeability, not semantic safety:
+    the merged child still goes through screen/gate.
     """
     import merge as merge_mod
+    import _bootstrap  # noqa: F401
+    from cap_evolve import mdblocks
+
+    md_blocks = mdblocks.enabled() if md_blocks is None else md_blocks
 
     base_f, a_f, b_f, changed_a, changed_b = merge_mod._changed_files(
         common_ancestor, candidate_a, candidate_b)
@@ -155,6 +169,17 @@ def is_mergeable(candidate_a: Path, candidate_b: Path, common_ancestor: Path) ->
         a_bytes, b_bytes = merge_mod._read(a_f, rel), merge_mod._read(b_f, rel)
         if a_bytes == b_bytes:
             identical.append(rel)
+            continue
+        if md_blocks and rel.endswith((".md", ".txt")) and a_bytes is not None \
+                and b_bytes is not None and rel in base_f:
+            try:
+                r = mdblocks.three_way(*(mdblocks.decode(x) for x in
+                                         (base_f[rel].read_bytes(), a_bytes, b_bytes)))
+            except UnicodeDecodeError:
+                conflicts.append(rel)
+                continue
+            conflicts += [f"{rel}::{i}" for i in r["conflicts"]]
+            identical += [f"{rel}::{i}" for i in r["identical"]]
             continue
         if not rel.endswith(".py") or a_bytes is None or b_bytes is None or rel not in base_f:
             conflicts.append(rel)  # whole-file module: both diverged, differently
@@ -331,7 +356,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--prose", default="policy/policy.md")
     ap.add_argument("--canary-auto", default="",
                     help="path to a baseline per-task JSON. Canaries are drawn from the "
-                         "WHOLE suite (per-task-fanout.md), not from the merged branches' "
+                         "WHOLE suite (docs/archive/agent-optimize-legacy/per-task-fanout.md), not from the merged branches' "
                          "own neighbourhood — pass the run's baseline.json.")
     ap.add_argument("--canary", default="", help="explicit canary ids, if not using --canary-auto")
     ap.add_argument("--canary-floor", type=float, default=0.9)
@@ -341,7 +366,50 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--floor", type=float, default=0.0,
                     help="measured null delta — see integrate.py --floor")
     ap.add_argument("--json", dest="json_out", default="")
+    ap.add_argument("--nway", action="store_true",
+                    help="#710: fold ALL survivors by merge-base with an interaction score and a "
+                         "probe plan (merge_n.py) instead of pairwise integrate.py. Prints the "
+                         "plan; builds $R/work/merge_<tags>. Ablation smart_merge off => ignored.")
     return ap
+
+
+def _nway(args, run_dir: Path, survivors: list[str]) -> int:
+    import _bootstrap  # noqa: F401
+    import merge_n
+    from cap_evolve import RunDir
+    from cap_evolve.candidate_graph import CandidateGraph
+    from cap_evolve.specfile import spec_for_run
+
+    rd = RunDir.open(run_dir)
+    if not merge_n.enabled(spec_for_run(rd, Path(args.project))):
+        print("smart_merge is off; use the pairwise path (omit --nway)", file=sys.stderr)
+        return 2
+    work = run_dir / "work"
+    dir_of = lambda t: work / t if (work / t).is_dir() else rd.candidate_dir(t)  # noqa: E731
+    graph = CandidateGraph.load(rd)
+    for t in survivors:  # survivors are not in the graph yet: attach them to --base
+        if t not in graph:
+            graph._nodes[t] = {"id": t, "parents": [args.base]}
+    tt = {t: _mechanisms_targets(run_dir, t) for t in survivors}
+    wins = merge_n.wins_from_run(rd, survivors, args.base)
+    out_tag = "merge_" + "_".join(survivors)
+    splits = rd.read_splits()
+    try:
+        canaries = merge_n.check_ids([c.strip() for c in args.canary.split(",") if c.strip()],
+                                     splits, "--canary")
+    except ValueError as e:
+        print(f"merge_search ERROR: {e}", file=sys.stderr)
+        return 2
+    for t, ids in tt.items():
+        if not ids:
+            print(f"merge_search WARNING: no mechanisms.jsonl tasks for {t}", file=sys.stderr)
+    res = merge_n.plan(survivors, dir_of, graph, touched_tasks=tt, wins=wins or {},
+                       all_tasks=splits.ids("val"),                    # val only, never test
+                       canaries=canaries or None,
+                       out_dir=work / out_tag, run_dir=rd)
+    res["node"] = merge_n.node_record(res, out_tag)
+    print(json.dumps(res, indent=2, default=sorted))
+    return 0 if res["built"] else 1
 
 
 def main(argv=None) -> int:
@@ -351,6 +419,8 @@ def main(argv=None) -> int:
     project = Path(args.project)
     work = run_dir / "work"
     survivors = [t.strip() for t in args.survivors.split(",") if t.strip()]
+    if args.nway:
+        return _nway(args, run_dir, survivors)
     canary_auto = _canary_auto_file(args.canary_auto) if args.canary_auto else ""
 
     explicit_targets: dict[str, list[str]] = {}

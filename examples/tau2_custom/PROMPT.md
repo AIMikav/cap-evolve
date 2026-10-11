@@ -4,7 +4,7 @@ Paste this to your coding agent (Claude Code) at the cap-evolve repo root and sa
 **"follow RUN.md."** Intake treats this as a brand-new benchmark: the integration step
 **clones + installs tau2-bench**, writes the adapter, seeds the capability, runs the
 `cap-evolve check` gate, then the full optimize → gate → sealed-test → report loop with a
-live dashboard. The delivery path is ONE choice you make up front — `direct` or `intervention: blackbox` — and the
+live dashboard. The delivery arm is ONE choice you make up front — `direct` or `intervention: blackbox` — and the
 intervention skill owns everything about how `blackbox` works. Everything below is the input
 intake needs.
 
@@ -13,16 +13,19 @@ Use only information in this current cap-evolve repo root folder on the current 
 Do not use external documentation, web searches, prior knowledge, other repositories, branches, tags, or commits.
 Treat this repository as the sole source of truth. If required information is missing, state that it is missing rather than guessing.
 Start with RUN.md and follow it exactly.
+A file this prompt names may be absent from the working tree. If so, read it from the
+current branch with `git show HEAD:<path>`; that is still this repository.
 
 
 Follow RUN.md to run a cap-evolve optimization. Onboard this as a brand-new
 benchmark — the intake/integration step should CLONE + INSTALL it (not assume it
 exists). Here is everything intake needs:
 
-# 0. DELIVERY PATH  (pick EXACTLY ONE arm)
+# 0. DELIVERY ARM  (pick EXACTLY ONE)
 - the CAPABILITY is the same either way — the airline agent's TOOL SURFACE only (tools,
                 not the system prompt / policy). Only the delivery differs, and that is a spec key:
-                  direct (no `intervention:` line) | intervention: blackbox
+                  direct (no `intervention:` line) | blackbox (the top-level line
+                  `intervention: blackbox` in capevolve.yaml)
 - ASK ME WHICH ONE and WAIT for the answer: `direct` or `blackbox`. Ask it as a PLAIN question with
                 ONE SHORT SENTENCE per option — "direct: the runner reads the candidate's files
                 in its own process, no extra services" / "blackbox: the candidate becomes a store
@@ -36,12 +39,14 @@ exists). Here is everything intake needs:
                 candidates one way while the record says the other. The second arm is a
                 SEPARATE onboarding in its own project (intake `--base`), done only if I ask.
 - for `intervention: blackbox`, FOLLOW THE INTERVENTION SKILL —
-                `skills/interventions/llm-proxies/blackbox/SKILL.md` and the seeding reference it
-                points to. It owns provisioning, service lifecycle, the seed shape (one skill
-                package + a frozen primitives module), the wrapper authoring rules, store
-                import order, and the per-candidate deploy. Do NOT re-derive any of that from
-                this prompt, and do not hand-roll a copy of blackbox_env. This prompt supplies only
-                what the skill cannot know: the benchmark and the environment.
+                `skills/interventions/llm-proxies/blackbox/SKILL.md`. It owns provisioning,
+                service lifecycle, store import order, and the per-candidate deploy. Do NOT
+                re-derive any of that from this prompt, and do not hand-roll a copy of
+                blackbox_env. This prompt supplies only what the skill cannot know: the
+                benchmark and the environment.
+                The skill says nothing about the SEED SHAPE or the wrapper authoring rules.
+                They are stated in #1 below, and the rules the optimizer is held to are in
+                #5. Follow them as written.
 
 # 1. CAPABILITY TO OPTIMIZE  (a copy is edited each iteration; the original is never touched)
 - what:         the airline agent's TOOL SURFACE only (tools; the system prompt / policy is NOT
@@ -58,25 +63,50 @@ exists). Here is everything intake needs:
                 Reservation, Passenger, Payment) so the optimizer can write correct tool code.
                 Seed tools must be CLEAN runnable code — no baked-in optimizer instructions in
                 the docstrings.
-- IF blackbox:  capabilities [tools]; the seed is GENERATED from the same 14 primitives
-                per the intervention skill's seeding procedure. capability_sources [].
-                THE SEED MUST BE NEUTRAL. my_skill/SKILL.md must be an EMPTY FILE (empty
-                string). The optimizer edits only tools (scripts/<tool>.py); SKILL.md is
-                not an edit surface.
+- IF blackbox:  capabilities [tools]; the seed renders the same 14 primitives as a SKILL
+                PACKAGE. Create this shape under the project's capability_path:
+                  my_skill/
+                    SKILL.md              EMPTY FILE (empty string)
+                    scripts/<tool>.py     one wrapper per primitive, 14 files
+                  primitive_tools/
+                    functions.py          the 14 frozen primitives
+                  reference/
+                    data_model.py         byte-for-byte copy of tau2's airline data_model
+                Breaking any rule below silently produces a broken tool rather than an error.
+                (a) WRAPPER `my_skill/scripts/<tool>.py`: ONE public top-level `def`, named
+                    like the file, with its `def` line on ONE line. Every top-level `def`
+                    becomes its own tool, so a helper must be nested or `_`-prefixed.
+                (b) The wrapper's signature, parameter NAMES and docstring match tau2's own
+                    tool, because the scorer matches actions by name and argument and the
+                    published schema is built from both. Its body is one line:
+                    `return env_<tool>(<each param>=<each param>)`.
+                (c) A STRUCTURED parameter (enum, object, list of objects) is typed in the
+                    wrapper: `Literal[...]` aliases for enums, and Pydantic `BaseModel`
+                    classes copied from tau2's data_model for objects, annotated
+                    `List[Model | dict]`. Define these classes in the SAME file, and do not
+                    use recursive models. Otherwise the published schema is flat and the
+                    model guesses the field names.
+                (d) PRIMITIVES `primitive_tools/functions.py`: one `env_<tool>` per tau2
+                    tool, with the same signature in plain types and the same docstring.
+                    Each body forwards its arguments to ONE private helper,
+                    `_make_api_call(**kwargs)`, which:
+                      - takes the tool name from the calling frame, with `env_` stripped;
+                      - reads `env_id` from module globals (the store injects it per call);
+                      - POSTs to the environment service in 2b.
+                    The wrapper reaches a primitive ONLY by calling it BY BARE NAME, which
+                    the store resolves. It never imports or edits `primitive_tools/`.
+                (e) `my_skill/SKILL.md` stays EMPTY, so THE SEED IS NEUTRAL.
+                    capability_sources: `reference/data_model.py`, so the optimizer can
+                    write correct tool code. The optimizer edits only `scripts/<tool>.py`.
+                    protected_paths: `primitive_tools/*`, `my_skill/SKILL.md`,
+                    `reference/*`.
 - actions:      [edit]
-
-# 1b. INTERVENTION  (how the capability reaches the model — a spec key)
-- direct:       the spec has NO `intervention:` line (direct is the default).
-- blackbox:     the spec gets the top-level line:  intervention: blackbox
-                (`capabilities:` says WHAT is edited; `intervention:` says HOW it reaches the
-                model. capevolve.yaml-only — no CLI override.)
-- VERIFY:       `cap-evolve check .capevolve/project` green for the ONE spec you prepared, and
-                `intervention: sap` (a typo) REJECTED BY NAME, not silently defaulted to
-                direct.
 
 # 2. BENCHMARK / DATASET  (the eval) — INSTALL IT DURING INTAKE
 - cap-evolve itself: there is NO virtualenv and nothing installed — create one first
                 (uv venv -p 3.11 .venv) and `pip install -e core`.
+- skills dir:   `export CAPEVOLVE_SKILLS_DIR=$PWD/skills` in EVERY shell that runs cap-evolve.
+                Read skills from the repo's `skills/`, not from a globally installed Skill tool.
 - benchmark:    tau2-bench, airline domain
 - repo:         https://github.com/skillberry-ai/skillberry-benchmarks.git
                 pin commit a3a83266008275e9d800fd709927fa3dc4f23ec5 → vendor/skillberry-benchmarks
@@ -89,9 +119,10 @@ exists). Here is everything intake needs:
 - domain:       direct → "airline";  blackbox → "airline_skillberry"
 - tasks:        "adapter" — all 50 airline tasks from
                 tau2.domains.airline.environment.get_tasks; no network in tasks()
-- splits:       all 50 as train = val = test (no-holdout fit metric; the engine logs a
-                splits_warning and the report flags the test number as a fit metric). Pin them
-                in split_ids.json.
+- splits:       TWO split files, both no-holdout (train = val = test; the engine logs a
+                splits_warning and the report flags the test number as a fit metric):
+                  split_ids.json        all 50 tasks, for a later full run
+                  split_ids_task9.json  task 9 only; THIS run's split_ids_file (section 6)
 
 # 2b. THE BENCHMARK'S ENVIRONMENT SERVICE  [BLACKBOX ONLY — skip entirely for direct]
 - tau2 HAS one — the Environment Manager. The intervention skill requires such a service
@@ -136,6 +167,12 @@ exists). Here is everything intake needs:
                 openai/aws/gpt-oss-120b). [BLACKBOX ONLY] the AGENT's model is the SPA-routed name
                 (default `ibm/skillberry-local`) while the user simulator stays on the gateway
                 model — the intervention skill states why that boundary is a correctness rule.
+- [BLACKBOX ONLY] SPA's upstream model: the proxy forwards the agent's calls to
+                `SPA_MODEL_NAME`, not to TAU2_AGENT_MODEL. It MUST name the same model as the
+                agent under test, in litellm form (`openai/<model>`). Pass it explicitly when
+                starting the proxy. If it is unset, the proxy falls back to its built-in
+                default (`openai/gpt-oss-120b`), and the arm measures a different model with no
+                error.
 - concurrency:  TAU2_MAX_CONCURRENCY=125 on the direct arm. [BLACKBOX ONLY] start LOW (e.g. 4) —
                 every agent call funnels through one proxy and one store process.
 
@@ -151,8 +188,11 @@ exists). Here is everything intake needs:
 - the OPTIMIZER's credentials are SEPARATE and already handled: the `claude-code` optimizer
                 inherits them from the run owner's Claude Code environment. Nothing about them
                 belongs in the spec or the adapter.
-- agent AND user simulator:  aws/gpt-oss-120b  (TAU2_AGENT_MODEL / TAU2_USER_MODEL), routed as
-                the litellm string `openai/aws/gpt-oss-120b`. Normalize to that form ONCE and
+- agent AND user simulator:  the values of TAU2_AGENT_MODEL / TAU2_USER_MODEL (and, on
+                blackbox, SPA_MODEL_NAME) in the shell or the repo `.env` WIN. Precedence:
+                shell > `.env` > this prompt. `aws/gpt-oss-120b` is only the fallback for an
+                unset key, and the gateway may not serve it. Record the resolved model in
+                PROJECT.md. Route it as the litellm string `openai/<model>`. Normalize to that form ONCE and
                 idempotently — `openai/openai/…` 404s. Model ids are gateway ALIASES and
                 CASE-SENSITIVE (`Azure/…` and `azure/…` can coexist), so confirm the alias
                 against the gateway's own catalog before the first run rather than assuming it.
@@ -201,11 +241,15 @@ exists). Here is everything intake needs:
                 reward_info only to know WHICH action/argument failed (the gold action's arg KEYS are
                 safe, its VALUES are not). Fall back to the tool-name message when a piece isn't safely
                 derivable.
+- pairing:      pair each tool result with its call BY POSITION (the n-th result after an
+                assistant turn answers its n-th tool call), not by id. On the blackbox arm the
+                environment service records every call and result with an EMPTY id, so
+                pairing by id collapses all calls onto one result.
 - objective:    maximize mean reward on the VAL split
 
 # 4b. TRAJECTORIES  (the FULL traces the optimizer reads) — PATH IS AN INPUT
 - where:        persist tau2's native per-task results (full transcript + reward_info) via
-                run_tasks(save_path=...) into a per-eval dir UNDER THE RUN, at the ONE path
+                tau2.run.run_tasks(save_to=...) into a per-eval dir UNDER THE RUN, at the ONE path
                 format every tau2 adapter in this repo shares:
                 <run_dir>/native_sims/<tag>/<split>/results_<YYYYmmdd_HHMMSS>_<pid>.json
                 (<tag> is the candidate dir from ctx, under EITHER name the harness uses —
@@ -239,6 +283,33 @@ exists). Here is everything intake needs:
                 argument) while keeping every edit GENERAL; the scoring source is
                 sim.reward_info.reward; the data-model module the direct arm's tool code imports
                 is tau2's airline data_model, materialized under ./guidance/sources/.
+- [BLACKBOX ONLY] the delivery rules to ADD, because the optimizer cannot infer them. Each
+                `my_skill/scripts/<tool>.py` becomes ONE tool that the proxy injects. If a
+                rule is broken, the tool is silently broken; nothing errors.
+                (1) ONE public top-level `def` per file, named exactly like the file. Helpers
+                    are nested and `_`-prefixed.
+                (2) The signature and the docstring together are the schema the model reads.
+                    The docstring (Google style, `Args:`) gives each parameter its
+                    description; the annotations give its structure.
+                    - The SEED's signatures are FROZEN: types, parameter names and
+                      docstrings stay as they are.
+                    - A NEW tool uses `str` / `int` / `list` / `dict` by default.
+                    - For a genuinely structured parameter, copy the real class from
+                      ./guidance/sources/data_model.py into the tool's own file, WITH its
+                      dependencies. Copy only value models plus `typing` / `pydantic`
+                      imports: never a `tau2.*` import, never a DB class.
+                    - The `def` stays on one line, and no model may refer to itself.
+                      Breaking either gives a flat schema.
+                (3) Reach the environment ONLY by calling an `env_<tool>` primitive BY BARE
+                    NAME. List all 14 primitive names. A primitive returns the parsed
+                    result on success and an error STRING on a tool-level failure.
+                (4) NEVER call `_make_api_call`, NEVER edit `primitive_tools/`, and leave
+                    `SKILL.md` empty.
+                (5) A new or composite tool is a new FILE whose body calls primitives by
+                    bare name. Removing a tool means deleting its file.
+                The policy is NOT present on this arm, so the instructions must not
+                suggest fixing a cluster with a policy rule. Prose fixes go in a wrapper's
+                docstring.
 
 # 6. BUDGET / GATE
 - FIRST a quick test on EACH arm prepared: max_iterations 1, num_trials 1, a 1–2 task split,

@@ -33,6 +33,8 @@ import _bootstrap  # noqa: F401  # side-effect import, see above
 from cap_evolve import RunDir, footprint, harness
 from cap_evolve.gate import ParetoObjectiveError, decide
 from cap_evolve.loop import has_valid_trials
+from cap_evolve import objectives
+from cap_evolve.specfile import spec_for_run
 
 EPS = 1e-9
 
@@ -113,7 +115,8 @@ def regressions(current, candidate) -> list[str]:
 # reachable natively through round.py (issue #684 item 1): round.py forwards --objectives/
 # --metrics-*/--constraints here and, for pareto, additionally maintains a persistent
 # cap_evolve.pareto_archive.ParetoArchive across rounds — see round.py's own docstring.
-GATE_MODES = ["paired", "significant", "strict", "threshold", "pareto", "epsilon_constraint"]
+GATE_MODES = ["paired", "significant", "strict", "threshold", "pareto", "epsilon_constraint",
+              "reward_gated"]
 
 
 def _frozen_coverage(run_dir, per_task, split: str = "val") -> float:
@@ -206,7 +209,7 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
     run_dir = RunDir.open(Path(args.run_dir))
-    cur_tags = [t.strip() for t in (args.current or "").split(",") if t.strip()] \
+    cur_tags = harness.parse_tags(args.current) \
         or ([run_dir.best_id] if run_dir.best_id else [])
     if not cur_tags:
         print(json.dumps({"error": "no --current tag and no best_id in the run dir "
@@ -248,6 +251,15 @@ def main(argv=None) -> int:
     # vectors keep the SE they always had.
     se_floor = (harness.paired_se_floor(run_dir, args.candidate, cur_tags[0], fp, len(deltas))
                 if fp is not None and deltas else 0.0)
+    # #711 reward_gated: per-trial records (cost lives per trial, not in SplitResult) + the
+    # `optimizer.ablation.cost_gating` switch (false => decide() falls back to the legacy mode).
+    rg = {}
+    if args.mode == "reward_gated":
+        spec = spec_for_run(run_dir)
+        rg = dict(task_records=(objectives.load_trials(run_dir, cur_tags),
+                                objectives.load_trials(run_dir, args.candidate)),
+                  reward_gated_cfg=objectives.cfg_from_spec(spec),
+                  cost_gating=objectives.cost_gating_enabled(spec))
     try:
         d = decide(cur.reward, cand.reward, split="val", mode=args.mode, k_se=args.k_se,
                    candidate_stderr=cand.stderr, current_stderr=cur.stderr,
@@ -260,8 +272,10 @@ def main(argv=None) -> int:
                        args.metrics_stderr_candidate, "--metrics-stderr-candidate"),
                    metrics_stderr_current=_json_arg(
                        args.metrics_stderr_current, "--metrics-stderr-current"),
-                   constraints=_json_arg(args.constraints, "--constraints"))
-    except ParetoObjectiveError as exc:
+                   constraints=_json_arg(args.constraints, "--constraints"), **rg)
+    except (ParetoObjectiveError, ValueError) as exc:
+        if not isinstance(exc, ParetoObjectiveError) and args.mode != "reward_gated":
+            raise
         # Refuse the same way the rest of this script refuses an unjudgeable candidate
         # (no --current, no rollouts): a clean JSON error on stdout, rc 2 — never a
         # traceback, and never a verdict gate.py did not actually reach.
@@ -279,7 +293,7 @@ def main(argv=None) -> int:
     verdict = "indecisive" if d.indecisive else ("accept" if accept else "reject")
     # A reject with delta > 0 is not the same as a reject with delta <= 0: the first is
     # a positive direction the gate could not yet resolve at this n, and growing n on
-    # this SAME candidate (never a new edit) may resolve it — see references/algorithm.md,
+    # this SAME candidate (never a new edit) may resolve it — see docs/archive/agent-optimize-legacy/algorithm.md,
     # "Provisional candidates". Surfaced here so the driver notices it without having to
     # compute delta > 0 itself.
     # Off `d.accept`, not the regression-vetoed `accept`: a candidate the GATE accepted and

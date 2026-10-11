@@ -48,7 +48,7 @@ from pathlib import Path
 # cap_evolve imports below; not "unused" — deleting it breaks standalone runs.
 import _bootstrap  # noqa: F401  # side-effect import, see above
 
-from cap_evolve import RunDir, graph, harness
+from cap_evolve import RunDir, graph, harness, optimizer_cost
 
 import meter
 
@@ -62,6 +62,24 @@ import meter
 # check for that compliance gap: real wall-clock time clearly passed since the previous
 # decision, yet this commit still reports zero optimizer cost.
 _ZERO_OPTIMIZER_COST_WARN_S = 120  # ponytail: fixed heuristic threshold, tune if too noisy
+
+
+def _decision_times(run_dir: RunDir) -> tuple[float | None, float | None]:
+    """(first event time, previous decision time) of this run — bounds for the log harvest."""
+    first = last = None
+    try:
+        with run_dir.events_path.open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                first = first if first is not None else rec.get("t")
+                if rec.get("kind") in ("accept", "reject", "inconclusive", "provisional"):
+                    last = rec.get("t")
+    except OSError:
+        pass
+    return first, last
 
 
 def _wallclock_since_last_decision(run_dir: RunDir) -> float | None:
@@ -486,6 +504,9 @@ def main(argv=None) -> int:
                         "provisional=Δ>0 but unresolved, buying more trials on the SAME "
                         "candidate next (books nothing; re-commit it once grown)")
     p.add_argument("--val", type=float, default=None, help="candidate's full-val mean")
+    p.add_argument("--val-unverified", default=None, metavar="REASON",
+                   help="record --val as an operator-supplied number without checking it "
+                        "against the candidate's full-val rollouts (#713 B6)")
     p.add_argument("--note", default="", help="one line: why this edit, in general terms")
     # The DRIVER's disposition, recorded machine-readably alongside the screen's own
     # verdict. screen.py may only say kill/promote (invariant 1), so a candidate the
@@ -594,6 +615,25 @@ def main(argv=None) -> int:
                        "repairing this candidate's record.",
             }, indent=2))
             return 2
+
+    # #713 B6: --val must match the candidate's measured full-val mean. With no val rollouts
+    # there is nothing to verify against, so it needs an explicit --val-unverified REASON
+    # (recorded on the decision event). Only a MEASURED val may become the champion's best_val.
+    measured_val = None
+    if args.val is not None and not args.val_unverified:
+        measured = harness.split_result_from_rollouts(run_dir, args.candidate_id, "val")
+        if not measured.per_task:
+            print(json.dumps({"error": (
+                f"--val {args.val} cannot be verified: {args.candidate_id!r} has no full-val "
+                "rollouts. Evaluate it, drop --val, or pass --val-unverified REASON")}, indent=2))
+            return 2
+        if abs(measured.reward - args.val) > 1e-3:
+            print(json.dumps({"error": (
+                f"--val {args.val} does not match the measured full-val mean "
+                f"{measured.reward} of {args.candidate_id!r}; fix it, drop --val, or pass "
+                "--val-unverified REASON")}, indent=2))
+            return 2
+        measured_val = measured.reward
 
     accepted = args.decision == "accept"
     indecisive = args.decision == "inconclusive"
@@ -826,7 +866,7 @@ def main(argv=None) -> int:
                if args.parents else None)
     run_dir.snapshot(args.candidate_id, src)
     if accepted:
-        run_dir.set_best(args.candidate_id)
+        run_dir.set_best(args.candidate_id, val=measured_val)
     # Carry the proposer's own spend on the EVENT as well as into state.json. update_spent
     # alone leaves the dashboard's cost ledger unable to attribute it: state.json has the
     # total, but no cost-bearing event exists to explain it, so an agent-mode run reported
@@ -849,19 +889,42 @@ def main(argv=None) -> int:
         args.optimizer_tokens = metered["tokens"]
         args.optimizer_seconds = round(metered["seconds"], 3)
         meter_field["opt_meter"] = metered["meter"]
+    # #715: a conversational run has no host transcript, but Claude Code's own session log
+    # (~/.claude/projects) has every message's usage. Harvest what is new since the previous
+    # decision, deduped by message id, unless the host meter or the agent already accounted
+    # for this round. USD is a list-price estimate; unpriced models are reported, not zeroed.
+    harvested = None
+    no_transcript_warning = None
+    if (metered is None and not args.optimizer_usd and not args.optimizer_tokens
+            and optimizer_cost.mode() != "off"):
+        first_t, last_t = _decision_times(run_dir)
+        since = (first_t if optimizer_cost.mode() == "session" else last_t) or first_t or 0.0
+        harvested = optimizer_cost.harvest(
+            run_dir, [run_dir.root.parent.parent, Path.cwd()], since)
+        if harvested is None:
+            no_transcript_warning = optimizer_cost.NO_TRANSCRIPT_MSG
+            print(f"WARNING: {no_transcript_warning}", file=sys.stderr)
+        else:
+            args.optimizer_usd = harvested["usd"]
+            args.optimizer_tokens = harvested["tokens"]
+            if not harvested["scoped"]:
+                print("WARNING: CLAUDE_CODE_SESSION_ID unset - optimizer cost falls back to "
+                      "ALL Claude sessions in this directory since the last decision (may "
+                      "over-count other sessions).", file=sys.stderr)
     # #684 item 10: only fires when nothing else already accounted for the time (the host
     # meter above, or the agent's own --optimizer-* flags) — a real metered/self-reported
     # $0 round (e.g. a near-instant reject) is not a compliance problem.
     wallclock_elapsed = _wallclock_since_last_decision(run_dir)
     optimizer_cost_warning = None
-    if (metered is None and not args.optimizer_seconds and not args.optimizer_usd
-            and wallclock_elapsed is not None
+    if (metered is None and harvested is None and not args.optimizer_seconds
+            and not args.optimizer_usd and wallclock_elapsed is not None
             and wallclock_elapsed > _ZERO_OPTIMIZER_COST_WARN_S):
         optimizer_cost_warning = (
             f"{wallclock_elapsed:.0f}s elapsed since the previous decision but this commit "
             "carries optimizer_seconds=0/optimizer_usd=0 — pass --optimizer-seconds/"
             "--optimizer-usd/--optimizer-tokens for your own proposal cost (SKILL.md step 7).")
     run_dir.log_event(args.decision, candidate=args.candidate_id, val=args.val,
+                      val_unverified=args.val_unverified,
                       gate_verdict=gate_verdict, overrode_gate=overrode_gate,
                       note=args.note,
                       reject_basis=args.reject_basis,
@@ -874,6 +937,10 @@ def main(argv=None) -> int:
                       opt_tokens=args.optimizer_tokens or None,
                       opt_seconds=args.optimizer_seconds or None,
                       optimizer_cost_warning=optimizer_cost_warning,
+                      optimizer_meter_warning=no_transcript_warning,
+                      opt_cost_basis="session_log_list_price_estimate" if harvested else None,
+                      opt_cost_session_scoped=harvested["scoped"] if harvested else None,
+                      opt_unpriced_tokens=(harvested or {}).get("unpriced_tokens") or None,
                       wallclock_since_last_decision=wallclock_elapsed,
                       **meter_field, **gate)
     run_dir.update_spent(optimizer_usd=args.optimizer_usd,
@@ -930,7 +997,7 @@ def main(argv=None) -> int:
         # dashboard's ``gate_decisions[]`` does not have to regex them out of an agent's prose.
         harness.record_iteration(run_dir, src, args.candidate_id, parent_id=parent_id,
                                  accepted=accepted, reason=reason,
-                                 val=args.val,
+                                 val=args.val, val_verified=not args.val_unverified,
                                  parent_val=parent_val,
                                  indecisive=indecisive, memory_skill=memory_skill,
                                  parents=parents, edit_kind=args.edit_kind,

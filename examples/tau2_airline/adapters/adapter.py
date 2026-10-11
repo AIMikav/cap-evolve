@@ -68,6 +68,16 @@ def _leaked_stop_continuation(messages) -> bool:
 _cost_unpriced_warned = False
 
 
+def _usersim_meta(messages, model) -> dict:
+    """User-simulator tokens whose cost the provider did NOT report (None or 0.0), so the
+    harness can list-price exactly those and never double-count a provider-priced message."""
+    ut = [getattr(m, "usage", None) or {} for m in messages
+          if getattr(m, "role", None) == "user" and not getattr(m, "cost", None)]
+    return {"model": model,
+            "prompt_tokens": sum(int(u.get("prompt_tokens") or 0) for u in ut),
+            "completion_tokens": sum(int(u.get("completion_tokens") or 0) for u in ut)}
+
+
 def _cost_and_tokens(sim) -> tuple[float, int, dict]:
     """Cost and token usage for one simulation, plus metadata saying how solid the cost is.
 
@@ -128,7 +138,8 @@ def _cost_and_tokens(sim) -> tuple[float, int, dict]:
             tokens,
             {"cost_source": source, "cost_measured": not unpriced_models,
              "unpriced_models": unpriced_models,
-             "messages_missing_cost": 0, "messages_missing_usage": missing_usage},
+             "messages_missing_cost": 0, "messages_missing_usage": missing_usage,
+             "usersim": _usersim_meta(messages, gateway.user_model())},
         )
 
     # tau2 gave up on the whole run: salvage whatever the provider did price.
@@ -153,6 +164,7 @@ def _cost_and_tokens(sim) -> tuple[float, int, dict]:
         "unpriced_models": unpriced_models,
         "messages_missing_cost": missing,
         "messages_missing_usage": missing_usage,
+        "usersim": _usersim_meta(messages, gateway.user_model()),
     }
 
 
@@ -240,6 +252,11 @@ def _build_candidate_tools(candidate_dir: Path):
         {"get_tools": get_tools, "has_tool": has_tool},
     )
     return CandidateTools(db)
+
+
+#: Toolkit factory for the built-in pre-gate (#708): `pregate: {toolkit: <this file>:pregate_toolkit}`
+#: in capevolve.yaml makes tool smoke + tool-call replay live (callable(candidate_dir) -> toolkit).
+pregate_toolkit = _build_candidate_tools
 
 
 def _read_candidate_policy(candidate_dir: Path) -> str:

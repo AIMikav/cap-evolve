@@ -34,6 +34,7 @@ from . import integrity
 from . import stats
 from .cache import hash_candidate_dir
 from .memory import MemorySkill
+from . import eval_index
 from .loop import SplitResult, aggregate_scores, has_valid_trials
 from .rundir import RunDir, _atomic_write
 from .splits import Splits, make_splits
@@ -130,6 +131,32 @@ def _resolve_workers(workers: int | None) -> int:
 # loop can count optimizer spend against ``max_usd``. Older optimizers returning
 # ``None`` keep working — cost simply stays unmeasured for them.
 OptimizerFn = Callable[[Path, str], "dict | None"]
+
+
+def _usersim(rollout) -> dict | None:
+    u = (getattr(rollout, "metadata", None) or {}).get("usersim")
+    return u if isinstance(u, dict) and os.environ.get("CAPEVOLVE_USERSIM_PRICING", "1") != "0" else None
+
+
+def _usersim_usd(rollout) -> float | None:
+    """List-price estimate of the user simulator's spend for one rollout, or ``None``.
+
+    Adapters report it as ``metadata["usersim"] = {model, prompt_tokens, completion_tokens}``
+    covering only user messages the provider did not cost (gateways return 0.0), so the
+    estimate is added only when the adapter reports user tokens the provider left unpriced and the
+    model has a price. Unpriced models return ``None`` (see ``_usersim_unpriced``), never 0.
+    """
+    from .pricing import token_cost
+    u = _usersim(rollout)
+    if not u:
+        return None
+    return token_cost(u.get("model"), int(u.get("prompt_tokens") or 0),
+                      int(u.get("completion_tokens") or 0))
+
+
+def _usersim_unpriced(rollout) -> bool:
+    u = _usersim(rollout)
+    return bool(u and (u.get("prompt_tokens") or u.get("completion_tokens")))
 
 
 def _parse_optimizer_cost(stdout: str) -> dict | None:
@@ -265,6 +292,7 @@ def evaluate_candidate(
     base_seed: int | None = None,
     workers: int | None = None,
     ids: list | None = None,
+    trial_offset: int = 0,
 ) -> SplitResult:
     """Run + score a candidate on a split with multi-trial honesty.
 
@@ -296,6 +324,10 @@ def evaluate_candidate(
     (its ``n_tasks`` is the subset, so its ``coverage`` looks like 1.0), and it must
     use its own ``tag`` so a later full-split eval's rollouts are not mixed with it.
     ``ids`` never widens a split: an id outside the frozen split is ignored.
+
+    ``trial_offset`` (default 0 = legacy) makes this a TOP-UP: trial ``k`` is written as
+    ``t{trial_offset + k}`` and seeded ``base_seed + trial_offset + k``, so extra trials on an
+    existing tag add rollouts with fresh seeds instead of replacing ``t0..`` or repeating them.
     """
     workers = _resolve_workers(workers)
     if split == "test":
@@ -308,6 +340,15 @@ def evaluate_candidate(
             base_seed = int(run_dir.read_splits().seed)
         except Exception:  # noqa: BLE001
             base_seed = 0
+
+    # Seeds must not replay what the ledger already holds for identical bytes (a new tag of the
+    # same capability is MORE independent trials, not a copy of the old draws). Re-evaluating an
+    # existing tag at offset 0 still replaces t0.. with the same seeds, as before.
+    seed_off = trial_offset
+    if split != "test" and eval_index.enabled() and (
+            trial_offset or not list((run_dir.rollouts / split).glob(f"*__{tag}__t*.json"))):
+        seed_off = max(trial_offset, eval_index.next_trial_idx(
+            run_dir, eval_index.cap_hash(candidate_dir), split=split))
 
     tasks = _tasks_for(adapter, run_dir, split)
     if ids is not None:
@@ -327,7 +368,7 @@ def evaluate_candidate(
     # indistinguishable from progress. ``prior_reward`` is recorded because once the files are
     # overwritten the destroyed reading exists nowhere else.
     prior = sorted(out_dir.glob(f"*__{tag}__t*.json"))
-    if prior:
+    if prior and not trial_offset:
         prior_reward = None
         try:
             prior_reward = split_result_from_rollouts(run_dir, tag, split).reward
@@ -360,7 +401,7 @@ def evaluate_candidate(
     # which only keeps valid rewards.
     per_task_cost: dict[str, list[float]] = {t.id: [] for t in tasks}
     task_by_id = {t.id: t for t in tasks}
-    run_acc = {"cost": 0.0, "tokens": 0, "cost_source": {}}  # RUNNER spend, summed over rollouts
+    run_acc = {"cost": 0.0, "tokens": 0, "cost_source": {}, "usersim": 0.0}  # RUNNER spend, summed over rollouts
     t0 = time.time()
     # See #589: a heartbeat for the long silent stretch between ``eval_start`` and
     # ``evaluate``. Only the rollout-generation paths that see individual (task,
@@ -403,14 +444,22 @@ def evaluate_candidate(
                 per_task_errored[tid] = True
                 per_task_errored_trials[tid] += 1
             run_acc["cost"] += float(getattr(rollout, "cost_usd", 0.0) or 0.0)
+            _us = _usersim_usd(rollout)
+            if _us is not None:
+                run_acc["cost"] += _us
+                run_acc["usersim"] += _us
             run_acc["tokens"] += int(getattr(rollout, "tokens", 0) or 0)
-            per_task_cost[tid].append(float(getattr(rollout, "cost_usd", 0.0) or 0.0))
+            per_task_cost[tid].append(float(getattr(rollout, "cost_usd", 0.0) or 0.0)
+                                      + (_us or 0.0))
             # An adapter that cannot price its rollouts (e.g. an unmetered proxy
             # endpoint) tags this in metadata rather than silently reporting $0 as
             # "free" — count it so the eval record can say "unpriced", not "$0".
             _cs = (getattr(rollout, "metadata", None) or {}).get("cost_source")
             if _cs:
                 run_acc["cost_source"][_cs] = run_acc["cost_source"].get(_cs, 0) + 1
+            if _us is None and _usersim_unpriced(rollout):
+                run_acc["cost_source"]["usersim_unpriced"] = (
+                    run_acc["cost_source"].get("usersim_unpriced", 0) + 1)
             sc = scores_by_id.get(tid)
             if sc is None:  # not in has_score_batch mode, or the batch omitted this id
                 sc = adapter.score(task, rollout)
@@ -444,7 +493,7 @@ def evaluate_candidate(
             # (see cap_evolve/__init__.py) — a no-op call when logging isn't enabled.
             logger.debug("split=%s tag=%s task=%s trial=%s reward=%s errored=%s",
                          split, tag, tid, k, getattr(sc, "reward", None), errored)
-            (out_dir / f"{tid}__{tag}__t{k}.json").write_text(
+            (out_dir / f"{tid}__{tag}__t{trial_offset + k}.json").write_text(
                 json.dumps({"input": task.input, "rollout": rollout.to_dict(),
                             "score": sc.to_dict()}, default=str),
                 encoding="utf-8",
@@ -488,7 +537,7 @@ def evaluate_candidate(
             # ({task_id: [rollout_t0, rollout_t1, ...]}, trial-ordered), then run the
             # SAME per-trial persistence/scoring body for each k. Tolerate missing
             # trial entries (short/absent lists) as omitted rollouts.
-            rollouts_by_task = adapter.run_trials(tasks, ctx, n_trials=n_trials, base_seed=base_seed)
+            rollouts_by_task = adapter.run_trials(tasks, ctx, n_trials=n_trials, base_seed=base_seed + seed_off)
             rollouts_by_task = rollouts_by_task or {}
             for k in range(n_trials):
                 rollouts_for_k: dict = {}
@@ -499,7 +548,7 @@ def evaluate_candidate(
                 _persist_trial(k, rollouts_for_k)
         else:
             for k in range(n_trials):
-                seed = base_seed + k
+                seed = base_seed + seed_off + k
                 if has_batch:
                     rb = adapter.run_batch(tasks, ctx, seed=seed)
                     # accept either {task_id: Rollout} or a list parallel to `tasks`
@@ -529,6 +578,9 @@ def evaluate_candidate(
                         emit_progress()
                 _persist_trial(k, rollouts)
 
+    eval_index.record(run_dir, candidate_dir, split, tag, [t.id for t in tasks],
+                      range(trial_offset, trial_offset + n_trials), seed_base=seed_off,
+                      subset=ids is not None)
     run_cost, run_tokens = run_acc["cost"], run_acc["tokens"]
     cost_source_counts = run_acc["cost_source"]
 
@@ -556,7 +608,8 @@ def evaluate_candidate(
 
     elapsed = time.time() - t0
     run_dir.update_spent(metric_calls=len(tasks) * n_trials, usd=run_cost,
-                         runner_tokens=run_tokens, runner_seconds=elapsed)
+                         runner_tokens=run_tokens, runner_seconds=elapsed,
+                         usersim_usd=run_acc["usersim"])
     result = aggregate_scores(split, scores, ks=ks)
     result.cost_usd, result.tokens, result.seconds = run_cost, run_tokens, elapsed
     result.cost_source = cost_source_counts
@@ -574,6 +627,11 @@ def evaluate_candidate(
                       # adapters that never set it, so this never fabricates a claim.
                       **({"cost_source_counts": cost_source_counts} if cost_source_counts else {}))
     return result
+
+
+def parse_tags(s) -> list[str]:
+    """``"a, b"`` -> ``["a", "b"]`` (strip, drop empties). One parser for every ``--current``."""
+    return [t.strip() for t in (s or "").split(",") if t.strip()]
 
 
 def split_result_from_rollouts(run_dir: RunDir, tag, split: str = "val", ks=(1, 2)) -> SplitResult:
@@ -1850,7 +1908,7 @@ def record_iteration(run_dir: RunDir, workdir: Path, cid: str, *,
                      indecisive: bool = False, parents: list | None = None,
                      edit_kind: str | None = None, memory_skill: str | None = None,
                      cluster_ids: list[str] | None = None, subset: dict | None = None,
-                     **extra) -> None:
+                     val_verified: bool = True, **extra) -> None:
     """THE one place an iteration is recorded. EVERY algorithm ends its iteration here.
 
     Three things must happen exactly once per iteration, and they used to be
@@ -1902,7 +1960,7 @@ def record_iteration(run_dir: RunDir, workdir: Path, cid: str, *,
     if parents and len(parents) > 1:
         extra.setdefault("merge_of", list(parents))  # the dashboard's multi-parent edge
     run_dir.update_spent(iterations=1, accepted=None if indecisive else accepted,
-                         best_val=val if accepted and val is not None else None)
+                         best_val=val if accepted and val is not None and val_verified else None)
     run_dir.log_event("step", candidate=cid, accept=accepted, reason=reason,
                       val=val, parent=parent_id, parent_val=parent_val, **extra)
     resolve_memory(memory_skill).write_handover(

@@ -42,13 +42,15 @@ def _commit(run_dir, work, tag, *extra):
     return subprocess.run(
         [sys.executable, str(SCRIPTS / "commit.py"), "--run-dir", str(run_dir.root),
          "--candidate-id", tag, "--from-dir", str(work), "--decision", "reject",
-         "--val", "0.4", "--note", "test",
+         "--val", "0.4", "--val-unverified", "fixture: val not under test", "--note", "test",
          "--missing-handover-justification", "fixture: journal handover not under test",
          "--missing-ranked-issues-justification", "fixture: ranked issues not under test",
          "--missing-diagnosis-justification", "fixture: diagnosis not under test",
          *extra],
         capture_output=True, text=True,
-        env={**os.environ, "CAPEVOLVE_CORE": str(REPO / "core")})
+        # hermetic: a developer's live ~/.claude session log must not be metered into the fixture
+        env={**os.environ, "CAPEVOLVE_CORE": str(REPO / "core"),
+             "CLAUDE_CONFIG_DIR": str(run_dir.root.parent / "claude-empty")})
 
 
 def _backdate_last_decision(run_dir, seconds_ago):
