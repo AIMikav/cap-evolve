@@ -11,13 +11,14 @@ All notable changes to cap-evolve are documented here. The format follows
 ### Added
 - **Deterministic helper code in editable surfaces (opt-in)**: spec `helpers.enabled` (or
   `CAPEVOLVE_HELPERS=1`) and `surface.executable_dirs`. Adds `cap_evolve.helpers` (surface manifest,
-  lint, read-only skills staging, `@candidate_helper` fault tag, per-task reward variance) and the
+  lint, kernel bootstrap of skills, `@candidate_helper` fault tag, per-task reward variance) and the
   pregate stages `helper_surface`, `helper_lint` and `helper_smoke` (import, two deterministic runs on
   recorded-trace fixtures, writes only to declared outputs, no network, no gold; a failure costs 0
-  rollouts). The SpreadsheetBench adapter mounts only the current candidate's `skills/` through a
-  second read-only bind at `/mnt/skills` (new optional `skills_path` key in the vendored executor
-  config) and resolves a `{skills_root}` token; a helper's own crash is tagged `error_kind=candidate`.
-  The tau2 airline adapter tags `@candidate_helper` faults the same way. Off by default: v1 runs are
+  rollouts). The SpreadsheetBench adapter runs only the current candidate's `skills/*/scripts` once, as text,
+  in the rollout's own kernel (modules `skills.<skill>.<script>`; nothing mounted), appends each SKILL.md to
+  the system prompt and resolves a `{skills_root}` token; a helper's own crash is tagged `error_kind=candidate`.
+  The tau2 airline adapter tags `@candidate_helper` faults the same way, and `skill-package` validation treats
+  risky imports as errors and validates a nested `skills/` root while helpers are on. Off by default: v1 runs are
   unchanged. See `skills/algorithms/agent-optimize/references/helpers.md` and
   `templates/adapters/spreadsheetbench/SEED_V2.md`.
 - **Opt-in measurement switches for the acceptance gate** (#755, #758, #759): spec keys

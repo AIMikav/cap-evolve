@@ -31,12 +31,10 @@ so v1 runs are unchanged. Spec::
 from __future__ import annotations
 
 import ast
-import hashlib
 import json
 import os
 import re
 import statistics
-import stat as _stat
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -300,18 +298,17 @@ def lint_candidate(cand: Path, cfg: dict, parent: Path | None = None) -> dict:
             "files": [f.relative_to(cand).as_posix() for f in files]}
 
 
-# ---- staging a skill tree for a read-only mount ------------------------------------------------
-class HelperStagingError(RuntimeError):
-    """The candidate's own skills tree cannot be mounted (symlink, gold-named file, binary): the
-    candidate's fault, not infrastructure."""
-
-
+# ---- carrying a skills tree into the target's kernel -----------------------------------------------
+#: Frames of a helper carry this prefix as their filename, so a crash inside one is recognisable.
+KERNEL_ROOT = "capevolve_skills"
+BOOTSTRAP_OK = "CAPEVOLVE_HELPERS_READY"
 _GOLD_NAME = re.compile(r"(_answer|_golden|^golden|^answer)", re.I)
+SKILL_SUFFIXES = {".py", ".md", ".json", ".txt", ".yaml", ".yml"}
 
 
 def skills_tree_problems(root: Path) -> list[str]:
-    """Gold-free check for a staged skills tree: regular text files only, no symlinks, no gold-named
-    file, no file type outside ``SKILL_SUFFIXES``. The same allowlist spirit as the agent view's."""
+    """Gold-free / sanity check for a candidate's skills tree: regular text files only, no symlinks, no
+    gold-named file, no file type outside ``SKILL_SUFFIXES``."""
     root, bad = Path(root), []
     if root.is_symlink():
         return [f"{root}: skills root is a symlink"]
@@ -329,70 +326,65 @@ def skills_tree_problems(root: Path) -> list[str]:
     return bad
 
 
-def skills_hash(src: Path) -> str:
-    """12-hex content hash of a skills tree (names + bytes, stable order)."""
-    h = hashlib.sha256()
-    src = Path(src)
-    for p in sorted(src.rglob("*")) if src.is_dir() else []:
-        if p.is_file() and not p.is_symlink() and "__pycache__" not in p.parts:
-            h.update(p.relative_to(src).as_posix().encode() + b"\0" + p.read_bytes() + b"\0")
-    return h.hexdigest()[:12]
+def _ident(name: str) -> str:
+    return re.sub(r"\W", "_", name)
 
 
-def stage_skills(src: Path, dest: Path, *, forbid_inside: Path | None = None) -> int:
-    """Copy ``src`` (a candidate's ``skills/``) to ``dest`` for a read-only bind, then make it
-    read-only on the host too (0555 dirs, 0444 files). ``dest`` must not exist and must not sit inside
-    ``forbid_inside`` (the agent view). Returns the file count; raises ``HelperStagingError``."""
-    import shutil
-    src, dest = Path(src), Path(dest)
-    problems = skills_tree_problems(src)
-    if problems:
-        raise HelperStagingError("skills tree refused: " + "; ".join(problems[:5]))
-    if forbid_inside is not None:
-        fi = Path(forbid_inside).resolve()
-        if dest.resolve() == fi or fi in dest.resolve().parents:
-            raise RuntimeError(f"skills mount {dest} must sit outside the agent view {fi}")
-    if dest.exists():
-        raise RuntimeError(f"skills mount {dest} already exists")
-    dest.mkdir(parents=True)
-    n = 0
-    for p in sorted(src.rglob("*")):
-        if "__pycache__" in p.parts:
-            continue
-        t = dest / p.relative_to(src)
-        if p.is_dir():
-            t.mkdir(parents=True, exist_ok=True)
-        else:
-            shutil.copyfile(p, t)
-            n += 1
-    leftover = skills_tree_problems(dest)
-    if leftover:  # the staged copy is what the sandbox sees: check it, not only the source
-        raise HelperStagingError("staged skills tree refused: " + "; ".join(leftover[:5]))
-    for dp, dn, fn in os.walk(dest, topdown=False):
-        for f in fn:
-            os.chmod(os.path.join(dp, f), 0o444)
-        os.chmod(dp, 0o555)
-    return n
+def kernel_bootstrap(skills_dir: Path, max_bytes: int = 262144) -> str:
+    """Python source that, run ONCE in the target's kernel, defines every ``skills/<skill>/scripts/*.py`` as
+    ``skills.<skill>.<script>`` (``-`` becomes ``_``) and prints ``BOOTSTRAP_OK``. The target only ever receives
+    TEXT of the current candidate's own files: nothing is mounted, nothing sits under the data view, and the
+    kernel (one per rollout) keeps the modules through the case-2/3 replay. Frames carry the filename
+    ``capevolve_skills/<skill>/<script>.py`` (see ``helper_crash_in``). Raises ValueError on an oversize tree."""
+    skills_dir = Path(skills_dir)
+    mods, total = [], 0
+    for f in sorted(skills_dir.glob("*/scripts/*.py")):
+        src = f.read_text(encoding="utf-8")
+        total += len(src.encode())
+        mods.append((_ident(f.parent.parent.name), _ident(f.stem), f"{KERNEL_ROOT}/{f.parent.parent.name}/{f.name}", src))
+    if total > max_bytes:
+        raise ValueError(f"helper scripts total {total} bytes > {max_bytes}")
+    lines = ["import sys as _s, types as _t",
+             "_p = _s.modules.get('skills')",
+             "if _p is None:\n    _p = _s.modules['skills'] = _t.ModuleType('skills'); _p.__path__ = []"]
+    lines.append("def _load(skill, stem, fname, src):\n"
+                 "    pk = _s.modules.get('skills.' + skill)\n"
+                 "    if pk is None:\n"
+                 "        pk = _s.modules['skills.' + skill] = _t.ModuleType('skills.' + skill); pk.__path__ = []\n"
+                 "        setattr(_p, skill, pk)\n"
+                 "    m = _s.modules['skills.%s.%s' % (skill, stem)] = _t.ModuleType('skills.%s.%s' % (skill, stem))\n"
+                 "    m.__file__ = fname; setattr(pk, stem, m)\n"
+                 "    exec(compile(src, fname, 'exec'), m.__dict__)")
+    lines += [f"_load({sk!r}, {st!r}, {fn!r}, {src!r})" for sk, st, fn, src in mods]
+    lines.append(f"print({BOOTSTRAP_OK!r}, {len(mods)})")
+    return "\n".join(lines) + "\n"
 
 
-def skills_index(src: Path) -> str:
-    """One ``name: description`` line per SKILL.md (progressive disclosure for the system message)."""
-    lines = []
+def bootstrap_ok(exec_result: str) -> bool:
+    return BOOTSTRAP_OK in (exec_result or "")
+
+
+def skills_prompt(src: Path, max_chars: int = 6000) -> str:
+    """Each ``skills/<name>/SKILL.md`` (frontmatter dropped, name + description kept, body capped) for the
+    system message, so the agent knows which ``skills.<name>.<script>`` functions exist."""
+    out = []
     for md in sorted(Path(src).glob("*/SKILL.md")):
         text = md.read_text(encoding="utf-8", errors="replace")
-        m = re.match(r"---\s*\n(.*?)\n---", text, re.S)
-        fm = m.group(1) if m else ""
+        m = re.match(r"---\s*\n(.*?)\n---\s*\n?", text, re.S)
+        fm, body = (m.group(1), text[m.end():]) if m else ("", text)
         name = (re.search(r"(?m)^name:\s*(.+)$", fm) or [None, md.parent.name])[1].strip()
         desc = (re.search(r"(?m)^description:\s*(.+)$", fm) or [None, ""])[1].strip()
-        lines.append(f"- {name}: {desc}" if desc else f"- {name}")
-    return "\n".join(lines)
+        out.append(f"## Helper skill `{name}` (import as skills.{_ident(md.parent.name)}.<script>)\n"
+                   f"{desc}\n\n{body.strip()[:max_chars]}")
+    return "\n\n".join(out)
 
 
 SKILLS_ROOT_TOKEN = "{skills_root}"
 
 
 def render_skills_root(text: str, root: str) -> str:
-    """Plain ``str.replace`` (not ``.format``): literal braces in prompt text stay safe."""
+    """Plain ``str.replace`` (not ``.format``): literal braces in prompt text stay safe. For the kernel
+    carrier ``root`` is the import root, ``skills`` (``from {skills_root}.<skill> import <script>``)."""
     return text.replace(SKILLS_ROOT_TOKEN, root)
 
 
@@ -458,8 +450,8 @@ _TB_FILE = re.compile(r'File "([^"]+)", line (\d+)')
 
 
 def helper_crash_in(exec_results, skills_root: str) -> str | None:
-    """A traceback in executor output whose frames include a file under ``skills_root`` (the target
-    ran the candidate's helper and it raised). Returns the last line of that traceback, else None."""
+    """A traceback in executor output whose frames include a file under ``skills_root`` (``KERNEL_ROOT``: the
+    target ran the candidate's helper and it raised). Returns the last line of that traceback, else None."""
     root = skills_root.rstrip("/") + "/"
     for text in reversed(list(exec_results or [])):
         if "Traceback" not in text:

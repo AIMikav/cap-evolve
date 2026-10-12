@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import stat
 import sys
 from pathlib import Path
 
@@ -120,56 +119,79 @@ def test_lint_ids_file(tmp_path):
     assert _lint("X = 'abc-123'\n", ids_file=str(ids))
 
 
-# ---- staging: read-only, gold-free ------------------------------------------------------------
-def test_staging_is_read_only_and_copies_only_the_skills_tree(tmp_path):
-    src = tmp_path / "cand" / "skills"
-    _cand(src, {"a/SKILL.md": "---\nname: a\ndescription: d\n---\n", "a/scripts/f.py": "x=1\n"})
-    dest = tmp_path / "stage" / "skills"
-    assert helpers.stage_skills(src, dest) == 2
-    f = dest / "a/scripts/f.py"
-    assert f.read_text() == "x=1\n"
-    assert not (f.stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
-    assert not ((dest / "a").stat().st_mode & stat.S_IWUSR)
-    assert helpers.skills_tree_problems(dest) == []
-    for dp, _, _ in os.walk(dest):          # let pytest clean up
-        os.chmod(dp, 0o755)
+# ---- carrying skills into the kernel as text ---------------------------------------------------------
+def _exec(src, ns=None):
+    import contextlib, io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        exec(compile(src, "<boot>", "exec"), ns if ns is not None else {})
+    return buf.getvalue()
 
 
-def test_staging_refuses_symlinks_gold_names_binaries_and_the_agent_view(tmp_path):
+def test_bootstrap_defines_modules_under_skills_and_reports_ready(tmp_path):
+    _cand(tmp_path, {"spreadsheet-helpers/scripts/norm.py": "def f(x):\n    return x + 1\n",
+                     "spreadsheet-helpers/SKILL.md": "x"})
+    src = helpers.kernel_bootstrap(tmp_path)
+    saved = {k: sys.modules.pop(k) for k in list(sys.modules) if k == "skills" or k.startswith("skills.")}
+    try:
+        out = _exec(src)
+        assert helpers.bootstrap_ok(out)
+        from skills.spreadsheet_helpers import norm  # noqa: PLC0415
+        assert norm.f(1) == 2
+    finally:
+        for k in [k for k in sys.modules if k == "skills" or k.startswith("skills.")]:
+            sys.modules.pop(k)
+        sys.modules.update(saved)
+
+
+def test_bootstrap_carries_only_this_candidates_text_and_crashes_are_attributable(tmp_path):
+    a = _cand(tmp_path / "a", {"s/scripts/one.py": "A = 1\n"})
+    b = _cand(tmp_path / "b", {"s/scripts/two.py": "def boom():\n    raise ValueError('bad cell')\n"})
+    sa, sb = helpers.kernel_bootstrap(a), helpers.kernel_bootstrap(b)
+    assert "one.py" in sa and "two.py" not in sa and "one.py" not in sb
+    assert str(tmp_path) not in sa            # no host paths reach the kernel
+    import traceback
+    ns = {}
+    _exec(sb, ns)
+    with pytest.raises(ValueError) as e:
+        sys.modules["skills.s.two"].boom()
+    tb = "".join(traceback.format_exception(e.type, e.value, e.tb))
+    assert helpers.helper_crash_in([tb], helpers.KERNEL_ROOT) == "ValueError: bad cell"
+    for k in [k for k in sys.modules if k == "skills" or k.startswith("skills.")]:
+        sys.modules.pop(k)
+
+
+def test_bootstrap_failure_is_not_ready_and_oversize_is_refused(tmp_path):
+    c = _cand(tmp_path, {"s/scripts/bad.py": "import not_a_real_module_xyz\n"})
+    with pytest.raises(ModuleNotFoundError):
+        _exec(helpers.kernel_bootstrap(c))
+    assert not helpers.bootstrap_ok("Traceback ...")
+    for k in [k for k in sys.modules if k == "skills" or k.startswith("skills.")]:
+        sys.modules.pop(k)
+    with pytest.raises(ValueError, match="bytes"):
+        helpers.kernel_bootstrap(c, max_bytes=5)
+
+
+def test_skills_tree_problems_refuse_symlinks_gold_names_and_binaries(tmp_path):
     src = tmp_path / "skills"
     _cand(src, {"a/scripts/f.py": "x=1\n"})
+    assert helpers.skills_tree_problems(src) == []
     os.symlink("/etc/hostname", src / "a/scripts/l.py")
-    with pytest.raises(helpers.HelperStagingError, match="symlink"):
-        helpers.stage_skills(src, tmp_path / "d1")
+    assert any("symlink" in p for p in helpers.skills_tree_problems(src))
     (src / "a/scripts/l.py").unlink()
     (src / "a/scripts/1_x_answer.py").write_text("y=1\n")
-    with pytest.raises(helpers.HelperStagingError, match="gold-named"):
-        helpers.stage_skills(src, tmp_path / "d2")
+    assert any("gold-named" in p for p in helpers.skills_tree_problems(src))
     (src / "a/scripts/1_x_answer.py").unlink()
     (src / "a/blob.xlsx").write_bytes(b"PK")
-    with pytest.raises(helpers.HelperStagingError, match="not allowed"):
-        helpers.stage_skills(src, tmp_path / "d3")
-    (src / "a/blob.xlsx").unlink()
-    view = tmp_path / "view"
-    (view / "spreadsheet").mkdir(parents=True)
-    with pytest.raises(RuntimeError, match="outside the agent view"):
-        helpers.stage_skills(src, view / "spreadsheet" / "skills", forbid_inside=view)
+    assert any("not allowed" in p for p in helpers.skills_tree_problems(src))
 
 
-def test_hash_tracks_content_and_token_is_a_plain_replace():
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        s = Path(d)
-        _cand(s, {"a/scripts/f.py": "x=1\n"})
-        h1 = helpers.skills_hash(s)
-        (s / "a/scripts/f.py").write_text("x=2\n")
-        assert helpers.skills_hash(s) != h1
-    assert helpers.render_skills_root("see {skills_root}/a and {literal}", "/mnt/skills") == "see /mnt/skills/a and {literal}"
-
-
-def test_skills_index_reads_frontmatter(tmp_path):
-    _cand(tmp_path, {"a/SKILL.md": "---\nname: alpha\ndescription: does a thing\n---\nbody\n"})
-    assert helpers.skills_index(tmp_path) == "- alpha: does a thing"
+def test_token_is_a_plain_replace_and_prompt_text_comes_from_skill_md(tmp_path):
+    assert helpers.render_skills_root("see {skills_root}.a and {literal}", "skills") == "see skills.a and {literal}"
+    _cand(tmp_path, {"my-skill/SKILL.md": "---\nname: my-skill\ndescription: does a thing\n---\nCall norm.f(x).\n"})
+    t = helpers.skills_prompt(tmp_path)
+    assert "my-skill" in t and "does a thing" in t and "Call norm.f(x)." in t and "---" not in t
+    assert "skills.my_skill" in t
 
 
 # ---- a helper's own crash is the candidate's fault ---------------------------------------------
@@ -205,3 +227,26 @@ def test_reward_variance():
     d = helpers.variance_against(r, seed)
     assert d["n_shared"] == 2 and d["per_task_delta"]["t1"] < 0 and d["per_task_delta"]["t2"] == 0
     assert helpers.reward_variance({})["mean_variance"] is None
+
+
+# ---- skill-package: risky code is an error under helpers, nested skills/ is validated ----------------------------
+def _sp():
+    import importlib.util
+    p = Path(__file__).resolve().parents[2] / "skills/capabilities/skill-package/scripts/abstract.py"
+    spec = importlib.util.spec_from_file_location("_sp_abstract", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_skill_package_makes_risky_imports_errors_only_when_helpers_are_on(tmp_path, monkeypatch):
+    sp = _sp()
+    _cand(tmp_path, {"skills/a/SKILL.md": "---\nname: a\ndescription: does a thing when asked to do it\n---\n# a\n",
+                     "skills/a/scripts/f.py": "import socket\n\ndef f():\n    return socket.gethostname()\n"})
+    off = sp.validate(tmp_path)                      # v1: a root with skills/ but no SKILL.md is not a package
+    assert off.get("empty")
+    monkeypatch.setenv("CAPEVOLVE_HELPERS", "1")
+    on = sp.validate(tmp_path)
+    assert not on["ok"] and any("socket" in p for p in on["problems"])
+    (tmp_path / "skills/a/scripts/f.py").write_text("def f():\n    return 1\n")
+    assert not any("socket" in p for p in sp.validate(tmp_path)["problems"])

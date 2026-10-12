@@ -8,5 +8,5 @@ Solve the given spreadsheet manipulation question precisely:
 - Always save your result to the exact output_path given, creating any missing parent directories first.
 - If code execution returns an error, read the traceback carefully and fix the code — do not repeat a failing approach unchanged.
 
-Helper scripts, when any exist, are installed read-only under {skills_root}/<name>/scripts/. Import one with
-`sys.path.insert(0, "{skills_root}/<name>/scripts")` or run it from your Python code; read the matching SKILL.md first.
+Helper scripts, when any exist, are preloaded in your Python session as `{skills_root}.<skill>.<script>` (for example
+`from {skills_root}.<skill> import <script>`). Read the matching SKILL.md text above before calling one.

@@ -13,8 +13,8 @@ One trace is not enough. Name the traces in the hypothesis.
 - A small pure function or script: parse, locate, normalise, compute, validate. Parameterised by its inputs,
   stdlib plus packages already in the target environment, deterministic, no network, no subprocess.
 - It writes only to a path its caller passes in. It never reads evaluator, gold, split or dataset paths.
-- Skill surfaces: `skills/<name>/scripts/*.py` plus a `SKILL.md` that says when to call it. The prompt text
-  gets the mount path through the `{skills_root}` token. Tau surfaces: a method in `tools.py`, decorated
+- Skill surfaces: `skills/<name>/scripts/*.py` plus a `SKILL.md` that says when to call it. The target gets them preloaded as
+  `skills.<skill>.<script>` (token `{skills_root}` = `skills`). Tau surfaces: a method in `tools.py`, decorated
   `@candidate_helper` (from `cap_evolve.helpers`) so a crash in it is attributed to the candidate.
 - General procedure only. A task id, an answer literal, a branch on task identity, or a lookup table of answers
   is rejected by the lint before any rollout is charged.
