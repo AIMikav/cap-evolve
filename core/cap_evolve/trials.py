@@ -15,11 +15,69 @@ rollout *generation*.
 from __future__ import annotations
 
 import contextlib
+import os
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 from .types import Rollout, Task
+
+# ---- candidate-fault attribution ---------------------------------------------------------------
+# An exception that escapes ``run_one`` is "an infra error" by default (missing data, retryable). But
+# when the traceback passes through a file that lives under a LIVE candidate directory, the candidate's
+# own code raised it (an edited tool, a broken helper): that is a measured failure of the candidate, and
+# dropping it would hide a regression (a candidate that crashes on 10% of tasks the incumbent passes
+# hides ~0.056 of regression under ``drop``). The harness registers the directories it is evaluating;
+# the attribution is stored as ``Rollout.metadata["error_kind"] = "candidate"``, which
+# ``errored_trial_policy: fail`` scores as 0.0. Anything else (adapter code, ConnectionError, a runner
+# crash) stays unattributed and therefore missing.
+_ROOTS: dict[str, int] = {}
+_ROOTS_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def candidate_scope(*roots):
+    """Mark ``roots`` (candidate directories under evaluation) as candidate-owned code for the
+    duration. Re-entrant and safe for several candidates evaluating in parallel threads."""
+    keys = []
+    for r in roots:
+        if r is None:
+            continue
+        try:
+            keys.append(os.path.realpath(os.fspath(r)))
+        except TypeError:
+            continue
+    with _ROOTS_LOCK:
+        for k in keys:
+            _ROOTS[k] = _ROOTS.get(k, 0) + 1
+    try:
+        yield
+    finally:
+        with _ROOTS_LOCK:
+            for k in keys:
+                _ROOTS[k] -= 1
+                if _ROOTS[k] <= 0:
+                    del _ROOTS[k]
+
+
+def raised_in_candidate_code(exc: BaseException) -> bool:
+    """Does any traceback frame of ``exc`` (or its causes) sit in a file under a live candidate dir?"""
+    with _ROOTS_LOCK:
+        roots = tuple(k.rstrip(os.sep) + os.sep for k in _ROOTS)
+    if not roots:
+        return False
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        tb = exc.__traceback__
+        while tb is not None:
+            fn = tb.tb_frame.f_code.co_filename
+            if fn and os.path.realpath(fn).startswith(roots):
+                return True
+            tb = tb.tb_next
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 
 def run_trials_pool(
@@ -54,8 +112,9 @@ def run_trials_pool(
         task, k = job
         try:
             return task.id, k, run_one(task, base_seed + k)
-        except Exception as e:  # infra error, not a scored failure
-            return task.id, k, Rollout(task_id=task.id, error=f"trial {k} raised: {e}")
+        except Exception as e:  # infra error, not a scored failure ... unless the candidate's code raised it
+            meta = {"error_kind": "candidate"} if raised_in_candidate_code(e) else {}
+            return task.id, k, Rollout(task_id=task.id, error=f"trial {k} raised: {e}", metadata=meta)
 
     if not jobs:
         return results

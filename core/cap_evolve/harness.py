@@ -41,7 +41,7 @@ from . import coverage as coverage_mod
 from . import gatecfg
 from .rundir import BudgetExhausted, RunDir, _atomic_write
 from .splits import Splits, make_splits
-from .trials import run_trials_pool
+from .trials import candidate_scope, run_trials_pool
 from .types import Rollout, Score, Task
 
 # How many rollouts may be generated concurrently when a caller does not say.
@@ -663,7 +663,8 @@ def _evaluate_candidate(
                       rollouts=len(tasks) * max(1, int(n_trials)),
                       **({"subset": True} if ids is not None else {}))
 
-    with contextlib.redirect_stdout(sys.stderr), _live(adapter, candidate_dir) as ctx:
+    with contextlib.redirect_stdout(sys.stderr), _live(adapter, candidate_dir) as ctx, \
+            candidate_scope(candidate_dir, ctx if isinstance(ctx, (str, os.PathLike)) else None):
         if has_run_trials:
             # Adapter-owned fast path: ask for ALL trials in one batch
             # ({task_id: [rollout_t0, rollout_t1, ...]}, trial-ordered), then run the
