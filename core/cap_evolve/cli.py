@@ -754,6 +754,15 @@ def _cmd_run(argv):
     # then hands off — see the short-circuit after baseline).
     orchestration_mode = str(spec.get("orchestration_mode", "deterministic")).strip() or "deterministic"
     py = sys.executable
+    if spec.get("errored_trial_policy"):
+        # ONE rule for every evaluation in this run (baseline/seed, candidates, resume, gate_check,
+        # finalize bookends): the phase scripts read it from the environment they inherit.
+        from .harness import ERRORED_POLICY_ENV, resolve_errored_policy
+        os.environ[ERRORED_POLICY_ENV] = resolve_errored_policy(str(spec["errored_trial_policy"]))
+    from .optimizer_config import enabled as _ablation_enabled
+    if not _ablation_enabled("history", spec):
+        # the harness (a subprocess) reads the switch from the environment it inherits
+        os.environ["CAPEVOLVE_HISTORY"] = "0"
 
     def run(cmd):
         proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(workdir))
@@ -1033,6 +1042,26 @@ def _cmd_run(argv):
             pp = [p.strip() for p in pp.split(",") if p.strip()]
         if pp:
             alg_cmd += ["--protected-paths", ",".join(str(p) for p in pp)]
+    # Measurement switches (paper-mode). Every key is opt-in: an absent key adds no flag, so an
+    # existing spec's command line is byte-identical.
+    if algorithm_name in ("hill-climb", "skillopt", "gepa"):
+        if spec.get("gate_footprint") is not None:
+            alg_cmd += ["--gate-footprint", "on" if spec["gate_footprint"] else "off"]
+        if spec.get("gate_min_coverage") is not None:
+            alg_cmd += ["--min-coverage", str(spec["gate_min_coverage"])]
+        if spec.get("gate_coverage"):
+            alg_cmd += ["--gate-coverage", str(spec["gate_coverage"])]
+        if spec.get("errored_trial_policy"):
+            alg_cmd += ["--errored-trial-policy", str(spec["errored_trial_policy"])]
+        if spec.get("gate_no_regression"):
+            alg_cmd += ["--no-regression"]
+        if spec.get("gate_max_broke") is not None:
+            alg_cmd += ["--gate-max-broke", str(int(spec["gate_max_broke"]))]
+        if spec.get("promotion_rule"):
+            alg_cmd += ["--promotion-rule", str(spec["promotion_rule"])]
+            for key in ("k_se", "n_conf", "dmin", "z_conf", "min_coverage"):
+                if spec.get(f"promotion_{key}") is not None:
+                    alg_cmd += [f"--promotion-{key.replace('_', '-')}", str(spec[f"promotion_{key}"])]
     if spec.get("convergence"):
         if algorithm_name in CONVERGENCE_ALGORITHMS:
             alg_cmd += ["--convergence"]

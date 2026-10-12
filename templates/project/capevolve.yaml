@@ -91,6 +91,24 @@ stop_condition: ""           # agent-mode free-text halt rule, re-read each roun
 # --- acceptance gate --------------------------------------------------------
 gate_mode: paired                        # paired (recommended: per-task paired SE, same tasks both sides — banks real 1-task gains) | significant (unpaired fallback) | strict | threshold | pareto (multi-objective, native in round.py's own --mode; hill-climb natively per-iteration) | epsilon_constraint (maximize reward subject to a hard ceiling on another metric, native in round.py's own --mode)
 gate_k_se: 1.0
+# Optional measurement switches (hill-climb, skillopt, gepa). Every key is OFF by default and
+# an absent key leaves behaviour exactly as before. See docs/audit notes #755 / #758 / #759.
+# gate_footprint: false         # true/absent = mask the paired delta vector to the edit's footprint (gepa never masks)
+# gate_min_coverage: 0.6        # gate.decide min_coverage; 0 disables the guard
+# gate_coverage: joint          # joint = tasks valid on BOTH sides / planned tasks (default: candidate-only)
+# errored_trial_policy: fail    # fail = trials the adapter marks Rollout.metadata.error_kind=candidate score 0.0 (default: drop)
+# gate_no_regression: true      # reject a candidate that resolvably breaks a parent-passed val task
+# gate_max_broke: 0             # reject if it breaks more than N val tasks
+# confirm_fresh_only: true      # agent-optimize finalize: confirm on the fresh trials only
+# promotion_rule: P             # shared rule P (hill-climb/skillopt/gepa/agent-optimize): unmasked paired screen, then fresh-trial confirmation
+# promotion_k_se: 1.0           #   screen bar (mean > k*SE)
+# promotion_n_conf: 10          #   fresh trials per task for the confirmation
+# promotion_dmin: 0.02          #   minimum confirmed mean delta
+# promotion_z_conf: 2.0         #   minimum confirmed z (mean / paired SE)
+# merge_verify: true            # agent-optimize: `act.py verify-merge` (parent + both branches + merge on the same fresh block,
+#                               #   interaction estimate, bounded delta-debugging on a loss); `promote` of a merge needs a pass
+# screen_accounting: true       # agent-optimize screen.py: affected + sentinels + random exploration with recorded inclusion
+#                               #   probabilities; score = scheduling signal only. Ablation arm: screen.py --screen-control random_subset
 # Optional, pareto gate_mode only (cap_evolve.gate.decide / cap_evolve.pareto_archive): the
 # objectives to balance. Omit for the default (reward maximize + cost minimize, with a
 # cost->latency->tokens fallback). round.py persists a bounded non-dominated frontier
