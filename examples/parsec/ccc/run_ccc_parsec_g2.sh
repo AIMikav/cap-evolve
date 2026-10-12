@@ -14,7 +14,7 @@
 #   export PARSEC_V4N=/path/to/rhdp-parsec/v4_2026-09-16
 #   export LLM_API_KEY=...  LLM_API_BASE=https://your-gateway
 #   export HARNESS_LLM_SIMULATION_MODEL=azure/gpt-5.4
-#   bash scripts/ccc/run_ccc_parsec_g2.sh [--run-id ID] [--max-iterations N] [--dry-run]
+#   bash examples/parsec/ccc/run_ccc_parsec_g2.sh [--run-id ID] [--max-iterations N] [--dry-run]
 #
 # Any extra arguments are forwarded verbatim to run_ccc_experiment.sh, so
 # --resume, --run-ts, --extra-args etc. all work unchanged.
@@ -61,7 +61,7 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -z "${PROJECT_ROOT:-}" ]]; then
-  PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+  PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 fi
 
 SUITE_ID="v4_g2_e1"

@@ -24,7 +24,7 @@ from pathlib import Path
 #: keyed by the env var name adapter.py sets before invoking `harbor run`.
 #: Values are the simulator containers' PUBLISHED ports (their internal port is
 #: always 8086), per the compose topology in <PARSEC_V4N>/README.md. This dict
-#: is the source of truth for them in this repo; scripts/ccc/parsec_stack.sh and
+#: is the source of truth for them in this repo; examples/parsec/ccc/parsec_stack.sh and
 #: CCC_PODMAN_SETUP.md's table both point here. (_run/harness-cfg/*.yaml carry
 #: the same numbers as `server.port`, but those files are Mac-local leftovers
 #: that nothing on this branch reads — do not treat them as the reference.)

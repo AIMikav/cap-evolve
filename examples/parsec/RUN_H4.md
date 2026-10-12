@@ -6,7 +6,7 @@ job, N jobs at a time.
 
 The optimization counterparts live elsewhere and are unchanged —
 `examples/parsec/v4_t2_e1/` (one task at a time, single lane) and
-`scripts/ccc/run_ccc_parsec_g2.sh` (all 34 tasks jointly in one process).
+`examples/parsec/ccc/run_ccc_parsec_g2.sh` (all 34 tasks jointly in one process).
 h4 adds only the thing neither could do: run many tasks **concurrently**.
 
 | script | what it does |

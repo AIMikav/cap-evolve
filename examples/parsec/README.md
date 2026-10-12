@@ -15,8 +15,14 @@ parsec_paths.py       single source of truth for $PARSEC_V4N and the MCP ports
 v4_t2_e1/             arm: per-task optimization over the original 34 scenarios
 h4/                   arm: held-out evaluation over 30 later scenarios
   audit/              trial-integrity checks (see below)
+ccc/                  bring the external stack up on the CCC cluster
+RUN_H4.md             running h4 as one parallel job per task
 tests/
 ```
+
+`ccc/` holds the four parsec-specific cluster scripts — stack up/down, the
+bootstrap, and the two run wrappers. `scripts/ccc/` keeps only the scripts that
+are benchmark-agnostic.
 
 The adapter and optimizer sit at this root rather than inside an arm because
 both arms symlink the same files into every generated project — they are shared,

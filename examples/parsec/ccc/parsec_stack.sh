@@ -15,10 +15,10 @@
 #
 # Usage:
 #   export PARSEC_V4N=/path/to/rhdp-parsec/v4_2026-09-16
-#   bash scripts/ccc/parsec_stack.sh up       # start all 6, then activate the 5 sims
-#   bash scripts/ccc/parsec_stack.sh status   # read-only: TCP + simulation `ready`
-#   bash scripts/ccc/parsec_stack.sh down     # stop+remove containers, stop parsec-live
-#   bash scripts/ccc/parsec_stack.sh reap     # force-remove/kill anything on our ports
+#   bash examples/parsec/ccc/parsec_stack.sh up       # start all 6, then activate the 5 sims
+#   bash examples/parsec/ccc/parsec_stack.sh status   # read-only: TCP + simulation `ready`
+#   bash examples/parsec/ccc/parsec_stack.sh down     # stop+remove containers, stop parsec-live
+#   bash examples/parsec/ccc/parsec_stack.sh reap     # force-remove/kill anything on our ports
 #
 # Exits non-zero if $PARSEC_V4N is unset, if any of `up`'s preconditions are
 # unmet, if a sim's activation POST never returns 2xx/409, or (for `status`) if
