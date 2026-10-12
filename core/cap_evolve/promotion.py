@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass, field
 
-RULES = ("P",)
+RULES = ("P", "P2")
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,8 @@ class PromotionParams:
             return None
         if rule not in RULES:
             raise ValueError(f"promotion_rule must be one of {RULES} or unset, got {rule!r}")
+        if rule == "P2":
+            return None     # rule P2 has its own evaluator (``P2Params`` / ``evaluator.P2Evaluator``)
         d = cls()
         out = cls(k_se=float(spec.get("promotion_k_se", d.k_se)),
                   n_conf=int(spec.get("promotion_n_conf", d.n_conf)),
@@ -50,6 +52,68 @@ class PromotionParams:
         if out.n_conf < 1:
             raise ValueError("promotion_n_conf must be >= 1")
         return out
+
+
+@dataclass(frozen=True)
+class P2Params:
+    """Rule P2 ("SH-C", see ``evaluator``): K-candidate rounds, kill-only rungs on the feedback stratum
+    F, one fresh confirmation on the hidden stratum C against a concurrently measured incumbent.
+    Spec keys are ``p2_<field>``; ``promotion_rule: P2`` turns the rule on (rule P is untouched)."""
+    k: int = 8                       # candidates per round
+    k_small: int = 6                 # ... when max_metric_calls <= small_budget
+    small_budget: int = 600
+    rung_sizes: tuple = (12, 36)     # CUMULATIVE rollouts per candidate after rung 1 / rung 2
+    max_survivors: int = 2           # candidates sent to confirmation per round
+    conf_n: int = 147                # fresh rollouts per confirmed candidate on C
+    ctrl_m: int = 4                  # incumbent control trials per C task
+    incumbent_trials: int = 4        # incumbent trials per F task (ranking only)
+    z_conf: float = 1.5              # one-sided; <= max_survivors tests per round (round FWER ~0.10)
+    dmin: float = 0.02
+    min_coverage: float = 0.6
+    chunk: int = 20                  # rollouts per Job
+    gs_looks: tuple = (12, 24, 49, 98, 147)
+    gs_c: float = 2.03
+    gs_futility: tuple = (-0.5, 0.0, 0.3, 0.7)
+
+    @classmethod
+    def from_spec(cls, spec: dict | None):
+        """``None`` unless ``promotion_rule: P2``; else validated params."""
+        spec = spec or {}
+        if spec.get("promotion_rule") != "P2":
+            return None
+        d = cls()
+        out = cls(
+            k=int(spec.get("p2_k", d.k)), k_small=int(spec.get("p2_k_small", d.k_small)),
+            small_budget=int(spec.get("p2_small_budget", d.small_budget)),
+            rung_sizes=tuple(int(x) for x in spec.get("p2_rung_sizes", d.rung_sizes)),
+            max_survivors=int(spec.get("p2_max_survivors", d.max_survivors)),
+            conf_n=int(spec.get("p2_conf_n", d.conf_n)), ctrl_m=int(spec.get("p2_ctrl_m", d.ctrl_m)),
+            incumbent_trials=int(spec.get("p2_incumbent_trials", d.incumbent_trials)),
+            z_conf=float(spec.get("p2_z_conf", d.z_conf)), dmin=float(spec.get("p2_dmin", d.dmin)),
+            min_coverage=float(spec.get("promotion_min_coverage", d.min_coverage)),
+            chunk=int(spec.get("p2_chunk", d.chunk)),
+            gs_looks=tuple(int(x) for x in spec.get("p2_gs_looks", d.gs_looks)),
+            gs_c=float(spec.get("p2_gs_c", d.gs_c)),
+            gs_futility=tuple(float(x) for x in spec.get("p2_gs_futility", d.gs_futility)))
+        if min(out.k, out.conf_n, out.ctrl_m, out.chunk, out.max_survivors, out.incumbent_trials) < 1:
+            raise ValueError("p2_k, p2_conf_n, p2_ctrl_m, p2_chunk, p2_max_survivors and "
+                             "p2_incumbent_trials must be >= 1")
+        if len(out.rung_sizes) != 2 or not 0 < out.rung_sizes[0] <= out.rung_sizes[1]:
+            raise ValueError("p2_rung_sizes must be two cumulative sizes, 0 < r1 <= r2")
+        if not out.gs_looks or list(out.gs_looks) != sorted(out.gs_looks):
+            raise ValueError("p2_gs_looks must be increasing")
+        return out
+
+    def k_for_budget(self, max_metric_calls: int) -> int:
+        return self.k_small if 0 < max_metric_calls <= self.small_budget else self.k
+
+    def worst_case_cost(self, k: int, n_control_tasks: int) -> int:
+        """Rollouts a round of ``k`` can cost: rung 1 + rung 2 + control + the confirmations."""
+        r1, r2 = self.rung_sizes
+        survivors = min(self.max_survivors, max(1, k // 4))
+        return (k * r1 + max(1, k // 2) * (r2 - r1) + self.ctrl_m * n_control_tasks
+                + survivors * self.conf_n)
+
 
 
 def paired_stats(deltas) -> tuple[float, float, int]:
