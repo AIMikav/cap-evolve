@@ -252,3 +252,159 @@ def run_to_done(w, be, cfg, *, crash_at=(), max_ticks=4000, clock=None):
         if c.tick():
             return c
     raise AssertionError("conductor did not finish")
+
+
+# ---- P2 mode: the REAL P2Evaluator on the seeded Bernoulli adapter (tests/p2_fakes.py) -------------
+
+class P2Backend(conductor.Backend):
+    """Conductor backend over a real run dir + cap_evolve.evaluator. Jobs run on a thread pool, so
+    several candidates really evaluate in parallel; proposals are instant, scripted by effect size."""
+
+    def __init__(self, tmp_path, effects, *, n=48, default=0.4, max_metric_calls=0, workers=4, params=None):
+        from concurrent.futures import ThreadPoolExecutor
+        from cap_evolve import evaluator, promotion
+        from p2_fakes import make_run
+        self.tmp, self.effects, self.default = Path(tmp_path), list(effects), default
+        self.adapter, self.run_dir = make_run(self.tmp, n_train=n // 2, n_val=n // 2, default=default,
+                                              max_metric_calls=max_metric_calls)
+        self.params = params or promotion.P2Params.from_spec({"promotion_rule": "P2", "p2_conf_n": 48, "p2_ctrl_m": 2})
+        self.ev = evaluator.P2Evaluator(self.adapter, self.run_dir, self.params)
+        self.pool = ThreadPoolExecutor(max_workers=workers)
+        self.futs: dict = {}
+        self.rounds: dict = {}
+        self.dirs: dict = {"seed": self.run_dir.candidate_dir("seed")}
+        self.decisions: list = []
+        self.max_parallel = 0
+        self.running = 0
+        import threading
+        self.lock = threading.Lock()
+
+    def attach(self, other):
+        """A 'restarted process': the same run dir and candidate dirs, no threads, no cached rounds."""
+        import copy
+        self.pool.shutdown(wait=True)
+        n = P2Backend.__new__(P2Backend)
+        n.__dict__.update(self.__dict__)
+        from concurrent.futures import ThreadPoolExecutor
+        n.pool, n.futs, n.rounds = ThreadPoolExecutor(max_workers=4), {}, {}
+        return n
+
+    def dir_of(self, tag): return self.dirs[tag]
+    def cap_hash(self, tag):
+        from cap_evolve import eval_index
+        return eval_index.cap_hash(self.dirs[tag]) if tag in self.dirs else None
+
+    def screen_ids(self): return self.ev.feedback_ids()
+    def confirm_ids(self): return self.ev.confirm_ids()
+    def spent_rollouts(self): return self.run_dir.spent.metric_calls
+    def reserved_rollouts(self): return self.run_dir.reserved_metric_calls()
+    def remaining_rollouts(self): return self.run_dir.remaining_metric_calls()
+
+    def _round(self, rid):
+        if rid not in self.rounds:
+            self.rounds[rid] = self.ev.resume_round(rid)
+        return self.rounds[rid]
+
+    def _job(self, x):
+        from cap_evolve.evaluator import Job
+        return Job(**{**x, "ids": tuple(x["ids"])})
+
+    # ---- jobs
+    def start(self, job):
+        if job["kind"] == "propose":
+            i = int(job["tag"].split("_")[1]) - 1
+            eff = self.effects[i % len(self.effects)]
+            d = self.tmp / job["tag"]
+            d.mkdir(exist_ok=True)
+            (d / "cfg.json").write_text(json.dumps({"default": min(1.0, self.default + eff), "p": {}, "salt": i + 1}))
+            self.dirs[job["tag"]] = d
+            self.futs[job["id"]] = {"ok": True, "tokens": 1000}
+            return {"pid": 1}
+        rnd = self._round(job["round"])
+
+        def work():
+            from cap_evolve.rundir import BudgetExhausted
+            with self.lock:
+                self.running += 1
+                self.max_parallel = max(self.max_parallel, self.running)
+            try:
+                if job.get("p2seq"):
+                    v = rnd.sequential(job["p2seq"]["cid"])
+                    return {"ok": True, "verdict": {"cid": v.cid, "status": v.status, "mean": v.mean, "z": v.z}}
+                rnd.run_job(self._job(job["p2"]))
+                return {"ok": True}
+            except BudgetExhausted:
+                return {"ok": True, "unfunded": True}
+            finally:
+                with self.lock:
+                    self.running -= 1
+        self.futs[job["id"]] = self.pool.submit(work)
+        return {"pid": 1}
+
+    def alive(self, job): return job["id"] in self.futs
+
+    def poll(self, job):
+        f = self.futs.get(job["id"])
+        if f is None:
+            return None
+        if isinstance(f, dict):
+            return f
+        return f.result() if f.done() else None
+
+    def kill(self, job): self.futs.pop(job["id"], None)
+
+    # ---- graph
+    def register(self, job, result):
+        return {"ok": True, "hash": self.cap_hash(job["tag"]), "parents": [job["parent"]]}
+
+    def node_event(self, tag, status, **kw):
+        parents = kw.pop("parents", None)
+        graph.append_node(self.run_dir, node_id=tag, parents=parents, status=status, **kw)
+
+    def commit_accept(self, tag, evidence):
+        self.decisions.append((tag, "accept"))
+        self.run_dir.snapshot(tag, self.dirs[tag])
+        self.run_dir.set_best(tag)
+
+    def commit_reject(self, tag, reason, evidence): self.decisions.append((tag, "reject"))
+    def finalize(self, champion):
+        (self.run_dir.root / "final.json").write_text(json.dumps({"champion": champion}))
+        return {"champion": champion}
+    def finalized(self): return (self.run_dir.root / "final.json").exists()
+    def log(self, event, **kw): self.run_dir.log_event(event, **kw)
+    def best_reward(self, tag): return None
+
+    # ---- P2
+    def p2_plan(self, k_wanted, incumbent):
+        plan = self.ev.plan_round(k_wanted, self.dirs[incumbent])
+        return plan.k, plan.funded
+
+    def p2_open(self, tags, incumbent):
+        rnd = self.ev.open_round({t: self.dirs[t] for t in tags}, (incumbent, self.dirs[incumbent]))
+        self.rounds[rnd.round_id] = rnd
+        return rnd.round_id
+
+    def p2_stage_jobs(self, rid, stage):
+        rnd = self._round(rid)
+        jobs = {"rung1": lambda: rnd.incumbent_jobs() + rnd.rung_jobs(1), "rung2": lambda: rnd.rung_jobs(2),
+                "confirm": rnd.confirm_jobs}[stage]()
+        return [j.to_dict() for j in jobs]
+
+    def p2_job_done(self, rid, x): return self._round(rid)._marker(self._job(x)).exists()
+
+    def p2_close(self, rid, stage, unfunded):
+        rnd = self._round(rid)
+        live = rnd.state["live"]
+        if stage == "confirm":
+            if unfunded:
+                rnd.state["confirm_unfunded"] = list(rnd.state.get("confirm_unfunded", [])) + list(rnd.state.get("confirm_funded", []))
+                rnd.state["confirm_funded"] = []
+            out = rnd.close_confirm()
+            return {"verdicts": {c: {"status": v.status, "mean": v.mean, "z": v.z} for c, v in out.items()},
+                    "champion": rnd.champion}
+        n = int(stage[-1])
+        if unfunded:
+            return {"verdicts": {c: {"status": "unfunded"} for c in live[str(n)]}, "next": None}
+        out = rnd.close_rung(n)
+        nxt = "rung2" if n == 1 and live["2"] else ("confirm" if n == 2 and live.get("confirm") else None)
+        return {"verdicts": {c: {"status": v.status, "mean": v.mean, "z": v.z} for c, v in out.items()}, "next": nxt}

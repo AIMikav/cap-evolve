@@ -49,7 +49,7 @@ from cap_evolve import promotion
 
 FRESH_BASE = 1000          # first fresh-trial index (hill-climb: ``1000 + iterations * n_conf``)
 TERMINAL = ("champion", "rejected", "pruned", "superseded", "refused")
-PRE_CONFIRM = ("proposed", "rung", "full", "screened", "stale")
+PRE_CONFIRM = ("proposed", "rung", "full", "screened", "stale", "racing")
 EXIT_REFUSED = 2
 
 
@@ -77,11 +77,13 @@ class Cfg:
     seed: int = 0
     ref_pooled: bool = False            # screen reference = all of the champion's draws (pooled splits)
     params: promotion.PromotionParams = dataclasses.field(default_factory=promotion.PromotionParams)
+    p2: object | None = None            # promotion.P2Params when promotion_rule is P2 (round mode)
+    pipeline: int = 1                   # P2: proposals may run this many rounds ahead of the evaluating round
     caps: policy.Caps = dataclasses.field(default_factory=policy.Caps)
 
     @property
     def alive_cap(self) -> int:
-        return self.target_alive or self.k_prop
+        return self.target_alive or self.k_prop * (self.pipeline if self.p2 else 1)
 
     @classmethod
     def from_spec(cls, spec: dict, budget: dict | None = None) -> "Cfg":
@@ -112,13 +114,14 @@ class Cfg:
             finalize_rollouts=num("ao_finalize_reserve", default=0),
             finalize_tokens=num("ao_finalize_tokens", default=0))
         k = num("ao_k_prop", default=1)
+        p2 = promotion.P2Params.from_spec(spec) if hasattr(promotion, "P2Params") else None
         return cls(slots=num("ao_slots", "gateway_max_concurrency", default=cls.slots), k_prop=k,
                    chunk=caps.chunk, rungs=tuple(int(x) for x in (spec.get("ao_rungs") or ())),
                    screen_n=num("ao_screen_n", default=1), max_confirm=num("ao_max_confirm", default=1),
                    target_alive=num("ao_target_alive"), merge=bool(spec.get("ao_merge")),
                    job_token_cap=job_cap, chunk_timeout=num("ao_chunk_timeout", cast=float, default=cls.chunk_timeout),
                    seed=num("ao_seed", default=0), ref_pooled=spec.get("split_mode") == "pooled",
-                   params=params, caps=caps)
+                   params=params, caps=caps, p2=p2, pipeline=num("ao_pipeline", default=2 if p2 and k > 1 else 1))
 
 
 def refuse_multi_objective(spec: dict) -> None:
@@ -166,6 +169,14 @@ class Backend:
     def finalize(self, champion: str) -> dict: raise NotImplementedError
     def finalized(self) -> bool: raise NotImplementedError
     def log(self, event: str, **kw) -> None: pass
+    def remaining_rollouts(self) -> int | None: return None      # P2: what the run dir has left after reservations
+    def reserved_rollouts(self) -> int: return 0
+    # ---- P2 rounds (promotion_rule: P2). Jobs are plain dicts; run_job is idempotent (done markers).
+    def p2_plan(self, k_wanted: int, incumbent: str) -> tuple[int, bool]: raise NotImplementedError
+    def p2_open(self, tags: list[str], incumbent: str) -> str: raise NotImplementedError
+    def p2_stage_jobs(self, rid: str, stage: str) -> list[dict]: raise NotImplementedError
+    def p2_job_done(self, rid: str, job: dict) -> bool: raise NotImplementedError
+    def p2_close(self, rid: str, stage: str, unfunded: bool) -> dict: raise NotImplementedError
 
 
 def window_key(w) -> tuple[int, int]:
@@ -204,8 +215,8 @@ class Conductor:
         return int(self.b.spent_rollouts())
 
     def fits(self, need: int) -> bool:
-        return cs.rollouts_fit(self.st, self.committed(), need, self.cfg.caps.max_metric_calls,
-                               self.cfg.caps.finalize_rollouts)
+        return cs.rollouts_fit(self.st, self.committed() + self.b.reserved_rollouts(), need,
+                               self.cfg.caps.max_metric_calls, self.cfg.caps.finalize_rollouts)
 
     def tokens_used(self) -> int:
         return int(self.st.get("tokens_base", 0)) + int(self.st.get("tokens_committed", 0))
@@ -283,7 +294,7 @@ class Conductor:
                     continue
                 j["state"] = "lost"
                 j["reserved_rollouts"] = j["reserved_tokens"] = 0
-                self.b.log("job_lost", job=j["id"], kind=j["kind"], tag=j.get("tag"))
+                self.b.log("job_lost", job=j["id"], job_kind=j["kind"], tag=j.get("tag"))
                 if j["kind"] in ("propose", "merge"):
                     self._lost_proposal(j)
         self.b.recover()
@@ -305,7 +316,7 @@ class Conductor:
                     self.b.kill(j)
                     j["state"] = "lost"
                     j["reserved_rollouts"] = j["reserved_tokens"] = 0
-                    self.b.log("job_timeout", job=j["id"], kind=j["kind"])
+                    self.b.log("job_timeout", job=j["id"], job_kind=j["kind"])
                 continue
             j["result"] = {k: v for k, v in res.items() if k != "stdout"}
             j["state"] = "done" if res.get("ok", True) else "failed"
@@ -317,6 +328,8 @@ class Conductor:
             getattr(self, f"_reaped_{j['kind']}", lambda *_: None)(j, res)
 
     def _reaped_eval(self, j, res) -> None:
+        if j.get("p2seq") or j.get("p2"):
+            return self._p2_reaped(j, res)
         n = self.st["nodes"].get(j.get("owner"))
         if not res.get("ok", True) and n is not None:
             n["eval_failures"] = int(n.get("eval_failures", 0)) + 1
@@ -390,6 +403,9 @@ class Conductor:
             self.b.commit_reject(tag, why, evidence)
 
     def promote(self) -> None:
+        if self.cfg.p2:
+            self._p2_step()
+            return
         for tag in sorted(self.st["nodes"]):
             n = self.st["nodes"][tag]
             if n["status"] in ("proposed", "rung", "full", "stale") and tag != "seed":
@@ -511,7 +527,7 @@ class Conductor:
         for tip in self.alive_tips():
             n = self.node(tip)
             key = f"{tip}>{self.champion}"
-            if n.get("edit_kind") in ("rebase", "merge") or key in done or n["status"] == "confirming":
+            if n.get("edit_kind") in ("rebase", "merge") or key in done or n["status"] in ("confirming", "racing"):
                 continue
             if self._merge_jobs() >= 1:
                 return
@@ -530,8 +546,11 @@ class Conductor:
                   for n in self.st["nodes"].values())
         if not policy.merge_allowed(nm, self.st["n_proposals"], won):
             return
-        eligible = [t for t in tips if self.node(t)["status"] == "screened"
-                    or (self.node(t)["status"] in ("full", "rung") and self.node(t).get("rung", 0) >= 1)]
+        if self.cfg.p2:       # a P2 node has been through its rungs when it is pending after a round
+            eligible = [t for t in tips if self.node(t)["status"] == "unconfirmed" or self.node(t).get("unconfirmed")]
+        else:
+            eligible = [t for t in tips if self.node(t)["status"] == "screened"
+                        or (self.node(t)["status"] in ("full", "rung") and self.node(t).get("rung", 0) >= 1)]
         pairs = policy.merge_pairs(eligible, wins, self.b.related, merged)
         if pairs:
             a, b, _ = pairs[0]
@@ -582,6 +601,9 @@ class Conductor:
         return sorted(out, key=lambda w: (w[0], w[1]))
 
     def launch_evals(self) -> None:
+        if self.cfg.p2:
+            self._p2_launch()
+            return
         if self.st.get("stopped"):
             wants = [w for w in self._wants() if w[6] == "confirm"]
         else:
@@ -619,7 +641,164 @@ class Conductor:
             j["state"] = "failed"
             j["reserved_rollouts"] = j["reserved_tokens"] = 0
             j["error"] = f"{type(e).__name__}: {e}"
-            self.b.log("job_start_failed", job=j["id"], kind=j["kind"], error=j["error"])
+            self.b.log("job_start_failed", job=j["id"], job_kind=j["kind"], error=j["error"])
+
+    # ---- P2 rounds ------------------------------------------------------------------------
+    def _p2_pool(self) -> list[str]:
+        return sorted(t for t, n in self.st["nodes"].items()
+                      if t != "seed" and n["status"] == "proposed" and not n.get("round"))
+
+    def _p2_step(self) -> None:
+        r = self.st.get("round")
+        if r is None:
+            return self._p2_maybe_open()
+        if r["stage"] == "seq":
+            return                                   # one worker job runs the group-sequential test
+        stage = r["stage"]
+        if stage not in r["jobs"]:
+            r["jobs"][stage] = self.b.p2_stage_jobs(r["id"], stage)     # created ONCE, then stored
+        pend = [x for x in r["jobs"][stage] if not self.b.p2_job_done(r["id"], x)]
+        live = [j for j in cs.live(self.st, "eval") if j.get("round") == r["id"]]
+        if r.get("unfunded") or any(v >= self.cfg.eval_retries for v in r.get("fails", {}).values()):
+            if not live:
+                self._p2_close_stage(r, unfunded=True)
+        elif not pend and not live:
+            self._p2_close_stage(r, unfunded=False)
+
+    def _p2_maybe_open(self) -> None:
+        pool = self._p2_pool()
+        if not pool:
+            return
+        stopped = bool(self.st.get("stopped"))
+        proposing = len(cs.live(self.st, "propose")) + len(cs.live(self.st, "merge"))
+        if len(pool) < self.cfg.k_prop and proposing and not stopped:
+            return                                   # keep collecting the batch
+        if stopped:
+            return
+        k, funded = self.b.p2_plan(min(len(pool), self.cfg.k_prop), self.champion)
+        if not funded:
+            self.st["round_unfunded"] = True
+            return
+        chosen = pool[:k]
+        rid = self.b.p2_open(chosen, self.champion)
+        self.st["round"] = {"id": rid, "stage": "rung1" if len(chosen) > 1 else "seq", "tags": chosen,
+                            "jobs": {}, "fails": {}, "unfunded": False}
+        for t in chosen:
+            self.node(t).update(status="racing", round=rid)
+            self.b.node_event(t, "proposed", stage="racing", round=rid)
+        self.b.log("p2_round", round=rid, tags=chosen, stage=self.st["round"]["stage"])
+
+    def _p2_launch(self) -> None:
+        r = self.st.get("round")
+        if r is None:
+            return
+        live = cs.live(self.st, "eval")
+        if r["stage"] == "seq":
+            if not any(j.get("p2seq") for j in live) and len(live) < self.cfg.slots and "seq_done" not in r:
+                j = cs.new_job(self.st, "eval", tag=r["tags"][0], owner=r["tags"][0], round=r["id"],
+                               p2seq={"round": r["id"], "cid": r["tags"][0]}, purpose="seq",
+                               reserved_rollouts=0, reserved_tokens=0, ids=[], window=[0, 0])
+                self._start(j)
+            return
+        if self.st.get("stopped") and r["stage"] not in ("confirm", "seq"):
+            return
+        busy = {j["p2"]["job_id"] for j in live if j.get("p2")}
+        for x in r["jobs"].get(r["stage"], []):
+            if len(cs.live(self.st, "eval")) >= self.cfg.slots:
+                return
+            if x["job_id"] in busy or self.b.p2_job_done(r["id"], x) or r.get("unfunded"):
+                continue
+            if r.get("fails", {}).get(x["job_id"], 0) >= self.cfg.eval_retries:
+                continue
+            j = cs.new_job(self.st, "eval", tag=x["cid"], owner=x["cid"], round=r["id"], p2=x, purpose=x["stage"],
+                           ids=list(x["ids"]), window=[0, 0], reserved_rollouts=0, reserved_tokens=0)
+            self._start(j)
+
+    def _p2_reaped(self, j, res) -> None:
+        r = self.st.get("round")
+        if r is None or j.get("round") != r["id"]:
+            return
+        if j.get("p2seq"):
+            if res.get("ok", True) and res.get("verdict"):
+                r["seq_done"] = True
+                self._p2_apply_confirm({res["verdict"]["cid"]: res["verdict"]}, champion=res["verdict"]["cid"]
+                                       if res["verdict"]["status"] == "accept" else None)
+                self._p2_end_round(r)
+            elif not res.get("ok", True):
+                r.setdefault("fails", {})["seq"] = r.get("fails", {}).get("seq", 0) + 1
+                if r["fails"]["seq"] >= self.cfg.eval_retries:
+                    self._p2_abandon_round(r, "sequential test failed")
+                else:
+                    r.pop("seq_done", None)
+            return
+        if res.get("unfunded"):
+            r["unfunded"] = True
+        elif not res.get("ok", True):
+            jid = j["p2"]["job_id"]
+            r.setdefault("fails", {})[jid] = r.get("fails", {}).get(jid, 0) + 1
+
+    def _p2_close_stage(self, r, unfunded: bool) -> None:
+        out = self.b.p2_close(r["id"], r["stage"], unfunded)
+        verdicts = out.get("verdicts", {})
+        if r["stage"] == "confirm":
+            self._p2_apply_confirm(verdicts, out.get("champion"))
+            return self._p2_end_round(r)
+        for tag, v in verdicts.items():
+            if v["status"] == "kill":
+                self._finish_node(tag, "pruned", "rung_kill", {"stage": r["stage"]})
+            elif v["status"] == "unfunded":
+                self.node(tag).update(status="proposed", round=None)
+        nxt = out.get("next")
+        if not nxt or unfunded:
+            for tag in r["tags"]:
+                if self.node(tag)["status"] == "racing":
+                    self.node(tag).update(status="proposed", round=None, why="round unfunded")
+            return self._p2_end_round(r)
+        r["stage"] = nxt
+        r["jobs"].pop(nxt, None)
+
+    def _p2_apply_confirm(self, verdicts, champion) -> None:
+        for tag in sorted(verdicts):
+            v = verdicts[tag]
+            n = self.node(tag)
+            if v["status"] == "accept" and tag == champion:
+                ev = {"stage": "confirm", "confirmation": "accept"}
+                self.b.commit_accept(tag, {**ev, "mean": v.get("mean"), "z": v.get("z")})
+                old = self.champion
+                self._finish_node(tag, "champion", "promoted", ev)
+                self.node(old)["status"] = "superseded"
+                self.st.update(champion=tag, epoch=self.st["epoch"] + 1, proposals_since_improve=0)
+            elif v["status"] == "unconfirmed" or (v["status"] == "accept"):
+                # survived but could not be funded (or lost to a better accept): pending, never a reject
+                n["unconfirmed"] = int(n.get("unconfirmed", 0)) + 1
+                if n["unconfirmed"] > 1 or v["status"] == "accept":
+                    n.update(status="unconfirmed", round=None)
+                    self.b.node_event(tag, "gated", stage="unconfirmed", confirmation="pending")
+                else:
+                    n.update(status="proposed", round=None)
+            else:
+                self._finish_node(tag, "rejected", "confirm_reject", {"stage": "confirm", "confirmation": "reject"})
+
+    def _p2_end_round(self, r) -> None:
+        for tag in r["tags"]:
+            n = self.st["nodes"].get(tag)
+            if n and n["status"] == "racing":          # survived to a verdict-less end: back to the pool
+                n.update(status="proposed", round=None)
+        self.st["rounds_done"] = int(self.st.get("rounds_done", 0)) + 1
+        self.st["round"] = None
+
+    def _p2_abandon_round(self, r, why) -> None:
+        for j in cs.live(self.st, "eval"):
+            if j.get("round") == r["id"]:
+                self.b.kill(j)
+                j["state"] = "lost"
+        for tag in r["tags"]:
+            n = self.st["nodes"].get(tag)
+            if n and n["status"] == "racing":
+                n.update(status="unconfirmed", round=None, why=why)
+                self.b.node_event(tag, "gated", stage="unconfirmed", why=why)
+        self.b.log("p2_round_abandoned", round=r["id"], why=why)
+        self.st["round"] = None
 
     # ---- 5. propose ---------------------------------------------------------------------
     def in_flight_nodes(self) -> int:
@@ -669,23 +848,23 @@ class Conductor:
     def stop_check(self) -> str | None:
         if self.st.get("stopped"):
             return self.st["stopped"]
+        if self.st.get("round_unfunded") and not self.st.get("round"):
+            return "budget: no round fits the remaining rollouts"
         alive_p = [self.node(t).get("p_beat", 0.0) for t in self.alive_tips()]
         champ_reward = self.b.best_reward(self.champion)
         return policy.stop_reason(
-            caps=self.cfg.caps, committed=self.committed(), reserved=cs.reserved(self.st) + self._node_reserved(),
+            caps=self.cfg.caps, committed=self.committed(),
+            reserved=cs.reserved(self.st) + self.b.reserved_rollouts(),
             tokens=self.tokens_used(), tokens_reserved=cs.reserved(self.st, "reserved_tokens"), now=self.clock(),
             best_reward=champ_reward, n_proposals=self.st["n_proposals"], since_improve=self.st["proposals_since_improve"],
             alive_p=alive_p, in_flight=self.in_flight_nodes() + len(cs.live(self.st, "propose")) + len(cs.live(self.st, "merge")))
-
-    def _node_reserved(self) -> int:
-        return 0    # cs.reserved already includes node reservations (see conductor_state)
 
     def drain(self) -> bool:
         """After a stop: cancel proposer/merge jobs and evals that do not serve a running
         confirmation; let confirmations finish if their cells fit (already reserved); a node whose
         confirmation can no longer run is ``unconfirmed``. True when nothing is in flight."""
         for j in cs.live(self.st):
-            keep = j["kind"] == "eval" and j.get("purpose") == "confirm" and self.node(j["owner"])["status"] == "confirming"
+            keep = self._keep_on_drain(j)
             if not keep:
                 self.b.kill(j)
                 j["state"] = "lost"
@@ -699,7 +878,20 @@ class Conductor:
                     n["status"] = "unconfirmed"
                     n["reserved"] = 0
                     self.b.node_event(t, "gated", stage="unconfirmed", why="stopped before the confirmation finished")
+        if self.cfg.p2:
+            r = self.st.get("round")
+            if r and r["stage"] not in ("confirm", "seq"):
+                self._p2_abandon_round(r, "stopped before the round reached its confirmation")
+            return not cs.live(self.st) and not self.st.get("round")
         return not cs.live(self.st) and not any(n["status"] == "confirming" for n in self.st["nodes"].values())
+
+    def _keep_on_drain(self, j) -> bool:
+        if j["kind"] != "eval":
+            return False
+        if self.cfg.p2:
+            r = self.st.get("round")
+            return bool(r) and r["stage"] in ("confirm", "seq") and j.get("round") == r["id"]
+        return j.get("purpose") == "confirm" and self.node(j["owner"])["status"] == "confirming"
 
     def _confirm_launchable(self, tag, n) -> bool:
         return bool(n.get("reserved")) and len(cs.live(self.st, "eval")) < self.cfg.slots
