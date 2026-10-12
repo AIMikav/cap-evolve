@@ -15,10 +15,10 @@
 #
 # Usage:
 #   export PARSEC_V4N=/path/to/rhdp-parsec/v4_2026-09-16
-#   bash scripts/ccc/parsec_stack.sh up       # start all 6, then activate the 5 sims
-#   bash scripts/ccc/parsec_stack.sh status   # read-only: TCP + simulation `ready`
-#   bash scripts/ccc/parsec_stack.sh down     # stop+remove containers, stop parsec-live
-#   bash scripts/ccc/parsec_stack.sh reap     # force-remove/kill anything on our ports
+#   bash examples/parsec/ccc/parsec_stack.sh up       # start all 6, then activate the 5 sims
+#   bash examples/parsec/ccc/parsec_stack.sh status   # read-only: TCP + simulation `ready`
+#   bash examples/parsec/ccc/parsec_stack.sh down     # stop+remove containers, stop parsec-live
+#   bash examples/parsec/ccc/parsec_stack.sh reap     # force-remove/kill anything on our ports
 #
 # Exits non-zero if $PARSEC_V4N is unset, if any of `up`'s preconditions are
 # unmet, if a sim's activation POST never returns 2xx/409, or (for `status`) if
@@ -43,7 +43,19 @@ esac
 # host A's recorded pid be `kill -0`-tested against host B's process table —
 # a false "already running" that silently skips starting parsec-live.
 PID_DIR="$PARSEC_V4N/_run/logs/pids/$(hostname -s)"
-LOG_DIR="$PARSEC_V4N/_run/logs/sims"
+
+# The four overrides below exist for parallel eval lanes (examples/parsec/h4):
+# $PARSEC_V4N is one shared GPFS tree, so N concurrent lanes pointed at the
+# defaults would collide on the live clone's prompts, the skills store, and the
+# log dir the cost-attribution window is read from. Defaults are unchanged, so
+# a single-lane run behaves exactly as before.
+#
+# PARSEC_LIVE_ROOT is the directory parsec-live is launched from, and therefore
+# the one whose config/prompts it serves: src/agent/system_prompt.py derives
+# _BASE_DIR from dirname^3(__file__), which resolves to this directory even when
+# its src/ is a symlink (Python leaves __file__ unresolved through symlinks).
+PARSEC_LIVE_ROOT="${PARSEC_LIVE_ROOT:-$PARSEC_V4N/_run/parsec-live}"
+LOG_DIR="${PARSEC_LOG_DIR:-$PARSEC_V4N/_run/logs/sims}"
 mkdir -p "$PID_DIR" "$LOG_DIR"
 
 # Container runtime and image. The image is built once, out of band, from the
@@ -51,8 +63,9 @@ mkdir -p "$PID_DIR" "$LOG_DIR"
 CRI="${PARSEC_CONTAINER_CLI:-podman}"
 SIM_IMAGE="${PARSEC_SIM_IMAGE:-simulation-harness:bench}"
 # One skills-store mount shared by all five: each writes only its own
-# parsec-<service>/ subdirectory, so they never collide.
-SKILLS_DIR="$PARSEC_V4N/_run/skills"
+# parsec-<service>/ subdirectory, so they never collide. Across LANES they
+# would, hence the override.
+SKILLS_DIR="${PARSEC_SKILLS_DIR:-$PARSEC_V4N/_run/skills}"
 
 # Must be the SAME path adapter.py passes to the Harbor container, or the agent
 # reads an empty trace: adapter.py's default is
@@ -61,7 +74,7 @@ SKILLS_DIR="$PARSEC_V4N/_run/skills"
 PARSEC_SIM_TRACE="${PARSEC_SIM_TRACE:-$PARSEC_V4N/_run/logs/parsec-trace/trace.jsonl}"
 
 # name:published_port:kind. The port numbers are the single source of truth in
-# scripts/parsec/v4_t2_e1/common/parsec_paths.py's MCP_PORTS — change them there.
+# examples/parsec/parsec_paths.py's MCP_PORTS — change them there.
 SERVICES=(
   "platform:8086:sim"
   "github:8087:sim"
@@ -230,14 +243,19 @@ start_live() {
   # simulators at all — unset means it talks to real backends and produces
   # confidently wrong rewards. MLFLOW_TRACKING_URI= (empty) suppresses a
   # startup warning path. See README.md's "Start it" block.
-  ( cd "$PARSEC_V4N/_run/parsec-live" && \
+  # PARSEC_LIVE_UV_FLAGS is empty by default. Lanes set it to
+  # `--no-sync --frozen`: a lane's .venv is a SYMLINK to the one shared venv, and
+  # `uv run` syncs the project environment before executing, so N lanes starting
+  # at once would each sync the same venv through their symlink.
+  ( cd "$PARSEC_LIVE_ROOT" && \
     PARSEC_SIM=1 \
     PARSEC_SIM_TRACE="$PARSEC_SIM_TRACE" \
     PARSEC_SIM_TIMEOUT="${PARSEC_SIM_TIMEOUT:-240}" \
     MLFLOW_TRACKING_URI= \
-    exec nohup uv run uvicorn src.app:app --host 127.0.0.1 --port "$port" \
+    exec nohup uv run ${PARSEC_LIVE_UV_FLAGS:-} uvicorn src.app:app --host 127.0.0.1 --port "$port" \
       > "$LOG_DIR/$name.log" 2>&1 & echo $! > "$pid_file" )
   echo "started $name (pid $(cat "$pid_file"), port $port, log $LOG_DIR/$name.log)"
+  echo "  root=$PARSEC_LIVE_ROOT"
   echo "  PARSEC_SIM=1 PARSEC_SIM_TRACE=$PARSEC_SIM_TRACE"
 }
 

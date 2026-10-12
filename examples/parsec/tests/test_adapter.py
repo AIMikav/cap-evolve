@@ -1,4 +1,4 @@
-# scripts/parsec/v4_t2_e1/tests/test_adapter.py
+# examples/parsec/v4_t2_e1/tests/test_adapter.py
 from __future__ import annotations
 
 import json
@@ -12,16 +12,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "common" / "adapters"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "adapters"))
 # adapter.py adds the repo root to sys.path itself (so `capevolve_harbor` imports),
 # but `cap_evolve` lives under core/ — which only an installed cap-evolve or an
 # explicit PYTHONPATH=core provides. Add it here, in the TEST, rather than in
 # adapter.py: a second copy of cap_evolve ahead of the installed one inside a
 # real `cap-evolve run` process would be a far worse bug than an awkward test
 # invocation. This is what makes
-#     python3 scripts/parsec/v4_t2_e1/tests/test_adapter.py -v
+#     python3 examples/parsec/v4_t2_e1/tests/test_adapter.py -v
 # work from a clean shell with no PYTHONPATH set.
-sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "core"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "core"))
 
 import adapter as adapter_mod  # noqa: E402
 
@@ -38,20 +38,26 @@ KNOWN_TASK_ID = "icinga-011-aap2-job-status-alert"  # one of the 21; real dir on
 
 
 class TestAdapterTaskResolution(unittest.TestCase):
-    def test_raises_clearly_when_task_id_unset(self):
+    def test_raises_clearly_when_v4n_unset(self):
+        """An unconfigured checkout must stop construction, not default to one."""
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(RuntimeError) as ctx:
                 adapter_mod.Adapter()
-            self.assertIn("TASK_ID", str(ctx.exception))
+            self.assertIn("PARSEC_V4N", str(ctx.exception))
 
-    def test_raises_clearly_when_task_dir_missing(self):
+    def test_empty_tasks_dir_yields_no_tasks_rather_than_raising(self):
+        """A tasks dir with no bench-v4-* entries returns zero tasks.
+
+        Worth pinning precisely because it does NOT raise: a run against the
+        wrong checkout would otherwise "succeed" having measured nothing, and
+        zero tasks is the only signal that happened.
+        """
         with tempfile.TemporaryDirectory() as tmp:
-            fake_tasks_dir = Path(tmp)
-            with patch.object(adapter_mod, "V4N", fake_tasks_dir), \
-                 patch.object(adapter_mod, "TASKS_DIR", fake_tasks_dir), \
-                 patch.dict(os.environ, {"TASK_ID": "not-a-real-task-xyz"}, clear=True):
-                with self.assertRaises(FileNotFoundError):
-                    adapter_mod.Adapter()
+            empty = Path(tmp)
+            with patch.object(adapter_mod, "V4N", empty), \
+                 patch.object(adapter_mod, "TASKS_DIR", empty), \
+                 patch.dict(os.environ, {"PARSEC_V4N": str(empty)}, clear=True):
+                self.assertEqual(adapter_mod.Adapter().tasks("val"), [])
 
     @unittest.skipUnless(_REAL_TASKS_DIR_PRESENT, "real bench-v4 tasks dir not present (set PARSEC_V4N)")
     def test_tasks_returns_the_one_pinned_task(self):
@@ -812,3 +818,77 @@ class TestReadParsecUsageCost(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAwaitQuiescentSims(unittest.TestCase):
+    """The pre-seed gate: seeding a busy service is refused with HTTP 409.
+
+    The failure this prevents is not loud. Before the gate existed, a trial
+    whose seeding was refused errored out, and a sweep that kept going banked
+    69 such trials. Worse, the call being drained usually belongs to the
+    PREVIOUS task -- a trial ends when the agent stops, which does not wait for
+    the simulators it stopped talking to.
+    """
+
+    def _patch_depths(self, depths):
+        """Patch per-port queue depth. `depths` maps port -> int | None."""
+        return patch.object(adapter_mod, "_sim_queue_depth",
+                            side_effect=lambda port: depths.get(port))
+
+    def test_returns_none_when_all_idle(self):
+        depths = {p: 0 for p in adapter_mod.MCP_PORTS.values()}
+        with self._patch_depths(depths):
+            self.assertIsNone(adapter_mod._await_quiescent_sims())
+
+    def test_names_the_busy_service_on_timeout(self):
+        port = adapter_mod.MCP_PORTS["PLATFORM_MCP_URL"]
+        depths = {p: (1 if p == port else 0) for p in adapter_mod.MCP_PORTS.values()}
+        with patch.object(adapter_mod, "QUIESCE_TIMEOUT_SEC", 0.2), \
+             patch.object(adapter_mod, "QUIESCE_POLL_SEC", 0.05), \
+             self._patch_depths(depths):
+            err = adapter_mod._await_quiescent_sims()
+        self.assertIsNotNone(err)
+        self.assertIn("platform(queue=1)", err)
+
+    def test_unreadable_service_is_not_treated_as_idle(self):
+        """A service that cannot be polled must block, not pass.
+
+        Seeding into a service whose state is unknown is exactly the race the
+        gate exists to stop, so None must never read as "idle".
+        """
+        port = adapter_mod.MCP_PORTS["CLOUD_MCP_URL"]
+        depths = {p: (None if p == port else 0) for p in adapter_mod.MCP_PORTS.values()}
+        with patch.object(adapter_mod, "QUIESCE_TIMEOUT_SEC", 0.2), \
+             patch.object(adapter_mod, "QUIESCE_POLL_SEC", 0.05), \
+             self._patch_depths(depths):
+            err = adapter_mod._await_quiescent_sims()
+        self.assertIsNotNone(err)
+        self.assertIn("cloud(unreadable)", err)
+
+    def test_proceeds_once_the_queue_drains(self):
+        port = adapter_mod.MCP_PORTS["GITHUB_MCP_URL"]
+        calls = {"n": 0}
+
+        def depth(p):
+            if p != port:
+                return 0
+            calls["n"] += 1
+            return 1 if calls["n"] <= 2 else 0
+
+        with patch.object(adapter_mod, "QUIESCE_TIMEOUT_SEC", 5.0), \
+             patch.object(adapter_mod, "QUIESCE_POLL_SEC", 0.01), \
+             patch.object(adapter_mod, "_sim_queue_depth", side_effect=depth):
+            self.assertIsNone(adapter_mod._await_quiescent_sims())
+
+    def test_trial_cap_exceeds_the_agent_ceiling_it_contains(self):
+        """TRIAL_TIMEOUT_SEC must not preempt the ceiling Harbor enforces.
+
+        Getting this backwards is how a nested timeout silently converts a
+        recoverable wait into a dead trial: an earlier version had a 120s drain
+        budget inside a subprocess whose own cap was also 120s, so the retry
+        could never finish. The h4 tasks declare 600s.
+        """
+        task_agent_timeout = 600.0
+        harbor_ceiling = task_agent_timeout * adapter_mod.AGENT_TIMEOUT_MULTIPLIER
+        self.assertGreater(adapter_mod.TRIAL_TIMEOUT_SEC, harbor_ceiling,
+                           "the subprocess cap must outlast the agent ceiling")
