@@ -1336,6 +1336,32 @@ def _p2_evaluate(adapter, run_dir: RunDir, workdir: Path, cid: str, parent_id, p
                       "delta": (v.mean if v.mean is not None else r1.mean), "record": rec, "reason": reason}
 
 
+def _internal_estimate(adapter, run_dir: RunDir, gate_kwargs: dict | None):
+    """Rule P2 + pooled splits: champion vs seed on C, fresh seeds (the unbiased internal estimate).
+
+    Runs once, when the search is over and the champion is not the seed. Selection touched C only
+    through accept/reject bits, so this carries no winner's curse. Skipped (and recorded) when the
+    remaining budget cannot fund it. ``None`` when P2 is off."""
+    gk = dict(gate_kwargs or {})
+    p2 = pop_p2(gk, run_dir)
+    best = run_dir.best_id
+    if p2 is None or not best or best == "seed":
+        return None
+    from . import evaluator as evaluator_mod
+    path = run_dir.root / "internal_estimate.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        ev = evaluator_mod.P2Evaluator(adapter, run_dir, p2)
+        out = ev.final_estimate(run_dir.candidate_dir(best), run_dir.candidate_dir("seed"))
+    except BudgetExhausted as e:
+        out = {"skipped": "budget", "reason": str(e)[:200]}
+        run_dir.log_event("p2_final_estimate", skipped="budget")
+    path.write_text(json.dumps({k: (None if isinstance(v, float) and not math.isfinite(v) else v)
+                                for k, v in out.items()}, indent=2), encoding="utf-8")
+    return out
+
+
 def asdict_safe(obj) -> dict:
     import dataclasses
     return {k: (None if isinstance(v, float) and not math.isfinite(v) else v)
@@ -5104,12 +5130,14 @@ def hill_climb_loop(
             current_val = _heal(SplitResult.from_dict(step.get("baseline_val") or step["candidate_val"]))
 
     _, why = run_dir.budget_exhausted()
+    internal = _internal_estimate(adapter, run_dir, gate_kwargs)
     return {
         "algorithm": algorithm,
         "best_id": run_dir.best_id,
         "best_val": current_val.reward,
         "iterations": len(steps),
         "accepts": sum(1 for s in steps if s["accepted"]),
+        **({"internal_estimate": internal} if internal is not None else {}),
         "stop_reason": why or budget_stop or ("converged" if convergence_stop else "max_iterations"),
         "steps": steps,
     }

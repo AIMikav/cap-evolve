@@ -64,3 +64,25 @@ def test_p2_budget_exhaustion_is_pending_and_stops_the_loop(tmp_path):
     assert step["accepted"] is False and step["decision"]["indecisive"] is True
     assert run_dir.budget_exhausted()[0] is True
     assert run_dir.spent.metric_calls <= run_dir.budget.max_metric_calls
+
+
+def test_loop_reports_the_internal_estimate_of_the_champion_on_C(tmp_path):
+    adapter, run_dir, base = _setup(tmp_path)
+    cfg = {"default": 0.9, "p": {}}
+    res = harness.hill_climb_loop(adapter, run_dir=run_dir, optimizer=_opt(cfg), current_val=base,
+                                  max_iterations=1, n_trials=1,
+                                  gate_kwargs={"promotion_rule": "P2", "p2_conf_n": 96})
+    assert res["accepts"] == 1
+    est = res["internal_estimate"]
+    assert est["mean"] > 0.3 and est["n"] == len(run_dir.read_splits().confirm)
+    assert (run_dir.root / "internal_estimate.json").exists()
+
+
+def test_loop_without_p2_has_no_internal_estimate(tmp_path):
+    adapter, run_dir = make_run(tmp_path, n_train=0, n_val=24, default=0.4)
+    base = harness.evaluate_candidate(adapter, run_dir.candidate_dir("seed"), run_dir=run_dir, split="val",
+                                      tag="seed", n_trials=2)
+    res = harness.hill_climb_loop(adapter, run_dir=run_dir, optimizer=_opt({"default": 0.9, "p": {}}),
+                                  current_val=base, max_iterations=1, n_trials=2,
+                                  gate_kwargs={"mode": "paired", "k_se": 1.0})
+    assert "internal_estimate" not in res
