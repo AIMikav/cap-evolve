@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -35,10 +36,12 @@ from . import stats
 from .cache import hash_candidate_dir
 from .memory import MemorySkill
 from . import eval_index
-from .loop import SplitResult, aggregate_scores, has_valid_trials
-from .rundir import RunDir, _atomic_write
-from .splits import Splits, make_splits
-from .trials import run_trials_pool
+from .loop import SplitResult, aggregate_scores, has_valid_trials, pool_split_results
+from . import coverage as coverage_mod
+from . import gatecfg
+from .rundir import BudgetExhausted, RunDir, _atomic_write
+from .splits import Splits, make_pooled_partition, make_splits
+from .trials import candidate_scope, run_trials_pool
 from .types import Rollout, Score, Task
 
 # How many rollouts may be generated concurrently when a caller does not say.
@@ -218,6 +221,63 @@ def ensure_splits(adapter, run_dir: RunDir, *, seed: int = 0, ratios=(0.5, 0.25,
     return splits
 
 
+def _seed_pass_rates(run_dir: RunDir) -> dict:
+    """Per-task pass rate of the seed from a prior ``baseline.json`` ({} when there is none)."""
+    try:
+        base = json.loads((run_dir.root / "baseline.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: dict = {}
+    for part in ("train", "val"):
+        for pt in ((base.get(part) or {}).get("per_task") or []):
+            if has_valid_trials(pt):
+                out[str(pt.get("task_id"))] = float(pt.get("reward") or 0.0)
+    return out
+
+
+def ensure_pooled(run_dir: RunDir, *, confirm_fraction: float | None = None,
+                  pass_rates: dict | None = None) -> Splits:
+    """``split_mode: pooled``: partition pool = train + val into F and C ONCE; later calls only load.
+
+    The partition is seeded by the run's frozen splits seed, stratified by the seed's pass rate when a
+    baseline exists, persisted in ``splits.json`` and never re-drawn (a second call with a different
+    fraction or rates returns the stored partition unchanged). The proposer sees F (split name
+    ``feedback``); C (``confirm``) is touched only by confirmation. Test is untouched."""
+    splits = run_dir.read_splits()
+    if splits.pooled:
+        return splits
+    cfg = gatecfg.GateConfig.for_run(run_dir)
+    frac = cfg.confirm_fraction if confirm_fraction is None else float(confirm_fraction)
+    pool = list(dict.fromkeys([*splits.train, *splits.val]))
+    rates = pass_rates if pass_rates is not None else _seed_pass_rates(run_dir)
+    fb, cf = make_pooled_partition(pool, seed=splits.seed, confirm_fraction=frac, pass_rates=rates)
+    splits.pooled, splits.feedback, splits.confirm, splits.pool_seed = True, fb, cf, splits.seed
+    run_dir.write_splits(splits)
+    run_dir.log_event("pooled_split", n_pool=len(pool), n_feedback=len(fb), n_confirm=len(cf),
+                      confirm_fraction=frac, stratified=bool(rates), seed=splits.seed)
+    return splits
+
+
+def baseline_pooled(adapter, seed_dir: Path, *, run_dir: RunDir, n_trials: int = 4, ks=(1, 2),
+                    workers: int | None = None) -> SplitResult:
+    """Pooled-mode baseline: snapshot the seed as candidate ``seed``, score it on the feedback stratum F
+    ONLY (``n_trials`` per task, ranking draws for the P2 evaluator), set best.
+
+    C is never measured here: the concurrent control re-measures the incumbent on C at confirmation, and
+    the proposer must never see a per-task C score of the seed."""
+    seed_dir = Path(seed_dir)
+    seed_dir.mkdir(parents=True, exist_ok=True)
+    ensure_pooled(run_dir)
+    run_dir.snapshot("seed", seed_dir)
+    run_dir.set_best("seed")
+    result = evaluate_candidate(adapter, run_dir.candidate_dir("seed"), run_dir=run_dir,
+                                split="feedback", n_trials=n_trials, ks=ks, tag="seed", workers=workers)
+    run_dir.log_event("baseline", val=result.reward, stderr=result.stderr, n_scored=result.n_scored,
+                      n_tasks=result.n_tasks, split="feedback")
+    run_dir.update_spent(best_val=result.reward)
+    return result
+
+
 def _tasks_for(adapter, run_dir: RunDir, split: str) -> list[Task]:
     """Tasks for a split, filtered by the frozen split ids."""
     splits = run_dir.read_splits()
@@ -315,6 +375,36 @@ def candidate_attributed_error(metadata) -> bool:
     return isinstance(metadata, dict) and metadata.get("error_kind") == CANDIDATE_ERROR_KIND
 
 
+BUDGET_RESERVE_ENV = "CAPEVOLVE_BUDGET_RESERVE"
+#: Cost margin applied to the running mean cost per rollout when reserving against ``max_usd``.
+_USD_RESERVE_MARGIN = 1.3
+
+
+def resolve_budget_reserve(explicit=None, run_dir=None) -> bool:
+    """explicit argument > env ``CAPEVOLVE_BUDGET_RESERVE`` > the run's spec ``budget_reserve`` > off.
+
+    Off keeps today's behaviour (the budget is read at iteration boundaries and charged after the
+    rollouts ran). On, every ``evaluate_candidate`` reserves its rollouts first and raises
+    ``BudgetExhausted`` before dispatching any, so the run never exceeds ``max_metric_calls``."""
+    if explicit is not None:
+        return bool(explicit)
+    env = os.environ.get(BUDGET_RESERVE_ENV)
+    if env is not None and env != "":
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if run_dir is not None:
+        from .specfile import spec_for_run
+        return bool((spec_for_run(run_dir) or {}).get("budget_reserve"))
+    return False
+
+
+def _estimate_usd(run_dir: RunDir, n_rollouts: int) -> float:
+    """Conservative runner-cost estimate: running mean cost per rollout x n x 1.3 (0.0 until known)."""
+    sp = run_dir.spent
+    if not sp.metric_calls or not sp.usd:
+        return 0.0
+    return sp.usd / sp.metric_calls * n_rollouts * _USD_RESERVE_MARGIN
+
+
 def evaluate_candidate(
     adapter,
     candidate_dir: Path,
@@ -330,6 +420,47 @@ def evaluate_candidate(
     trial_offset: int = 0,
     fixed_seeds: bool = False,
     errored_policy: str | None = None,
+    budget_reserve: bool | None = None,
+) -> SplitResult:
+    """``_evaluate_candidate`` behind an optional budget reservation (``budget_reserve``, see
+    ``resolve_budget_reserve``). The test split is never reserved: finalize must always be able to score.
+
+    Raises ``rundir.BudgetExhausted`` BEFORE any rollout when the reservation does not fit; a failed
+    evaluation refunds it; a successful one converts it into spend atomically."""
+    kw = dict(run_dir=run_dir, split=split, n_trials=n_trials, ks=ks, tag=tag, base_seed=base_seed,
+              workers=workers, ids=ids, trial_offset=trial_offset, fixed_seeds=fixed_seeds,
+              errored_policy=errored_policy)
+    if split == "test" or not resolve_budget_reserve(budget_reserve, run_dir):
+        return _evaluate_candidate(adapter, candidate_dir, **kw)
+    tasks = _tasks_for(adapter, run_dir, split)
+    if ids is not None:
+        want = {str(i) for i in ids}
+        tasks = [t for t in tasks if t.id in want]
+    n_roll = len(tasks) * max(1, int(n_trials))
+    token = run_dir.reserve_metric_calls(n_roll, label=f"{split}/{tag}",
+                                         est_usd=_estimate_usd(run_dir, n_roll))
+    try:
+        return _evaluate_candidate(adapter, candidate_dir, _reservation=token, **kw)
+    finally:
+        run_dir.release_metric_calls(token)     # no-op once update_spent converted it
+
+
+def _evaluate_candidate(
+    adapter,
+    candidate_dir: Path,
+    *,
+    run_dir: RunDir,
+    split: str,
+    n_trials: int = 1,
+    ks=(1, 2),
+    tag: str = "cand",
+    base_seed: int | None = None,
+    workers: int | None = None,
+    ids: list | None = None,
+    trial_offset: int = 0,
+    fixed_seeds: bool = False,
+    errored_policy: str | None = None,
+    _reservation: str | None = None,
 ) -> SplitResult:
     """Run + score a candidate on a split with multi-trial honesty.
 
@@ -589,7 +720,8 @@ def evaluate_candidate(
                       rollouts=len(tasks) * max(1, int(n_trials)),
                       **({"subset": True} if ids is not None else {}))
 
-    with contextlib.redirect_stdout(sys.stderr), _live(adapter, candidate_dir) as ctx:
+    with contextlib.redirect_stdout(sys.stderr), _live(adapter, candidate_dir) as ctx, \
+            candidate_scope(candidate_dir, ctx if isinstance(ctx, (str, os.PathLike)) else None):
         if has_run_trials:
             # Adapter-owned fast path: ask for ALL trials in one batch
             # ({task_id: [rollout_t0, rollout_t1, ...]}, trial-ordered), then run the
@@ -667,7 +799,7 @@ def evaluate_candidate(
     elapsed = time.time() - t0
     run_dir.update_spent(metric_calls=len(tasks) * n_trials, usd=run_cost,
                          runner_tokens=run_tokens, runner_seconds=elapsed,
-                         usersim_usd=run_acc["usersim"])
+                         usersim_usd=run_acc["usersim"], release=_reservation)
     result = aggregate_scores(split, scores, ks=ks)
     result.cost_usd, result.tokens, result.seconds = run_cost, run_tokens, elapsed
     result.cost_source = cost_source_counts
@@ -689,7 +821,8 @@ def evaluate_candidate(
                       **({"workers": workers} if workers > 1 else {}),
                       # only on a SUBSET eval, so a full-split event record is unchanged.
                       # Present ⇒ this reward is a triage signal, not a gateable score.
-                      **({"subset_ids": [t.id for t in tasks], "subset": True}
+                      **(({"n_subset": len(tasks), "subset": True} if split == "confirm"
+                          else {"subset_ids": [t.id for t in tasks], "subset": True})
                          if ids is not None else {}),
                       # Present only when some rollout tagged how solid its cost is
                       # (see adapter.Rollout.metadata["cost_source"]) — absent for
@@ -1189,9 +1322,55 @@ def paper_switch_kwargs(args) -> dict:
     return out
 
 
-def planned_val_ids(run_dir) -> list:
-    """The frozen val ids: the denominator of joint coverage (a task neither side attempted counts)."""
-    return list(run_dir.read_splits().ids("val"))
+def planned_val_ids(run_dir, split: str = "val") -> list:
+    """The frozen val ids: the denominator of joint coverage (a task neither side attempted counts).
+
+    Under ``coverage_policy: tipping`` the quarantined tasks (incumbent cells still missing after the
+    retries) are not planned any more: the denominator is the evaluable set."""
+    ids = list(run_dir.read_splits().ids(split))
+    if gatecfg.GateConfig.for_run(run_dir).coverage_policy == "tipping":
+        ids = coverage_mod.evaluable_set(ids, run_dir.quarantined_tasks())
+    return ids
+
+
+def retry_missing(adapter, run_dir: RunDir, result: SplitResult, *, candidate_dir: Path, tag: str,
+                  split: str = "val", n_trials: int = 1, max_attempts: int | None = None,
+                  quarantine: bool = False, errored_policy: str | None = None,
+                  workers: int | None = None) -> SplitResult:
+    """Re-run the cells of ``result`` that have no valid trial and pool the retries into it.
+
+    Up to ``max_attempts`` (default ``missing_retries``) attempts, each on the still-missing tasks only
+    under tag ``<tag>__retry<a>`` (fresh seeds), so the cost is ``missing x n_trials`` rollouts. With
+    ``quarantine`` the cells that stay missing are removed from the run's evaluable set (the incumbent's
+    own holes: a veto on them measures the infrastructure, not the candidate). Events:
+    ``missing_retry`` and ``task_quarantined``. Returns the pooled ``SplitResult``."""
+    cfg = gatecfg.GateConfig.for_run(run_dir)
+    attempts = cfg.missing_retries if max_attempts is None else int(max_attempts)
+    planned = [t for t in run_dir.read_splits().ids(split) if t not in set(run_dir.quarantined_tasks())]
+    for a in range(1, attempts + 1):
+        miss = coverage_mod.missing_ids(result.per_task, planned)
+        if not miss:
+            break
+        try:
+            extra = evaluate_candidate(adapter, candidate_dir, run_dir=run_dir, split=split,
+                                       n_trials=n_trials, tag=f"{tag}__retry{a}", ids=miss,
+                                       errored_policy=errored_policy, workers=workers)
+        except BudgetExhausted as e:
+            run_dir.log_event("missing_retry", tag=tag, attempt=a, missing=len(miss), unfunded=str(e)[:200])
+            break
+        pooled = pool_split_results(result, extra)
+        pooled.cost_usd = (result.cost_usd or 0.0) + (extra.cost_usd or 0.0)
+        pooled.tokens = (result.tokens or 0) + (extra.tokens or 0)
+        pooled.seconds = (result.seconds or 0.0) + (extra.seconds or 0.0)
+        result = pooled
+        run_dir.log_event("missing_retry", tag=tag, attempt=a, missing=len(miss),
+                          recovered=len(miss) - len(coverage_mod.missing_ids(result.per_task, miss)))
+    still = coverage_mod.missing_ids(result.per_task, planned)
+    if still and quarantine:
+        new = run_dir.quarantine(still, reason=f"missing on {tag} after {attempts} retries")
+        if new:
+            run_dir.log_event("task_quarantined", tasks=new, tag=tag, split=split, retries=attempts)
+    return result
 
 
 def joint_coverage(current_val: SplitResult, cand_val: SplitResult, planned=None) -> float:
@@ -1208,6 +1387,48 @@ def joint_coverage(current_val: SplitResult, cand_val: SplitResult, planned=None
         return 1.0
     both = {str(t) for t in cand if t in cur and has_valid_trials(cand[t]) and has_valid_trials(cur[t])}
     return len(both & ids) / len(ids)
+
+
+def _apply_tipping(adapter, run_dir: RunDir, workdir: Path, cid: str, current_val: SplitResult,
+                   cand_val: SplitResult, planned, paired_deltas, cfg, *, k_se: float, n_trials: int,
+                   errored_policy, footprint=None) -> tuple:
+    """Coverage policy ``tipping``: returns ``(paired_deltas, cand_val, info)``.
+
+    1. Missing pairs on the evaluable set E: impute each at ``missing_impute`` and re-run the screen.
+       If the screen still passes, proceed on the available cases.
+    2. If it flips (``unresolved_missing``), re-run the candidate's missing cells (<= ``missing_retries``
+       attempts, ``missing x n_trials`` rollouts) and check again.
+    3. Whatever is still missing: candidate-side gaps in excess of the incumbent's are counted as
+       failures (the candidate probably broke them), the rest are dropped as exogenous.
+    The hard floor (``min_joint_coverage``) is applied afterwards by ``gate.decide``."""
+    E = list(planned)
+    deltas = list(paired_deltas) if paired_deltas else []
+
+    def n_missing() -> int:
+        cur, cand = coverage_mod.valid_map(current_val.per_task), coverage_mod.valid_map(cand_val.per_task)
+        return len([t for t in E if t not in cur or t not in cand])
+
+    tp = coverage_mod.tipping_point(deltas, n_missing(), impute=cfg.missing_impute, k_se=k_se)
+    retried = 0
+    if tp["flips"]:
+        before = n_missing()
+        cand_val = retry_missing(adapter, run_dir, cand_val, candidate_dir=workdir, tag=cid,
+                                 n_trials=n_trials, errored_policy=errored_policy)
+        retried = before - n_missing()
+        deltas = _paired_deltas(current_val, cand_val, footprint=footprint) or []
+        tp = coverage_mod.tipping_point(deltas, n_missing(), impute=cfg.missing_impute, k_se=k_se)
+    failures = coverage_mod.differential_failures(E, current_val.per_task, cand_val.per_task)
+    if failures:
+        cur = coverage_mod.valid_map(current_val.per_task)
+        deltas = deltas + [0.0 - cur[t] for t in failures if t in cur]
+    info = {"policy": "tipping", "evaluable": len(E), "missing_pairs": n_missing(),
+            "joint_coverage": round(coverage_mod.joint_coverage_on(E, current_val.per_task,
+                                                                    cand_val.per_task), 6),
+            "tipping": {k: (round(v, 6) if isinstance(v, float) and math.isfinite(v) else v)
+                        for k, v in tp.items()},
+            "retried_recovered": retried, "counted_as_failures": failures}
+    run_dir.log_event("coverage_check", candidate=cid, **info)
+    return deltas or None, cand_val, info
 
 
 def gate_statistics(current_val: SplitResult, cand_val: SplitResult, fp=None, se_floor: float = 0.0,
@@ -1688,8 +1909,57 @@ def _candidate_task_impact(run_dir: RunDir, cid: str, split: str = "val",
     cand_se = _per_task_stderr(run_dir, cid, split)
     par_se = _per_task_stderr(run_dir, parent_id, split)
     delta = sum(cand[t] - par[t] for t in shared) / len(shared)
+    gcfg = gatecfg.GateConfig.for_run(run_dir)
+    if gcfg.ledger_noise_guard:
+        pooled = _pooled_task_rates(run_dir, cid, parent_id, split, cand, par)
+        cand, par, n_min = pooled
+        if n_min < gcfg.ledger_min_trials:
+            flips = sorted(t for t in shared if abs(cand[t] - par[t]) > 1e-9)
+            return {"broke": [], "fixed": [], "unresolved": flips, "delta": delta, "parent": parent_id,
+                    "causal": False, "n_min": n_min, "n_flips": len(flips),
+                    "null_flips": round(null_flip_expectation(
+                        [(cand[t] + par[t]) / 2.0 for t in shared], max(1, n_min)), 2),
+                    "n_shared": len(shared)}
+        shared = [t for t in shared if t in cand and t in par]
     return {**_classify_moves(par, cand, par_se, cand_se, shared),
             "delta": delta, "parent": parent_id}
+
+
+def null_flip_expectation(rates, n: int) -> float:
+    """Expected number of tasks whose two draws differ when BOTH sides are the same capability.
+
+    For a binary outcome with success rate ``p`` and ``n`` trials per side, P(the two per-task
+    means differ) = 1 - sum_k C(n,k)^2 p^(2k) (1-p)^(2(n-k)); at n=1 this is 2p(1-p). Two identical
+    seed draws differed on 14 of 49 retail tasks, so a ledger that lists such flips as broke/fixed
+    reports noise as causation."""
+    total = 0.0
+    for p in rates:
+        p = min(1.0, max(0.0, float(p)))
+        same = sum(math.comb(n, k) ** 2 * p ** (2 * k) * (1 - p) ** (2 * (n - k)) for k in range(n + 1))
+        total += 1.0 - same
+    return total
+
+
+def _pooled_task_rates(run_dir: RunDir, cid: str, parent_id: str, split: str, cand: dict, par: dict):
+    """Per-task rates pooled over EVERY draw of each side's capability hash (the evidence ledger),
+    falling back to the tag's own rollouts. Returns ``(cand_rates, par_rates, min_draws_per_task)``."""
+    def side(tag, fallback):
+        try:
+            h = eval_index.cap_hash(run_dir.candidate_dir(tag))
+            cnt = eval_index.counts(run_dir, h, split)
+        except Exception:  # noqa: BLE001
+            cnt = {}
+        rates = {t: s / n for t, (s, n) in cnt.items() if n}
+        ns = {t: n for t, (s, n) in cnt.items() if n}
+        for t, v in fallback.items():
+            if t not in rates:
+                rates[t], ns[t] = v, 1
+        return rates, ns
+    cr, cn = side(cid, cand)
+    pr, pn = side(parent_id, par)
+    shared = [t for t in cr if t in pr]
+    n_min = min([min(cn[t], pn[t]) for t in shared] or [0])
+    return cr, pr, n_min
 
 
 def _classify_moves(par: dict, cand: dict, par_se: dict, cand_se: dict,
@@ -1930,6 +2200,11 @@ def _build_ledger(workdir: Path, run_dir: RunDir) -> None:
         broke = "{" + ", ".join(str(t) for t in (imp.get("broke") or [])[:20]) + "}"
         fixed = "{" + ", ".join(str(t) for t in (imp.get("fixed") or [])[:20]) + "}"
         unres = "{" + ", ".join(str(t) for t in (imp.get("unresolved") or [])[:20]) + "}"
+        if imp.get("causal") is False:
+            # Too few draws per task to call a move causal: counts against the null expectation only.
+            broke = fixed = "n/a"
+            unres = (f"{imp['n_flips']} tasks differ vs ~{imp['null_flips']:.0f} expected from "
+                     f"re-measurement noise alone (n={imp['n_min']} trials/task; no causal claim)")
         vstr = f"{val:.3f}" if isinstance(val, (int, float)) else ""
         table.append(f"| {i} | {cid} | {par} | {outcome} | {vstr} | {d} | {broke} | {fixed} "
                      f"| {unres} |")
@@ -2026,6 +2301,10 @@ def _reconcile_journal(workdir: Path, run_dir: RunDir, cid: str, *,
     broke = ", ".join(str(t) for t in (impact.get("broke") or [])[:30]) or "—"
     fixed = ", ".join(str(t) for t in (impact.get("fixed") or [])[:30]) or "—"
     unres = ", ".join(str(t) for t in (impact.get("unresolved") or [])[:30]) or "—"
+    if impact.get("causal") is False:
+        broke = fixed = "n/a (too few trials per task for a causal claim)"
+        unres = (f"{impact['n_flips']} tasks differ vs ~{impact['null_flips']:.0f} expected from "
+                 f"re-measurement noise alone (n={impact['n_min']} trials/task)")
     if indecisive:
         verdict = "UNRESOLVED (not judged; champion unchanged)"
         guidance = (" — the measurement could not separate this edit from re-measurement noise, "
@@ -2035,6 +2314,11 @@ def _reconcile_journal(workdir: Path, run_dir: RunDir, cid: str, *,
                     "redesign it on this round's numbers, and do not re-derive it as a new idea.")
     elif accepted:
         verdict, guidance = "ACCEPTED (new champion)", ""
+    elif impact.get("causal") is False:
+        verdict = "REJECTED (champion unchanged)"
+        guidance = (" — per-task movement at this many trials per task is within re-measurement noise, "
+                    "so neither a regression nor a fix is claimed for any single task. Judge the "
+                    "aggregate; do not redesign an edit because a task moved.")
     elif impact.get("broke"):
         verdict = "REJECTED (champion unchanged)"
         guidance = (" — its WHOLE batch was reverted; re-introduce only the edits that did NOT "
@@ -3120,6 +3404,12 @@ def run_step(
     sw = pop_paper_switches(gate_kwargs)
     if sw["footprint"] is not None:
         footprint_gate = sw["footprint"]
+    gcfg = gatecfg.GateConfig.for_run(run_dir)
+    cov_info = None
+    if gcfg.coverage_policy == "tipping":
+        # The 0.95 veto is replaced by a floor on the evaluable set plus the tipping-point check.
+        sw["coverage"] = "joint"
+        gate_kwargs["min_coverage"] = gcfg.min_joint_coverage
     promo = pop_promotion(gate_kwargs)
     if promo is not None:
         # Rule P screens on the full UNMASKED vector with the paired k_se gate and nothing else.
@@ -3217,6 +3507,18 @@ def run_step(
         cand_val = evaluate_candidate(adapter, workdir, run_dir=run_dir, split="val",
                                       n_trials=n_trials, tag=cid,
                                       errored_policy=sw["errored_trial_policy"])
+    except BudgetExhausted as e:
+        # The reservation did not fit: nothing was dispatched. The candidate is unmeasured (pending),
+        # not rejected, and the loop must stop rather than retry what cannot be paid for.
+        run_dir.log_event("budget_reserved", candidate=cid, error=str(e)[:500])
+        run_dir.mark_unfunded(str(e))
+        stopped = _eval_error_step(run_dir, cid=cid, parent_id=parent_id, workdir=workdir,
+                                   error=str(e), current_val=current_val,
+                                   optimizer_seconds=optimizer_seconds,
+                                   opt_cost_usd=opt_cost_usd, opt_tokens=opt_tokens,
+                                   optimizer_error=optimizer_error, memory_skill=ctx.memory_skill)
+        stopped["budget_unfunded"] = True
+        return stopped
     except Exception as e:  # noqa: BLE001
         # Mirrors the optimizer-call protection above (#286): an adapter can raise
         # from live()/rollout setup for a reason specific to ONE candidate (a bad
@@ -3285,6 +3587,12 @@ def run_step(
     pareto_metrics = (_pareto_metrics_kwargs(current_val, cand_val)
                       if gate_kwargs.get("mode") == "pareto" else {})
     planned = planned_val_ids(run_dir)
+    if gcfg.coverage_policy == "tipping":
+        paired_deltas, cand_val, cov_info = _apply_tipping(
+            adapter, run_dir, workdir, cid, current_val, cand_val, planned, paired_deltas, gcfg,
+            k_se=float(gate_kwargs.get("k_se", 1.0)), n_trials=n_trials,
+            errored_policy=sw["errored_trial_policy"], footprint=fp)
+        mv = movement(current_val.per_task, cand_val.per_task)
     jcov = joint_coverage(current_val, cand_val, planned)
     decision = gate_mod.decide(
         current_val.reward, cand_val.reward, split="val",
@@ -3331,7 +3639,15 @@ def run_step(
         held: dict = {}
         fresh_from = 1000 + run_dir.spent.iterations * promo.n_conf
 
+        class _Unconfirmed(Exception):
+            """The confirmation (two fresh arms) does not fit the remaining budget."""
+
         def _fresh_deltas():
+            if resolve_budget_reserve(None, run_dir):
+                need = 2 * len(paired_deltas or []) * promo.n_conf
+                if not run_dir.can_afford(need):
+                    raise _Unconfirmed(f"confirmation needs {need} rollouts, "
+                                       f"{run_dir.remaining_metric_calls()} remain")
             # New seeds on both sides (explicit trial_offset: independent of the eval ledger), under
             # fresh tags so the selection-era rollouts are never pooled into the confirmation.
             kw = dict(run_dir=run_dir, split="val", n_trials=promo.n_conf, trial_offset=fresh_from,
@@ -3341,8 +3657,16 @@ def run_step(
             return _paired_deltas(held["par"], held["cand"], footprint=None) or []
 
         if accepted:
-            pres = promotion_mod.decide(paired_deltas or [], _fresh_deltas, promo,
-                                        n_planned=len(paired_deltas or []))
+            try:
+                pres = promotion_mod.decide(paired_deltas or [], _fresh_deltas, promo,
+                                            n_planned=len(paired_deltas or []))
+            except (_Unconfirmed, BudgetExhausted) as e:
+                # Never a reject and never an accept: the candidate passed its screen and the money ran
+                # out. Pending (indecisive), so it is not filed as an edit that "did not work".
+                pres = promotion_mod.PromotionResult(
+                    False, "unconfirmed", promotion_mod.screen(paired_deltas or [], promo.k_se), None,
+                    f"P confirm unfunded: {e}", dataclasses.asdict(promo))
+                decision.indecisive = True
         else:
             sc = promotion_mod.screen(paired_deltas or [], promo.k_se)
             pres = promotion_mod.PromotionResult(
@@ -3355,7 +3679,8 @@ def run_step(
                                 sum(int(h.tokens or 0) for h in held.values()))
         if accepted and not pres.promote:
             accepted = False
-            decision.reason += "; REJECTED by promotion rule P: " + pres.reason
+            decision.reason += ("; UNCONFIRMED (pending, not a reject): " if pres.stage == "unconfirmed"
+                                else "; REJECTED by promotion rule P: ") + pres.reason
         elif pres.promote:
             baseline_val = held["cand"]
         run_dir.log_event("promotion", candidate=cid, **{k: v for k, v in promo_rec.items() if k != "rule"})
@@ -3392,6 +3717,8 @@ def run_step(
                                        planned=planned))
     if promo_rec is not None:
         _step_extra["promotion"] = promo_rec
+    if cov_info is not None:
+        _step_extra["coverage_check"] = cov_info
     if mv["n_shared"]:
         _step_extra.update(broke=mv["broke"], fixed=mv["fixed"],
                            n_broke=len(mv["broke"]), n_fixed=len(mv["fixed"]))
@@ -3448,6 +3775,7 @@ def run_step(
             "baseline_val": baseline_val.to_dict() if baseline_val is not None else None}
            if promo_rec is not None else {}),
         "parent_val": current_val.to_dict(),
+        **({"coverage_check": cov_info} if cov_info is not None else {}),
         "regressions": regressions,
         # The composition of the change, always — distinct from ``regressions``, which is
         # populated only when the ``no_regression`` dual gate is on and uses a wider "any
@@ -4634,9 +4962,20 @@ def hill_climb_loop(
                     for pt in current_val.per_task}
         order.sort(key=lambda t: score_by.get(t, 0.0))  # hardest (lowest) first
 
+    def _heal(cur: SplitResult) -> SplitResult:
+        """Coverage policy ``tipping``: retry the incumbent's missing cells, quarantine what stays missing."""
+        if gatecfg.GateConfig.for_run(run_dir).coverage_policy != "tipping":
+            return cur
+        nt = max([int(pt.get("n") or 1) for pt in (cur.per_task or [])] or [1])
+        return retry_missing(adapter, run_dir, cur, candidate_dir=run_dir.candidate_dir(run_dir.best_id),
+                             tag=str(run_dir.best_id), n_trials=nt, quarantine=True,
+                             errored_policy=(gate_kwargs or {}).get("errored_trial_policy"))
+
+    current_val = _heal(current_val)
     steps = []
     baseline_val = current_val.reward   # the bar every candidate must clear, at loop entry
     convergence_stop = ""
+    budget_stop = ""
     for i in range(max_iterations):
         exhausted, why = run_dir.budget_exhausted()
         if exhausted:
@@ -4673,9 +5012,12 @@ def hill_climb_loop(
             protected_patterns=protected_patterns,
         )
         steps.append(step)
+        if step.get("budget_unfunded"):
+            budget_stop = "budget_reserved"
+            break
         if step["accepted"]:
             # Under rule P the next baseline is the incumbent's FRESH confirmation measurement.
-            current_val = SplitResult.from_dict(step.get("baseline_val") or step["candidate_val"])
+            current_val = _heal(SplitResult.from_dict(step.get("baseline_val") or step["candidate_val"]))
 
     _, why = run_dir.budget_exhausted()
     return {
@@ -4684,7 +5026,7 @@ def hill_climb_loop(
         "best_val": current_val.reward,
         "iterations": len(steps),
         "accepts": sum(1 for s in steps if s["accepted"]),
-        "stop_reason": why or ("converged" if convergence_stop else "max_iterations"),
+        "stop_reason": why or budget_stop or ("converged" if convergence_stop else "max_iterations"),
         "steps": steps,
     }
 
