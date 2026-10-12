@@ -272,6 +272,9 @@ def baseline_pooled(adapter, seed_dir: Path, *, run_dir: RunDir, n_trials: int =
     run_dir.set_best("seed")
     result = evaluate_candidate(adapter, run_dir.candidate_dir("seed"), run_dir=run_dir,
                                 split="feedback", n_trials=n_trials, ks=ks, tag="seed", workers=workers)
+    (run_dir.root / "baseline.json").write_text(
+        json.dumps({"val": result.to_dict(), "best_id": "seed", "split": "feedback"}, indent=2),
+        encoding="utf-8")
     run_dir.log_event("baseline", val=result.reward, stderr=result.stderr, n_scored=result.n_scored,
                       n_tasks=result.n_tasks, split="feedback")
     run_dir.update_spent(best_val=result.reward)
@@ -1264,6 +1267,12 @@ PROMOTION_KEYS = ("promotion_rule", "promotion_k_se", "promotion_n_conf", "promo
 def resume_val(run_dir, tag, promotion_on: bool = False):
     """The incumbent's measurement to resume from. Under rule P the baseline is the incumbent's FRESH
     confirmation (tag ``<tag>__conf``) when one exists, not the selection-era trials that chose it."""
+    try:
+        pooled = run_dir.read_splits().pooled
+    except (OSError, ValueError):
+        pooled = False
+    if pooled:      # split_mode: pooled -> the incumbent's measurement lives on the feedback stratum
+        return split_result_from_rollouts(run_dir, tag, "feedback")
     if promotion_on:
         sr = split_result_from_rollouts(run_dir, f"{tag}__conf", "val")
         if sr.per_task:
@@ -1276,6 +1285,90 @@ def pop_promotion(gate_kwargs: dict):
     from . import promotion as promotion_mod
     raw = {k: gate_kwargs.pop(k) for k in PROMOTION_KEYS if k in gate_kwargs}
     return promotion_mod.PromotionParams.from_spec(raw)
+
+
+def pop_p2(gate_kwargs: dict, run_dir=None):
+    """Remove the ``p2_*`` keys (and rule-P keys when the rule is P2) from ``gate_kwargs`` and return
+    ``P2Params`` or None. Keys come from ``gate_kwargs`` first, then the run's spec."""
+    from . import promotion as promotion_mod
+    from .specfile import spec_for_run
+    spec = (spec_for_run(run_dir) or {}) if run_dir is not None else {}
+    raw = {k: v for k, v in spec.items() if k.startswith("p2_") or k == "promotion_rule"}
+    for k in [k for k in gate_kwargs if k.startswith("p2_")]:
+        raw[k] = gate_kwargs.pop(k)
+    if gate_kwargs.get("promotion_rule") is not None:
+        raw["promotion_rule"] = gate_kwargs["promotion_rule"]
+    return promotion_mod.P2Params.from_spec(raw)
+
+
+def _p2_evaluate(adapter, run_dir: RunDir, workdir: Path, cid: str, parent_id, p2, *,
+                 errored_policy=None) -> tuple:
+    """Rule P2 for ONE pending candidate (the serial hill-climb step, K = 1).
+
+    Rung 1 (``rung_sizes[0]`` rollouts on a random subset of F, kill-only) gives the proposer feedback on
+    F and drops a candidate that is not better than the incumbent's pooled F draws; a survivor gets the
+    group-sequential test on the hidden stratum C against a concurrent control. Returns
+    ``(cand_val, outcome)`` where ``cand_val`` is the candidate's F measurement and ``outcome`` carries
+    the decision; C only ever contributes the verdict bit and aggregates."""
+    from . import evaluator as evaluator_mod
+    ev = evaluator_mod.P2Evaluator(adapter, run_dir, p2, errored_policy=errored_policy)
+    inc_cid = parent_id or "seed"
+    rnd = ev.open_round({cid: workdir}, (inc_cid, run_dir.candidate_dir(inc_cid)))
+    r1 = rnd.run_rung(1)[cid]
+    if r1.status == "unfunded":
+        raise BudgetExhausted("rung 1 does not fit the remaining max_metric_calls")
+    cand_val = split_result_from_rollouts(run_dir, rnd._tags(cid, "rung"), "feedback",
+                                          errored_policy=errored_policy)
+    rec = {"rule": "P2", "round": rnd.round_id, "rung1": asdict_safe(r1)}
+    if r1.status == "kill":
+        rec["stage"] = "rung_kill"
+        return cand_val, {"accept": False, "indecisive": False, "delta": r1.mean, "record": rec,
+                          "reason": f"P2 rung 1: paired mean {r1.mean:+.4f}, z {r1.z:.2f} on {r1.n} F "
+                                    f"rollouts; {r1.reason}"}
+    v = rnd.sequential(cid)
+    rec.update(stage={"accept": "promoted", "reject": "confirm_reject"}.get(v.status, "unconfirmed"),
+               confirm=asdict_safe(v), bit=v.bit())
+    if v.status == "unconfirmed":
+        run_dir.mark_unfunded(v.reason)
+    # The reason string reaches the proposer through the rejected-edit memory: it gets the bit for C and
+    # nothing else (the numbers stay in the promotion record).
+    reason = {"accept": "P2 promoted: accepted by the confirmation on the hidden stratum",
+              "reject": "P2 confirm: rejected by the confirmation on the hidden stratum",
+              "unconfirmed": "P2 UNCONFIRMED (pending): the budget could not fund the confirmation"}[v.status]
+    return cand_val, {"accept": v.status == "accept", "indecisive": v.status == "unconfirmed",
+                      "delta": (v.mean if v.mean is not None else r1.mean), "record": rec, "reason": reason}
+
+
+def _internal_estimate(adapter, run_dir: RunDir, gate_kwargs: dict | None):
+    """Rule P2 + pooled splits: champion vs seed on C, fresh seeds (the unbiased internal estimate).
+
+    Runs once, when the search is over and the champion is not the seed. Selection touched C only
+    through accept/reject bits, so this carries no winner's curse. Skipped (and recorded) when the
+    remaining budget cannot fund it. ``None`` when P2 is off."""
+    gk = dict(gate_kwargs or {})
+    p2 = pop_p2(gk, run_dir)
+    best = run_dir.best_id
+    if p2 is None or not best or best == "seed":
+        return None
+    from . import evaluator as evaluator_mod
+    path = run_dir.root / "internal_estimate.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        ev = evaluator_mod.P2Evaluator(adapter, run_dir, p2)
+        out = ev.final_estimate(run_dir.candidate_dir(best), run_dir.candidate_dir("seed"))
+    except BudgetExhausted as e:
+        out = {"skipped": "budget", "reason": str(e)[:200]}
+        run_dir.log_event("p2_final_estimate", skipped="budget")
+    path.write_text(json.dumps({k: (None if isinstance(v, float) and not math.isfinite(v) else v)
+                                for k, v in out.items()}, indent=2), encoding="utf-8")
+    return out
+
+
+def asdict_safe(obj) -> dict:
+    import dataclasses
+    return {k: (None if isinstance(v, float) and not math.isfinite(v) else v)
+            for k, v in dataclasses.asdict(obj).items()}
 
 
 def add_paper_switch_arguments(p) -> None:
@@ -1291,7 +1384,7 @@ def add_paper_switch_arguments(p) -> None:
     p.add_argument("--errored-trial-policy", choices=ERRORED_POLICIES, default=None,
                    help="drop (default): errored trials are missing data; fail: errors the adapter "
                         "attributes to the candidate (Rollout.metadata.error_kind=candidate) score 0.0")
-    p.add_argument("--promotion-rule", choices=("P",), default=None,
+    p.add_argument("--promotion-rule", choices=("P", "P2"), default=None,
                    help="shared promotion rule P (cap_evolve.promotion): unmasked paired screen, then "
                         "fresh-trial confirmation. Unset = the algorithm's own gate.")
     p.add_argument("--promotion-k-se", type=float, default=None)
@@ -3410,7 +3503,11 @@ def run_step(
         # The 0.95 veto is replaced by a floor on the evaluable set plus the tipping-point check.
         sw["coverage"] = "joint"
         gate_kwargs["min_coverage"] = gcfg.min_joint_coverage
+    p2 = pop_p2(gate_kwargs, run_dir)
     promo = pop_promotion(gate_kwargs)
+    if p2 is not None:
+        footprint_gate = False
+        eval_split = "feedback"      # the proposer sees F only; C is the evaluator's
     if promo is not None:
         # Rule P screens on the full UNMASKED vector with the paired k_se gate and nothing else.
         footprint_gate = False
@@ -3503,10 +3600,15 @@ def run_step(
                                 event="capability_invalid", detail_key="validation",
                                 rejected=rejected, memory_skill=ctx.memory_skill)
 
+    p2_out = None
     try:
-        cand_val = evaluate_candidate(adapter, workdir, run_dir=run_dir, split="val",
-                                      n_trials=n_trials, tag=cid,
-                                      errored_policy=sw["errored_trial_policy"])
+        if p2 is not None:
+            cand_val, p2_out = _p2_evaluate(adapter, run_dir, workdir, cid, parent_id, p2,
+                                            errored_policy=sw["errored_trial_policy"])
+        else:
+            cand_val = evaluate_candidate(adapter, workdir, run_dir=run_dir, split="val",
+                                          n_trials=n_trials, tag=cid,
+                                          errored_policy=sw["errored_trial_policy"])
     except BudgetExhausted as e:
         # The reservation did not fit: nothing was dispatched. The candidate is unmeasured (pending),
         # not rejected, and the loop must stop rather than retry what cannot be paid for.
@@ -3555,134 +3657,145 @@ def run_step(
     # cannot localize the edit, and ``_paired_deltas(footprint=None)`` is byte-identical to
     # the behaviour before this existed — so a capability whose surface cannot be detected
     # is measured exactly as it always was rather than restricted on a guess.
-    fp = None
-    if footprint_gate:
-        fp = footprint_mod.footprint(
-            run_dir, parent_dir=run_dir.candidate_dir(parent_id or "seed"),
-            cand_dir=workdir, tags=(parent_id or "seed", cid), split="val",
-            all_task_ids=[pt.get("task_id") for pt in (cand_val.per_task or [])])
-        if fp is not None:
-            run_dir.log_event("gate_footprint", candidate=cid, parent=parent_id,
-                              n_in_footprint=len(fp), n_tasks=len(cand_val.per_task or []),
-                              tasks=sorted(map(str, fp))[:60])
-    paired_deltas = _paired_deltas(current_val, cand_val, footprint=fp)
-    # Only when restricted: the zeros make the cross-task spread an unreliable SE estimate on
-    # a small footprint, so it is floored by what per-task trial noise implies. Unrestricted
-    # vectors keep the SE they always had, so no existing verdict moves.
-    if fp is not None and paired_deltas:
-        gate_kwargs.setdefault("paired_se_floor", paired_se_floor(
-            run_dir, cid, parent_id or "seed", fp, len(paired_deltas)))
-    if "mode" not in gate_kwargs and paired_deltas is not None:
-        gate_kwargs["mode"] = "paired"
-    # The COMPOSITION behind the mean, over the FULL val split — deliberately not restricted
-    # to ``fp``. The footprint exists to keep tasks the edit cannot reach out of the SE; a task
-    # that measurably went 1.0 → 0.0 did so whether or not the footprint expected it to, and
-    # under-including here would hide exactly the trade this records. It never touches the
-    # verdict unless the caller set ``gate_max_broke`` in ``gate_kwargs``.
-    mv = movement(current_val.per_task, cand_val.per_task)
-    # Multi-objective (#684 item 8): when the caller pinned ``mode="pareto"`` (via
-    # ``gate_kwargs``, itself from ``capevolve.yaml``'s ``gate_mode``/``objectives``),
-    # supply the non-reward metric gate.py's pareto mode needs. A no-op dict ({}) for
-    # every other mode, so an existing single-metric config's gate call is unchanged.
-    pareto_metrics = (_pareto_metrics_kwargs(current_val, cand_val)
-                      if gate_kwargs.get("mode") == "pareto" else {})
-    planned = planned_val_ids(run_dir)
-    if gcfg.coverage_policy == "tipping":
-        paired_deltas, cand_val, cov_info = _apply_tipping(
-            adapter, run_dir, workdir, cid, current_val, cand_val, planned, paired_deltas, gcfg,
-            k_se=float(gate_kwargs.get("k_se", 1.0)), n_trials=n_trials,
-            errored_policy=sw["errored_trial_policy"], footprint=fp)
+    if p2_out is None:
+        fp = None
+        if footprint_gate:
+            fp = footprint_mod.footprint(
+                run_dir, parent_dir=run_dir.candidate_dir(parent_id or "seed"),
+                cand_dir=workdir, tags=(parent_id or "seed", cid), split="val",
+                all_task_ids=[pt.get("task_id") for pt in (cand_val.per_task or [])])
+            if fp is not None:
+                run_dir.log_event("gate_footprint", candidate=cid, parent=parent_id,
+                                  n_in_footprint=len(fp), n_tasks=len(cand_val.per_task or []),
+                                  tasks=sorted(map(str, fp))[:60])
+        paired_deltas = _paired_deltas(current_val, cand_val, footprint=fp)
+        # Only when restricted: the zeros make the cross-task spread an unreliable SE estimate on
+        # a small footprint, so it is floored by what per-task trial noise implies. Unrestricted
+        # vectors keep the SE they always had, so no existing verdict moves.
+        if fp is not None and paired_deltas:
+            gate_kwargs.setdefault("paired_se_floor", paired_se_floor(
+                run_dir, cid, parent_id or "seed", fp, len(paired_deltas)))
+        if "mode" not in gate_kwargs and paired_deltas is not None:
+            gate_kwargs["mode"] = "paired"
+        # The COMPOSITION behind the mean, over the FULL val split — deliberately not restricted
+        # to ``fp``. The footprint exists to keep tasks the edit cannot reach out of the SE; a task
+        # that measurably went 1.0 → 0.0 did so whether or not the footprint expected it to, and
+        # under-including here would hide exactly the trade this records. It never touches the
+        # verdict unless the caller set ``gate_max_broke`` in ``gate_kwargs``.
         mv = movement(current_val.per_task, cand_val.per_task)
-    jcov = joint_coverage(current_val, cand_val, planned)
-    decision = gate_mod.decide(
-        current_val.reward, cand_val.reward, split="val",
-        candidate_stderr=cand_val.stderr, current_stderr=current_val.stderr,
-        paired_deltas=paired_deltas,
-        coverage=jcov if sw["coverage"] == "joint" else cand_val.coverage, run_dir=run_dir,
-        broke=mv["broke"], fixed=mv["fixed"],
-        **pareto_metrics,
-        **gate_kwargs,
-    )
+        # Multi-objective (#684 item 8): when the caller pinned ``mode="pareto"`` (via
+        # ``gate_kwargs``, itself from ``capevolve.yaml``'s ``gate_mode``/``objectives``),
+        # supply the non-reward metric gate.py's pareto mode needs. A no-op dict ({}) for
+        # every other mode, so an existing single-metric config's gate call is unchanged.
+        pareto_metrics = (_pareto_metrics_kwargs(current_val, cand_val)
+                          if gate_kwargs.get("mode") == "pareto" else {})
+        planned = planned_val_ids(run_dir)
+        if gcfg.coverage_policy == "tipping":
+            paired_deltas, cand_val, cov_info = _apply_tipping(
+                adapter, run_dir, workdir, cid, current_val, cand_val, planned, paired_deltas, gcfg,
+                k_se=float(gate_kwargs.get("k_se", 1.0)), n_trials=n_trials,
+                errored_policy=sw["errored_trial_policy"], footprint=fp)
+            mv = movement(current_val.per_task, cand_val.per_task)
+        jcov = joint_coverage(current_val, cand_val, planned)
+        decision = gate_mod.decide(
+            current_val.reward, cand_val.reward, split="val",
+            candidate_stderr=cand_val.stderr, current_stderr=current_val.stderr,
+            paired_deltas=paired_deltas,
+            coverage=jcov if sw["coverage"] == "joint" else cand_val.coverage, run_dir=run_dir,
+            broke=mv["broke"], fixed=mv["fixed"],
+            **pareto_metrics,
+            **gate_kwargs,
+        )
 
-    accepted = decision.accept
-    regressions = []
-    if accepted and no_regression:
-        # A regression is ANY task whose reward strictly dropped (works for graded
-        # rewards too, not just binary pass/fail). Restricted to tasks BOTH sides
-        # actually measured — an unscored task is missing data, and treating its
-        # 0.0 as "broke a task the parent passed" would let a single image-pull
-        # failure veto a genuinely better candidate.
-        # The drop must clear 2*SE of its own per-task measurement (``move_is_resolved`` — the
-        # ONE bar every broke/fixed claim in this framework uses). This veto has a STRONGER
-        # consequence than the reported lists: it turns a gate-passing candidate into a
-        # rejection, so a single flipped rollout out of ten used to be able to veto a
-        # genuinely better edit outright.
-        parent_reward = {pt["task_id"]: pt for pt in current_val.per_task
-                         if has_valid_trials(pt)}
-        cand_reward = {pt["task_id"]: pt for pt in cand_val.per_task
-                       if has_valid_trials(pt)}
-        regressions = sorted(
-            t for t, pt in parent_reward.items()
-            if t in cand_reward
-            and (cand_reward[t].get("reward", 0.0) or 0.0) < (pt.get("reward", 0.0) or 0.0)
-            and move_is_resolved(pt.get("reward", 0.0) or 0.0,
-                                 cand_reward[t].get("reward", 0.0) or 0.0,
-                                 pt.get("stderr") or 0.0,
-                                 cand_reward[t].get("stderr") or 0.0))
-        if regressions:
-            accepted = False
-            decision.reason += f"; REJECTED by no-regression gate (broke {regressions})"
-    promo_rec, baseline_val, promo_extra_cost = None, None, (0.0, 0)
-    if promo is not None:
-        import dataclasses
-        from . import promotion as promotion_mod
-        held: dict = {}
-        fresh_from = 1000 + run_dir.spent.iterations * promo.n_conf
+        accepted = decision.accept
+        regressions = []
+        if accepted and no_regression:
+            # A regression is ANY task whose reward strictly dropped (works for graded
+            # rewards too, not just binary pass/fail). Restricted to tasks BOTH sides
+            # actually measured — an unscored task is missing data, and treating its
+            # 0.0 as "broke a task the parent passed" would let a single image-pull
+            # failure veto a genuinely better candidate.
+            # The drop must clear 2*SE of its own per-task measurement (``move_is_resolved`` — the
+            # ONE bar every broke/fixed claim in this framework uses). This veto has a STRONGER
+            # consequence than the reported lists: it turns a gate-passing candidate into a
+            # rejection, so a single flipped rollout out of ten used to be able to veto a
+            # genuinely better edit outright.
+            parent_reward = {pt["task_id"]: pt for pt in current_val.per_task
+                             if has_valid_trials(pt)}
+            cand_reward = {pt["task_id"]: pt for pt in cand_val.per_task
+                           if has_valid_trials(pt)}
+            regressions = sorted(
+                t for t, pt in parent_reward.items()
+                if t in cand_reward
+                and (cand_reward[t].get("reward", 0.0) or 0.0) < (pt.get("reward", 0.0) or 0.0)
+                and move_is_resolved(pt.get("reward", 0.0) or 0.0,
+                                     cand_reward[t].get("reward", 0.0) or 0.0,
+                                     pt.get("stderr") or 0.0,
+                                     cand_reward[t].get("stderr") or 0.0))
+            if regressions:
+                accepted = False
+                decision.reason += f"; REJECTED by no-regression gate (broke {regressions})"
+        promo_rec, baseline_val, promo_extra_cost = None, None, (0.0, 0)
+        if promo is not None:
+            import dataclasses
+            from . import promotion as promotion_mod
+            held: dict = {}
+            fresh_from = 1000 + run_dir.spent.iterations * promo.n_conf
 
-        class _Unconfirmed(Exception):
-            """The confirmation (two fresh arms) does not fit the remaining budget."""
+            class _Unconfirmed(Exception):
+                """The confirmation (two fresh arms) does not fit the remaining budget."""
 
-        def _fresh_deltas():
-            if resolve_budget_reserve(None, run_dir):
-                need = 2 * len(paired_deltas or []) * promo.n_conf
-                if not run_dir.can_afford(need):
-                    raise _Unconfirmed(f"confirmation needs {need} rollouts, "
-                                       f"{run_dir.remaining_metric_calls()} remain")
-            # New seeds on both sides (explicit trial_offset: independent of the eval ledger), under
-            # fresh tags so the selection-era rollouts are never pooled into the confirmation.
-            kw = dict(run_dir=run_dir, split="val", n_trials=promo.n_conf, trial_offset=fresh_from,
-                      fixed_seeds=True, errored_policy=sw["errored_trial_policy"])
-            held["cand"] = evaluate_candidate(adapter, workdir, tag=f"{cid}__conf", **kw)
-            held["par"] = evaluate_candidate(adapter, parent_dir, tag=f"{cid}__confbase", **kw)
-            return _paired_deltas(held["par"], held["cand"], footprint=None) or []
+            def _fresh_deltas():
+                if resolve_budget_reserve(None, run_dir):
+                    need = 2 * len(paired_deltas or []) * promo.n_conf
+                    if not run_dir.can_afford(need):
+                        raise _Unconfirmed(f"confirmation needs {need} rollouts, "
+                                           f"{run_dir.remaining_metric_calls()} remain")
+                # New seeds on both sides (explicit trial_offset: independent of the eval ledger), under
+                # fresh tags so the selection-era rollouts are never pooled into the confirmation.
+                kw = dict(run_dir=run_dir, split="val", n_trials=promo.n_conf, trial_offset=fresh_from,
+                          fixed_seeds=True, errored_policy=sw["errored_trial_policy"])
+                held["cand"] = evaluate_candidate(adapter, workdir, tag=f"{cid}__conf", **kw)
+                held["par"] = evaluate_candidate(adapter, parent_dir, tag=f"{cid}__confbase", **kw)
+                return _paired_deltas(held["par"], held["cand"], footprint=None) or []
 
-        if accepted:
-            try:
-                pres = promotion_mod.decide(paired_deltas or [], _fresh_deltas, promo,
-                                            n_planned=len(paired_deltas or []))
-            except (_Unconfirmed, BudgetExhausted) as e:
-                # Never a reject and never an accept: the candidate passed its screen and the money ran
-                # out. Pending (indecisive), so it is not filed as an edit that "did not work".
+            if accepted:
+                try:
+                    pres = promotion_mod.decide(paired_deltas or [], _fresh_deltas, promo,
+                                                n_planned=len(paired_deltas or []))
+                except (_Unconfirmed, BudgetExhausted) as e:
+                    # Never a reject and never an accept: the candidate passed its screen and the money ran
+                    # out. Pending (indecisive), so it is not filed as an edit that "did not work".
+                    pres = promotion_mod.PromotionResult(
+                        False, "unconfirmed", promotion_mod.screen(paired_deltas or [], promo.k_se), None,
+                        f"P confirm unfunded: {e}", dataclasses.asdict(promo))
+                    decision.indecisive = True
+            else:
+                sc = promotion_mod.screen(paired_deltas or [], promo.k_se)
                 pres = promotion_mod.PromotionResult(
-                    False, "unconfirmed", promotion_mod.screen(paired_deltas or [], promo.k_se), None,
-                    f"P confirm unfunded: {e}", dataclasses.asdict(promo))
-                decision.indecisive = True
-        else:
-            sc = promotion_mod.screen(paired_deltas or [], promo.k_se)
-            pres = promotion_mod.PromotionResult(
-                False, "gate_veto" if sc["pass"] else "screen_reject", sc, None,
-                "P: " + decision.reason, dataclasses.asdict(promo))
-        promo_rec = pres.to_dict()
-        if "cand" in held:
-            promo_rec["fresh_from_trial"] = fresh_from
-            promo_extra_cost = (sum(float(h.cost_usd or 0.0) for h in held.values()),
-                                sum(int(h.tokens or 0) for h in held.values()))
-        if accepted and not pres.promote:
-            accepted = False
-            decision.reason += ("; UNCONFIRMED (pending, not a reject): " if pres.stage == "unconfirmed"
-                                else "; REJECTED by promotion rule P: ") + pres.reason
-        elif pres.promote:
-            baseline_val = held["cand"]
+                    False, "gate_veto" if sc["pass"] else "screen_reject", sc, None,
+                    "P: " + decision.reason, dataclasses.asdict(promo))
+            promo_rec = pres.to_dict()
+            if "cand" in held:
+                promo_rec["fresh_from_trial"] = fresh_from
+                promo_extra_cost = (sum(float(h.cost_usd or 0.0) for h in held.values()),
+                                    sum(int(h.tokens or 0) for h in held.values()))
+            if accepted and not pres.promote:
+                accepted = False
+                decision.reason += ("; UNCONFIRMED (pending, not a reject): " if pres.stage == "unconfirmed"
+                                    else "; REJECTED by promotion rule P: ") + pres.reason
+            elif pres.promote:
+                baseline_val = held["cand"]
+            run_dir.log_event("promotion", candidate=cid, **{k: v for k, v in promo_rec.items() if k != "rule"})
+    else:
+        # Rule P2: the verdict came from the evaluator (rung 1 on F, then the group-sequential test on
+        # C), not from the legacy paired gate on val.
+        fp, paired_deltas, planned = None, None, run_dir.read_splits().ids("feedback")
+        mv = movement(current_val.per_task, cand_val.per_task)
+        decision = gate_mod.GateDecision(accept=p2_out["accept"], reason=p2_out["reason"],
+                                         delta=p2_out["delta"], indecisive=p2_out["indecisive"])
+        accepted, regressions = p2_out["accept"], []
+        promo_rec, baseline_val, promo_extra_cost = p2_out["record"], None, (0.0, 0)
         run_dir.log_event("promotion", candidate=cid, **{k: v for k, v in promo_rec.items() if k != "rule"})
     # Snapshot EVERY candidate (accepted and rejected) so the dashboard can diff any
     # iteration's output against its parent. Exclude the optimizer's injected scratch
@@ -5020,12 +5133,14 @@ def hill_climb_loop(
             current_val = _heal(SplitResult.from_dict(step.get("baseline_val") or step["candidate_val"]))
 
     _, why = run_dir.budget_exhausted()
+    internal = _internal_estimate(adapter, run_dir, gate_kwargs)
     return {
         "algorithm": algorithm,
         "best_id": run_dir.best_id,
         "best_val": current_val.reward,
         "iterations": len(steps),
         "accepts": sum(1 for s in steps if s["accepted"]),
+        **({"internal_estimate": internal} if internal is not None else {}),
         "stop_reason": why or budget_stop or ("converged" if convergence_stop else "max_iterations"),
         "steps": steps,
     }

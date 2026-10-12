@@ -482,10 +482,11 @@ class RunDir:
 
     def budget_exhausted(self) -> tuple[bool, str]:
         b, s = self.budget, self.spent
-        s = Spent.from_dict({**s.to_dict(), "metric_calls": s.metric_calls + self.reserved_metric_calls()})
-        unfunded = self._read_state().get("unfunded")
-        if unfunded:
-            return True, f"budget_reserved: {unfunded}"
+        if hasattr(self, "_state_lock"):        # (duck-typed doubles in tests have no reservations)
+            s = Spent.from_dict({**s.to_dict(), "metric_calls": s.metric_calls + self.reserved_metric_calls()})
+            unfunded = self._read_state().get("unfunded")
+            if unfunded:
+                return True, f"budget_reserved: {unfunded}"
         if b.stop_at_reward and s.best_val >= b.stop_at_reward - 1e-9:
             return True, f"reward ceiling reached (best val {s.best_val:.4f} >= {b.stop_at_reward:.4f})"
         if b.max_iterations and s.iterations >= b.max_iterations:
