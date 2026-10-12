@@ -58,6 +58,8 @@ def main(argv=None) -> int:
                    help="prior run dir: reuse its splits/baseline/seed/val-rollouts and "
                         "SKIP the baseline eval (algorithm starts at iter 1 on it)")
     p.add_argument("--n-trials", type=int, default=1)
+    p.add_argument("--workers", type=int, default=None,
+                   help="concurrent rollouts for the seed evaluation (unset = CAPEVOLVE_WORKERS or serial)")
     p.add_argument("--max-iterations", type=int, default=10)
     p.add_argument("--stall", type=int, default=0)
     p.add_argument("--max-metric-calls", type=int, default=0, help="0 = unlimited")
@@ -193,7 +195,8 @@ def main(argv=None) -> int:
             cand = Path(args.project) / args.capability
             if cand.exists():
                 cap_path = cand
-        result = harness.baseline(adapter, cap_path, run_dir=run_dir, n_trials=args.n_trials)
+        result = harness.baseline(adapter, cap_path, run_dir=run_dir, n_trials=args.n_trials,
+                                   workers=args.workers)
 
         # Materialize ./guidance/<cap>/SKILL.md (+ diagnose + capability_sources) into the
         # RUN dir itself, once, here — regardless of orchestration_mode. Deterministic mode

@@ -811,7 +811,7 @@ def candidate_cost_objective(run_dir: RunDir, tag, split: str = "val") -> tuple[
 
 # ---- baseline -------------------------------------------------------------
 
-def _baseline_train(adapter, run_dir: RunDir, *, n_trials: int, ks=(1, 2)) -> tuple[SplitResult | None, str | None]:
+def _baseline_train(adapter, run_dir: RunDir, *, n_trials: int, ks=(1, 2), workers: int | None = None) -> tuple[SplitResult | None, str | None]:
     """Full-split TRAIN evaluation of the seed, run alongside baseline's val eval.
 
     Without this, the run's ONLY start-of-run measurement was val — every later
@@ -831,7 +831,8 @@ def _baseline_train(adapter, run_dir: RunDir, *, n_trials: int, ks=(1, 2)) -> tu
     if tr == va:
         return None, "train ids identical to val — not re-evaluated; see baseline.val"
     result = evaluate_candidate(adapter, run_dir.candidate_dir("seed"), run_dir=run_dir,
-                               split="train", n_trials=n_trials, ks=ks, tag="seed")
+                               split="train", n_trials=n_trials, ks=ks, tag="seed",
+                               workers=workers)
     return result, None
 
 
@@ -856,7 +857,8 @@ def freeze_screening_economics(run_dir: RunDir, n_trials: int) -> dict:
             **stored["screening_economics"]}
 
 
-def baseline(adapter, seed_dir: Path, *, run_dir: RunDir, n_trials: int = 1, ks=(1, 2)) -> SplitResult:
+def baseline(adapter, seed_dir: Path, *, run_dir: RunDir, n_trials: int = 1, ks=(1, 2),
+             workers: int | None = None) -> SplitResult:
     """Snapshot the seed capability as candidate ``seed``, score it on val AND train, set best.
 
     Establishes the starting point every algorithm compares against. Assumes
@@ -880,8 +882,9 @@ def baseline(adapter, seed_dir: Path, *, run_dir: RunDir, n_trials: int = 1, ks=
     run_dir.snapshot("seed", seed_dir)
     run_dir.set_best("seed")
     result = evaluate_candidate(adapter, run_dir.candidate_dir("seed"), run_dir=run_dir,
-                               split="val", n_trials=n_trials, ks=ks, tag="seed")
-    train_result, train_note = _baseline_train(adapter, run_dir, n_trials=n_trials, ks=ks)
+                               split="val", n_trials=n_trials, ks=ks, tag="seed", workers=workers)
+    train_result, train_note = _baseline_train(adapter, run_dir, n_trials=n_trials, ks=ks,
+                                               workers=workers)
     baseline_payload = {"val": result.to_dict(), "best_id": "seed"}
     if train_result is not None:
         baseline_payload["train"] = train_result.to_dict()

@@ -864,6 +864,10 @@ def _cmd_run(argv):
     # baseline eval (algorithm starts at iter 1 on the reused baseline).
     if spec.get("reuse_baseline"):
         base_cmd += ["--reuse-baseline", str(spec["reuse_baseline"])]
+    # Opt-in rollout concurrency (spec ``workers``), shared by the seed baseline and the algorithm.
+    workers = spec.get("workers")
+    if workers is not None:
+        base_cmd += ["--workers", str(int(workers))]
     if resume_ts:
         base_cmd += ["--run-ts", resume_ts]
     if args.resume:
@@ -974,6 +978,15 @@ def _cmd_run(argv):
     # short-circuited above, so we never reach here for it.
     if args.resume:
         alg_cmd += ["--resume"]
+    if workers is not None and algorithm_name in ("hill-climb", "gepa", "skillopt"):
+        alg_cmd += ["--workers", str(int(workers))]
+    # HC-2 (opt-in): K parallel proposals per round on the P2 evaluator. The whole hc2_* / p2_* key
+    # set travels as one JSON flag, so run.py needs no flag per key.
+    if algorithm_name == "hill-climb" and spec.get("hc2"):
+        alg_cmd += ["--hc2", json.dumps({k: v for k, v in spec.items()
+                                         if k in ("hc2", "split_mode", "promotion_rule",
+                                                  "promotion_min_coverage", "max_metric_calls")
+                                         or k.startswith(("hc2_", "p2_"))})]
     if algorithm_focus is not None:
         alg_cmd += ["--focus", algorithm_focus]
     # Surface the selected capability skills to the optimizer prompt so it knows the
@@ -1057,7 +1070,7 @@ def _cmd_run(argv):
             alg_cmd += ["--no-regression"]
         if spec.get("gate_max_broke") is not None:
             alg_cmd += ["--gate-max-broke", str(int(spec["gate_max_broke"]))]
-        if spec.get("promotion_rule"):
+        if spec.get("promotion_rule") and not (spec.get("hc2") and spec["promotion_rule"] == "P2"):
             alg_cmd += ["--promotion-rule", str(spec["promotion_rule"])]
             for key in ("k_se", "n_conf", "dmin", "z_conf", "min_coverage"):
                 if spec.get(f"promotion_{key}") is not None:
