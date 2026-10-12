@@ -1,4 +1,4 @@
-# scripts/parsec/v4_t2_e1/tests/test_run_one_task.py
+# examples/parsec/v4_t2_e1/tests/test_run_one_task.py
 from __future__ import annotations
 
 import fcntl
@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "v4_t2_e1"))
 
 import run_one_task  # noqa: E402
 

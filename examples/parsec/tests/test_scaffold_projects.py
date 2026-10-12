@@ -1,4 +1,4 @@
-# scripts/parsec/v4_t2_e1/tests/test_scaffold_projects.py
+# examples/parsec/v4_t2_e1/tests/test_scaffold_projects.py
 from __future__ import annotations
 
 import importlib
@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "v4_t2_e1"))
 
 import scaffold_projects  # noqa: E402
 
@@ -26,7 +26,7 @@ class TestScaffoldProjects(unittest.TestCase):
         self.prompts_dir.mkdir(parents=True)
         for name in scaffold_projects.PROMPT_FILES:
             (self.prompts_dir / name).write_text(f"# seed content for {name}\n")
-        # Fake common/ source, standing in for scripts/parsec/v4_t2_e1/common/.
+        # Fake common/ source, standing in for examples/parsec/v4_t2_e1/common/.
         self.common_adapters_src = Path(self.tmp.name) / "common_src" / "adapters"
         self.common_optimizer_src = Path(self.tmp.name) / "common_src" / "optimizer"
         self.common_adapters_src.mkdir(parents=True)

@@ -15,10 +15,10 @@
 #
 # Usage:
 #   export PARSEC_V4N=/path/to/rhdp-parsec/v4_2026-09-16
-#   bash scripts/ccc/parsec_stack.sh up       # start all 6, then activate the 5 sims
-#   bash scripts/ccc/parsec_stack.sh status   # read-only: TCP + simulation `ready`
-#   bash scripts/ccc/parsec_stack.sh down     # stop+remove containers, stop parsec-live
-#   bash scripts/ccc/parsec_stack.sh reap     # force-remove/kill anything on our ports
+#   bash examples/parsec/ccc/parsec_stack.sh up       # start all 6, then activate the 5 sims
+#   bash examples/parsec/ccc/parsec_stack.sh status   # read-only: TCP + simulation `ready`
+#   bash examples/parsec/ccc/parsec_stack.sh down     # stop+remove containers, stop parsec-live
+#   bash examples/parsec/ccc/parsec_stack.sh reap     # force-remove/kill anything on our ports
 #
 # Exits non-zero if $PARSEC_V4N is unset, if any of `up`'s preconditions are
 # unmet, if a sim's activation POST never returns 2xx/409, or (for `status`) if
@@ -44,7 +44,7 @@ esac
 # a false "already running" that silently skips starting parsec-live.
 PID_DIR="$PARSEC_V4N/_run/logs/pids/$(hostname -s)"
 
-# The four overrides below exist for parallel eval lanes (scripts/parsec/h4):
+# The four overrides below exist for parallel eval lanes (examples/parsec/h4):
 # $PARSEC_V4N is one shared GPFS tree, so N concurrent lanes pointed at the
 # defaults would collide on the live clone's prompts, the skills store, and the
 # log dir the cost-attribution window is read from. Defaults are unchanged, so
@@ -74,7 +74,7 @@ SKILLS_DIR="${PARSEC_SKILLS_DIR:-$PARSEC_V4N/_run/skills}"
 PARSEC_SIM_TRACE="${PARSEC_SIM_TRACE:-$PARSEC_V4N/_run/logs/parsec-trace/trace.jsonl}"
 
 # name:published_port:kind. The port numbers are the single source of truth in
-# scripts/parsec/v4_t2_e1/common/parsec_paths.py's MCP_PORTS — change them there.
+# examples/parsec/parsec_paths.py's MCP_PORTS — change them there.
 SERVICES=(
   "platform:8086:sim"
   "github:8087:sim"

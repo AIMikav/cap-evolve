@@ -7,7 +7,7 @@
 #
 # Usage:
 #   export PARSEC_V4N=/path/to/rhdp-parsec/v4_2026-09-16
-#   bash scripts/ccc/run_ccc_parsec.sh --task-id icinga-011-aap2-job-status-alert
+#   bash examples/parsec/ccc/run_ccc_parsec.sh --task-id icinga-011-aap2-job-status-alert
 #
 # Output layout under the project (all under $PROJECT_ROOT/results/parsec/):
 #   results/parsec/<task-id>/<run-id>/
@@ -67,7 +67,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -z "${PROJECT_ROOT:-}" ]]; then
-  PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+  PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 fi
 
 PROJECT_DIR=".capevolve/v4_t2_e1_${TASK_ID}/project"

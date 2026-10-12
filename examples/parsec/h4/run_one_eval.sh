@@ -19,7 +19,7 @@
 #   export PARSEC_V4N=/path/to/rhdp-parsec/v4_2026-09-16
 #   export LLM_API_KEY=...  LLM_API_BASE=https://your-gateway
 #   export HARNESS_LLM_SIMULATION_MODEL=azure/gpt-5.4
-#   bash scripts/parsec/h4/run_one_eval.sh --suite-id base01 --task-id <task>
+#   bash examples/parsec/h4/run_one_eval.sh --suite-id base01 --task-id <task>
 #
 # Optional env:
 #   H4_LANE             lane id (default: $LSB_JOBID, else short hostname)
@@ -71,7 +71,7 @@ PROJECT_DIR=".capevolve/h4_${SUITE_ID}_${TASK_ID_ARG}/project"
 SPEC="$PROJECT_DIR/capevolve.yaml"
 if [[ ! -f "$PROJECT_ROOT/$SPEC" ]]; then
   echo "ERROR: $PROJECT_ROOT/$SPEC not found — scaffold it first:" >&2
-  echo "  python3 scripts/parsec/h4/scaffold_eval_projects.py --suite-id $SUITE_ID --artifact <dir>" >&2
+  echo "  python3 examples/parsec/h4/scaffold_eval_projects.py --suite-id $SUITE_ID --artifact <dir>" >&2
   exit 2
 fi
 

@@ -7,8 +7,8 @@
 # at a macOS-arm64 uv-managed interpreter).
 #
 # Usage:
-#   bash scripts/ccc/parsec_bootstrap.sh --tree /path/to/rhdp-parsec/v4_2026-09-16
-#   bash scripts/ccc/parsec_bootstrap.sh --tree /path/to/rhdp-parsec/v4_2026-09-16 --check
+#   bash examples/parsec/ccc/parsec_bootstrap.sh --tree /path/to/rhdp-parsec/v4_2026-09-16
+#   bash examples/parsec/ccc/parsec_bootstrap.sh --tree /path/to/rhdp-parsec/v4_2026-09-16 --check
 #
 # --check reports what's broken without changing anything (exit 1 if
 # anything needs repair, 0 if the two things checked are both fine).

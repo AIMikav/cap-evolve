@@ -6,8 +6,8 @@ the original design doc):
 
     .capevolve/
       v4_t2_e1_common/
-        adapters  -> ../../scripts/parsec/v4_t2_e1/common/adapters   (symlink)
-        optimizer -> ../../scripts/parsec/v4_t2_e1/common/optimizer  (symlink)
+        adapters  -> ../../examples/parsec/adapters   (symlink)
+        optimizer -> ../../examples/parsec/v4_t2_e1/common/optimizer  (symlink)
       v4_t2_e1_<task-id>/
         project/
           seed_capability/*.md   (8 files, real copies — a frozen snapshot)
@@ -30,10 +30,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CAPEVOLVE_DIR = REPO_ROOT / ".capevolve"
-COMMON_ADAPTERS_SRC = Path(__file__).resolve().parent / "common" / "adapters"
-COMMON_OPTIMIZER_SRC = Path(__file__).resolve().parent / "common" / "optimizer"
+# Shared with the other arms, so at the example root rather than under this one.
+EXAMPLE_DIR = Path(__file__).resolve().parents[1]
+COMMON_ADAPTERS_SRC = EXAMPLE_DIR / "adapters"
+COMMON_OPTIMIZER_SRC = EXAMPLE_DIR / "optimizer"
 
-# common/ holds parsec_paths.py, the single source of truth for PARSEC_V4N —
+# The example root holds parsec_paths.py, the single source of truth for PARSEC_V4N —
 # see that module's docstring for why adapter.py and this file must not each
 # keep their own copy of the same default.
 _COMMON_DIR = Path(__file__).resolve().parent / "common"
