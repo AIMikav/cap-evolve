@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import math
 import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
@@ -528,8 +529,38 @@ def hc2_loop(adapter, *, run_dir, optimizer, evaluator, params: HC2Params, ctx, 
         run_dir.log_event("hc2_round", round=r, incumbent=incumbent_id, candidates=cids,
                           dropped=sorted(dropped), champion=champion, k=len(cids))
     _, why = run_dir.budget_exhausted()
-    return {"algorithm": algorithm, "best_id": run_dir.best_id, "iterations": len(steps), "accepts": sum(1 for s in steps if s["accepted"]),
+    internal = final_estimate(evaluator, run_dir)
+    result = {"algorithm": algorithm, "best_id": run_dir.best_id, "iterations": len(steps), "accepts": sum(1 for s in steps if s["accepted"]),
+            **({"internal_estimate": internal} if internal is not None else {}),
             "stop_reason": why or stop or "max_iterations", "steps": steps}
+    (Path(run_dir.root) / "summary.json").write_text(
+        json.dumps({k: v for k, v in result.items() if k != "steps"}, indent=2), encoding="utf-8")
+    return result
+
+
+def final_estimate(evaluator, run_dir):
+    """Champion vs seed on C with fresh trials, once, as a FINAL phase after the search.
+
+    Same file and schema as ``harness._internal_estimate`` (which ``hill_climb_loop`` uses), so whichever
+    runs first wins and the estimate is never paid for twice. It is charged against ``max_metric_calls``
+    through the evaluator's reservation (``budget_reserve``); when the remaining budget cannot fund it the
+    estimate is skipped and recorded, never run over budget. ``None`` when the champion is the seed."""
+    from .rundir import BudgetExhausted
+    best = run_dir.best_id
+    path = Path(run_dir.root) / "internal_estimate.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    if not best or best == "seed":
+        return None
+    try:
+        out = evaluator.final_estimate(run_dir.candidate_dir(best), run_dir.candidate_dir("seed"))
+    except BudgetExhausted as e:
+        out = {"skipped": "budget", "reason": str(e)[:200]}
+        run_dir.log_event("p2_final_estimate", skipped="budget")
+    out = {k: (None if isinstance(v, float) and not math.isfinite(v) else v)
+           for k, v in out.items()}
+    path.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    return out
 
 
 def _rejected_notes(run_dir, n: int) -> list:

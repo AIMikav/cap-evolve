@@ -83,6 +83,9 @@ class FakeEvaluator:
     def __init__(self, accept=True, k=4):
         self.opened, self.accept, self.k = [], accept, k
 
+    def final_estimate(self, champion_dir, seed_dir, *, n_trials=4):
+        return {"mean": 0.1, "se": 0.05, "n": 3}
+
     def feedback_ids(self):
         return list(F_IDS)
 
@@ -268,6 +271,12 @@ def test_hc2_round_on_the_real_evaluator(tmp_path):
                        max_iterations=1, workers=2)
     assert len(seen) >= 3 and out["iterations"] >= 3
     assert out["accepts"] == 1 and rd.best_id != "seed"
+    # FINAL phase: champion vs seed on C, written to summary.json, inside max_metric_calls, paid once
+    est = out["internal_estimate"]
+    assert est["n"] and json.loads((rd.root / "summary.json").read_text())["internal_estimate"] == est
+    assert rd.spent.metric_calls <= 3000
+    paid = rd.spent.metric_calls
+    assert hc2.final_estimate(ev, rd) == est and rd.spent.metric_calls == paid
     c_ids = set(ev.confirm_ids())
     for wd in seen:
         for f in (wd / "trajectories").glob("*.json"):
@@ -278,3 +287,16 @@ def test_split_to_k_gives_distinct_slices_when_clusters_are_few():
     out = hc2.split_to_k([["a", "b", "c", "d"]], 3)
     assert len(out) == 3 and sorted(sum(out, [])) == ["a", "b", "c", "d"]
     assert hc2.split_to_k([["a"]], 3) == [["a"]]
+
+
+def test_final_estimate_skipped_when_unfunded_and_never_over_budget(tmp_path):
+    from p2_fakes import make_run
+    from cap_evolve import evaluator, harness as h, promotion
+    adapter, rd = make_run(tmp_path, n_train=24, n_val=24, default=0.4, max_metric_calls=100)
+    h.baseline_pooled(adapter, tmp_path / "seed", run_dir=rd, n_trials=2)
+    ev = evaluator.P2Evaluator(adapter, rd, promotion.P2Params.from_spec({"promotion_rule": "P2"}))
+    assert hc2.final_estimate(ev, rd) is None                    # champion is the seed: nothing to estimate
+    rd.snapshot("cand_0001", tmp_path / "seed")
+    rd.set_best("cand_0001")
+    out = hc2.final_estimate(ev, rd)
+    assert out["skipped"] == "budget" and rd.spent.metric_calls <= 100
