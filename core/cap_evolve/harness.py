@@ -1848,8 +1848,57 @@ def _candidate_task_impact(run_dir: RunDir, cid: str, split: str = "val",
     cand_se = _per_task_stderr(run_dir, cid, split)
     par_se = _per_task_stderr(run_dir, parent_id, split)
     delta = sum(cand[t] - par[t] for t in shared) / len(shared)
+    gcfg = gatecfg.GateConfig.for_run(run_dir)
+    if gcfg.ledger_noise_guard:
+        pooled = _pooled_task_rates(run_dir, cid, parent_id, split, cand, par)
+        cand, par, n_min = pooled
+        if n_min < gcfg.ledger_min_trials:
+            flips = sorted(t for t in shared if abs(cand[t] - par[t]) > 1e-9)
+            return {"broke": [], "fixed": [], "unresolved": flips, "delta": delta, "parent": parent_id,
+                    "causal": False, "n_min": n_min, "n_flips": len(flips),
+                    "null_flips": round(null_flip_expectation(
+                        [(cand[t] + par[t]) / 2.0 for t in shared], max(1, n_min)), 2),
+                    "n_shared": len(shared)}
+        shared = [t for t in shared if t in cand and t in par]
     return {**_classify_moves(par, cand, par_se, cand_se, shared),
             "delta": delta, "parent": parent_id}
+
+
+def null_flip_expectation(rates, n: int) -> float:
+    """Expected number of tasks whose two draws differ when BOTH sides are the same capability.
+
+    For a binary outcome with success rate ``p`` and ``n`` trials per side, P(the two per-task
+    means differ) = 1 - sum_k C(n,k)^2 p^(2k) (1-p)^(2(n-k)); at n=1 this is 2p(1-p). Two identical
+    seed draws differed on 14 of 49 retail tasks, so a ledger that lists such flips as broke/fixed
+    reports noise as causation."""
+    total = 0.0
+    for p in rates:
+        p = min(1.0, max(0.0, float(p)))
+        same = sum(math.comb(n, k) ** 2 * p ** (2 * k) * (1 - p) ** (2 * (n - k)) for k in range(n + 1))
+        total += 1.0 - same
+    return total
+
+
+def _pooled_task_rates(run_dir: RunDir, cid: str, parent_id: str, split: str, cand: dict, par: dict):
+    """Per-task rates pooled over EVERY draw of each side's capability hash (the evidence ledger),
+    falling back to the tag's own rollouts. Returns ``(cand_rates, par_rates, min_draws_per_task)``."""
+    def side(tag, fallback):
+        try:
+            h = eval_index.cap_hash(run_dir.candidate_dir(tag))
+            cnt = eval_index.counts(run_dir, h, split)
+        except Exception:  # noqa: BLE001
+            cnt = {}
+        rates = {t: s / n for t, (s, n) in cnt.items() if n}
+        ns = {t: n for t, (s, n) in cnt.items() if n}
+        for t, v in fallback.items():
+            if t not in rates:
+                rates[t], ns[t] = v, 1
+        return rates, ns
+    cr, cn = side(cid, cand)
+    pr, pn = side(parent_id, par)
+    shared = [t for t in cr if t in pr]
+    n_min = min([min(cn[t], pn[t]) for t in shared] or [0])
+    return cr, pr, n_min
 
 
 def _classify_moves(par: dict, cand: dict, par_se: dict, cand_se: dict,
@@ -2090,6 +2139,11 @@ def _build_ledger(workdir: Path, run_dir: RunDir) -> None:
         broke = "{" + ", ".join(str(t) for t in (imp.get("broke") or [])[:20]) + "}"
         fixed = "{" + ", ".join(str(t) for t in (imp.get("fixed") or [])[:20]) + "}"
         unres = "{" + ", ".join(str(t) for t in (imp.get("unresolved") or [])[:20]) + "}"
+        if imp.get("causal") is False:
+            # Too few draws per task to call a move causal: counts against the null expectation only.
+            broke = fixed = "n/a"
+            unres = (f"{imp['n_flips']} tasks differ vs ~{imp['null_flips']:.0f} expected from "
+                     f"re-measurement noise alone (n={imp['n_min']} trials/task; no causal claim)")
         vstr = f"{val:.3f}" if isinstance(val, (int, float)) else ""
         table.append(f"| {i} | {cid} | {par} | {outcome} | {vstr} | {d} | {broke} | {fixed} "
                      f"| {unres} |")
@@ -2186,6 +2240,10 @@ def _reconcile_journal(workdir: Path, run_dir: RunDir, cid: str, *,
     broke = ", ".join(str(t) for t in (impact.get("broke") or [])[:30]) or "—"
     fixed = ", ".join(str(t) for t in (impact.get("fixed") or [])[:30]) or "—"
     unres = ", ".join(str(t) for t in (impact.get("unresolved") or [])[:30]) or "—"
+    if impact.get("causal") is False:
+        broke = fixed = "n/a (too few trials per task for a causal claim)"
+        unres = (f"{impact['n_flips']} tasks differ vs ~{impact['null_flips']:.0f} expected from "
+                 f"re-measurement noise alone (n={impact['n_min']} trials/task)")
     if indecisive:
         verdict = "UNRESOLVED (not judged; champion unchanged)"
         guidance = (" — the measurement could not separate this edit from re-measurement noise, "
@@ -2195,6 +2253,11 @@ def _reconcile_journal(workdir: Path, run_dir: RunDir, cid: str, *,
                     "redesign it on this round's numbers, and do not re-derive it as a new idea.")
     elif accepted:
         verdict, guidance = "ACCEPTED (new champion)", ""
+    elif impact.get("causal") is False:
+        verdict = "REJECTED (champion unchanged)"
+        guidance = (" — per-task movement at this many trials per task is within re-measurement noise, "
+                    "so neither a regression nor a fix is claimed for any single task. Judge the "
+                    "aggregate; do not redesign an edit because a task moved.")
     elif impact.get("broke"):
         verdict = "REJECTED (champion unchanged)"
         guidance = (" — its WHOLE batch was reverted; re-introduce only the edits that did NOT "
