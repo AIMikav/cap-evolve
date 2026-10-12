@@ -40,7 +40,7 @@ from .loop import SplitResult, aggregate_scores, has_valid_trials, pool_split_re
 from . import coverage as coverage_mod
 from . import gatecfg
 from .rundir import BudgetExhausted, RunDir, _atomic_write
-from .splits import Splits, make_splits
+from .splits import Splits, make_pooled_partition, make_splits
 from .trials import candidate_scope, run_trials_pool
 from .types import Rollout, Score, Task
 
@@ -219,6 +219,63 @@ def ensure_splits(adapter, run_dir: RunDir, *, seed: int = 0, ratios=(0.5, 0.25,
     run_dir.log_event("splits", train=len(splits.train), val=len(splits.val),
                       test=len(splits.test), seed=seed)
     return splits
+
+
+def _seed_pass_rates(run_dir: RunDir) -> dict:
+    """Per-task pass rate of the seed from a prior ``baseline.json`` ({} when there is none)."""
+    try:
+        base = json.loads((run_dir.root / "baseline.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: dict = {}
+    for part in ("train", "val"):
+        for pt in ((base.get(part) or {}).get("per_task") or []):
+            if has_valid_trials(pt):
+                out[str(pt.get("task_id"))] = float(pt.get("reward") or 0.0)
+    return out
+
+
+def ensure_pooled(run_dir: RunDir, *, confirm_fraction: float | None = None,
+                  pass_rates: dict | None = None) -> Splits:
+    """``split_mode: pooled``: partition pool = train + val into F and C ONCE; later calls only load.
+
+    The partition is seeded by the run's frozen splits seed, stratified by the seed's pass rate when a
+    baseline exists, persisted in ``splits.json`` and never re-drawn (a second call with a different
+    fraction or rates returns the stored partition unchanged). The proposer sees F (split name
+    ``feedback``); C (``confirm``) is touched only by confirmation. Test is untouched."""
+    splits = run_dir.read_splits()
+    if splits.pooled:
+        return splits
+    cfg = gatecfg.GateConfig.for_run(run_dir)
+    frac = cfg.confirm_fraction if confirm_fraction is None else float(confirm_fraction)
+    pool = list(dict.fromkeys([*splits.train, *splits.val]))
+    rates = pass_rates if pass_rates is not None else _seed_pass_rates(run_dir)
+    fb, cf = make_pooled_partition(pool, seed=splits.seed, confirm_fraction=frac, pass_rates=rates)
+    splits.pooled, splits.feedback, splits.confirm, splits.pool_seed = True, fb, cf, splits.seed
+    run_dir.write_splits(splits)
+    run_dir.log_event("pooled_split", n_pool=len(pool), n_feedback=len(fb), n_confirm=len(cf),
+                      confirm_fraction=frac, stratified=bool(rates), seed=splits.seed)
+    return splits
+
+
+def baseline_pooled(adapter, seed_dir: Path, *, run_dir: RunDir, n_trials: int = 4, ks=(1, 2),
+                    workers: int | None = None) -> SplitResult:
+    """Pooled-mode baseline: snapshot the seed as candidate ``seed``, score it on the feedback stratum F
+    ONLY (``n_trials`` per task, ranking draws for the P2 evaluator), set best.
+
+    C is never measured here: the concurrent control re-measures the incumbent on C at confirmation, and
+    the proposer must never see a per-task C score of the seed."""
+    seed_dir = Path(seed_dir)
+    seed_dir.mkdir(parents=True, exist_ok=True)
+    ensure_pooled(run_dir)
+    run_dir.snapshot("seed", seed_dir)
+    run_dir.set_best("seed")
+    result = evaluate_candidate(adapter, run_dir.candidate_dir("seed"), run_dir=run_dir,
+                                split="feedback", n_trials=n_trials, ks=ks, tag="seed", workers=workers)
+    run_dir.log_event("baseline", val=result.reward, stderr=result.stderr, n_scored=result.n_scored,
+                      n_tasks=result.n_tasks, split="feedback")
+    run_dir.update_spent(best_val=result.reward)
+    return result
 
 
 def _tasks_for(adapter, run_dir: RunDir, split: str) -> list[Task]:
@@ -764,7 +821,8 @@ def _evaluate_candidate(
                       **({"workers": workers} if workers > 1 else {}),
                       # only on a SUBSET eval, so a full-split event record is unchanged.
                       # Present ⇒ this reward is a triage signal, not a gateable score.
-                      **({"subset_ids": [t.id for t in tasks], "subset": True}
+                      **(({"n_subset": len(tasks), "subset": True} if split == "confirm"
+                          else {"subset_ids": [t.id for t in tasks], "subset": True})
                          if ids is not None else {}),
                       # Present only when some rollout tagged how solid its cost is
                       # (see adapter.Rollout.metadata["cost_source"]) — absent for
