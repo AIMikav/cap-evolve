@@ -90,6 +90,23 @@ def _file_lock(lock_path: Path):
             os.unlink(lock_path)
 
 
+class BudgetExhausted(RuntimeError):
+    """A rollout reservation does not fit what is left of ``max_metric_calls`` / ``max_usd``.
+
+    Raised BEFORE any rollout is dispatched, so the caller decides what a refusal means: a rung is
+    ``unfunded`` and the round ends, a confirmation is ``unconfirmed`` (pending, never a reject)."""
+
+
+def _pid_alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, ValueError, TypeError):
+        return True
+    return True
+
+
 @dataclass
 class Budget:
     max_iterations: int = 20
@@ -300,13 +317,110 @@ class RunDir:
         f.flush()
         _HELD_LOCKS.append(f)  # keep the fd open for the life of the process
 
+    # ---- reservations -------------------------------------------------------
+    @staticmethod
+    def _live_reservations(st: dict) -> dict:
+        """Reservations whose holder process is still alive (a crashed holder frees its claim)."""
+        return {k: v for k, v in (st.get("reserved") or {}).items() if _pid_alive(v.get("pid"))}
+
+    def reserved_metric_calls(self) -> int:
+        return sum(int(v.get("n") or 0) for v in self._live_reservations(self._read_state()).values())
+
+    def remaining_metric_calls(self) -> int | None:
+        """What is still free after spend and live reservations; ``None`` when uncapped."""
+        st = self._read_state()
+        cap = Budget.from_dict(st.get("budget")).max_metric_calls
+        if not cap:
+            return None
+        used = Spent.from_dict(st.get("spent")).metric_calls
+        held = sum(int(v.get("n") or 0) for v in self._live_reservations(st).values())
+        return max(0, cap - used - held)
+
+    def can_afford(self, n: int) -> bool:
+        rem = self.remaining_metric_calls()
+        return rem is None or n <= rem
+
+    def reserve_metric_calls(self, n: int, *, label: str = "", est_usd: float = 0.0) -> str:
+        """Claim ``n`` rollouts against ``max_metric_calls`` (and ``est_usd`` against ``max_usd``).
+
+        Atomic under the state lock. Raises ``BudgetExhausted`` if ``spent + reserved + n`` would pass
+        a cap. Returns a token for ``update_spent(release=token)`` (converts the claim into spend) or
+        ``release_metric_calls`` (refunds it after a failed evaluation)."""
+        n = int(n)
+        with _file_lock(self._state_lock):
+            st = self._read_state()
+            b = Budget.from_dict(st.get("budget"))
+            sp = Spent.from_dict(st.get("spent"))
+            live = self._live_reservations(st)
+            held_n = sum(int(v.get("n") or 0) for v in live.values())
+            held_usd = sum(float(v.get("usd") or 0.0) for v in live.values())
+            if b.max_metric_calls and sp.metric_calls + held_n + n > b.max_metric_calls:
+                raise BudgetExhausted(
+                    f"{label or 'evaluation'} needs {n} rollouts but only "
+                    f"{max(0, b.max_metric_calls - sp.metric_calls - held_n)} of max_metric_calls="
+                    f"{b.max_metric_calls} remain ({sp.metric_calls} spent, {held_n} reserved)")
+            if b.max_usd and est_usd and sp.total_usd + held_usd + est_usd > b.max_usd:
+                raise BudgetExhausted(
+                    f"{label or 'evaluation'} is estimated at ${est_usd:.2f}; "
+                    f"${max(0.0, b.max_usd - sp.total_usd - held_usd):.2f} of max_usd remain")
+            token = f"r{int(time.time() * 1000)}_{os.getpid()}_{len(live)}_{n}"
+            while token in live:
+                token += "x"
+            live[token] = {"n": n, "usd": float(est_usd), "pid": os.getpid(), "label": label,
+                           "ts": time.time()}
+            st["reserved"] = live
+            self._write_state(st)
+            return token
+
+    def mark_unfunded(self, why: str) -> None:
+        """Record that a reservation was refused, so every loop's ``budget_exhausted`` check stops
+        (reason ``budget_reserved``) instead of paying an optimizer call for a proposal it cannot test.
+        Cleared by ``update_budget`` (extending the budget)."""
+        with _file_lock(self._state_lock):
+            st = self._read_state()
+            st["unfunded"] = str(why)[:300]
+            self._write_state(st)
+
+    def quarantined_tasks(self) -> list:
+        """Task ids removed from the evaluable set for this run (still missing after the retries)."""
+        return sorted((self._read_state().get("quarantined") or {}))
+
+    def quarantine(self, task_ids, reason: str = "") -> list:
+        """Add ``task_ids`` to the quarantine (locked RMW); returns the ones newly added."""
+        with _file_lock(self._state_lock):
+            st = self._read_state()
+            q = st.get("quarantined") or {}
+            new = [str(t) for t in task_ids if str(t) not in q]
+            for t in new:
+                q[t] = {"reason": reason, "ts": time.time()}
+            if new:
+                st["quarantined"] = q
+                self._write_state(st)
+            return new
+
+    def release_metric_calls(self, token: str | None) -> None:
+        """Refund a reservation (idempotent)."""
+        if not token:
+            return
+        with _file_lock(self._state_lock):
+            st = self._read_state()
+            res = st.get("reserved") or {}
+            if token in res:
+                res.pop(token)
+                st["reserved"] = res
+                self._write_state(st)
+
     def update_spent(self, *, iterations=0, metric_calls=0, usd=0.0, runner_tokens=0,
                      runner_seconds=0.0, optimizer_seconds=0.0, optimizer_usd=0.0,
                      optimizer_tokens=0, intake_usd=0.0, intake_tokens=0, intake_seconds=0.0,
                      accepted: bool | None = None, best_val: float | None = None,
-                     usersim_usd=0.0) -> Spent:
+                     usersim_usd=0.0, release=None) -> Spent:
+        """Add to the spend counters (locked RMW). ``release`` = a ``reserve_metric_calls`` token whose
+        claim is converted into this spend in the SAME lock hold (no window where it counts twice)."""
         with _file_lock(self._state_lock):
             st = self._read_state()
+            if release and release in (st.get("reserved") or {}):
+                st["reserved"].pop(release)
             sp = Spent.from_dict(st.get("spent"))
             sp.iterations += iterations
             sp.metric_calls += metric_calls
@@ -346,6 +460,7 @@ class RunDir:
                 if k in allowed and v is not None:
                     b[k] = v
             st["budget"] = b
+            st.pop("unfunded", None)
             self._write_state(st)
             return Budget.from_dict(b)
 
@@ -367,6 +482,10 @@ class RunDir:
 
     def budget_exhausted(self) -> tuple[bool, str]:
         b, s = self.budget, self.spent
+        s = Spent.from_dict({**s.to_dict(), "metric_calls": s.metric_calls + self.reserved_metric_calls()})
+        unfunded = self._read_state().get("unfunded")
+        if unfunded:
+            return True, f"budget_reserved: {unfunded}"
         if b.stop_at_reward and s.best_val >= b.stop_at_reward - 1e-9:
             return True, f"reward ceiling reached (best val {s.best_val:.4f} >= {b.stop_at_reward:.4f})"
         if b.max_iterations and s.iterations >= b.max_iterations:
