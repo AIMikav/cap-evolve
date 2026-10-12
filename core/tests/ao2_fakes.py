@@ -21,6 +21,7 @@ sys.path.insert(0, str(REPO / "core"))
 sys.path.insert(0, str(REPO / "skills" / "algorithms" / "agent-optimize" / "scripts"))
 
 import conductor  # noqa: E402
+import conductor_backend  # noqa: E402
 from cap_evolve import RunDir, graph  # noqa: E402
 
 TASKS = [f"t{i:02d}" for i in range(24)]
@@ -256,7 +257,7 @@ def run_to_done(w, be, cfg, *, crash_at=(), max_ticks=4000, clock=None):
 
 # ---- P2 mode: the REAL P2Evaluator on the seeded Bernoulli adapter (tests/p2_fakes.py) -------------
 
-class P2Backend(conductor.Backend):
+class P2Backend(conductor_backend.P2Port, conductor.Backend):
     """Conductor backend over a real run dir + cap_evolve.evaluator. Jobs run on a thread pool, so
     several candidates really evaluate in parallel; proposals are instant, scripted by effect size."""
 
@@ -290,6 +291,8 @@ class P2Backend(conductor.Backend):
         return n
 
     def dir_of(self, tag): return self.dirs[tag]
+    def _dir(self, tag): return self.dirs[tag]
+    def _workdir(self, tag): return self.dirs[tag]
     def cap_hash(self, tag):
         from cap_evolve import eval_index
         return eval_index.cap_hash(self.dirs[tag]) if tag in self.dirs else None
@@ -373,38 +376,3 @@ class P2Backend(conductor.Backend):
     def finalized(self): return (self.run_dir.root / "final.json").exists()
     def log(self, event, **kw): self.run_dir.log_event(event, **kw)
     def best_reward(self, tag): return None
-
-    # ---- P2
-    def p2_plan(self, k_wanted, incumbent):
-        plan = self.ev.plan_round(k_wanted, self.dirs[incumbent])
-        return plan.k, plan.funded
-
-    def p2_open(self, tags, incumbent):
-        rnd = self.ev.open_round({t: self.dirs[t] for t in tags}, (incumbent, self.dirs[incumbent]))
-        self.rounds[rnd.round_id] = rnd
-        return rnd.round_id
-
-    def p2_stage_jobs(self, rid, stage):
-        rnd = self._round(rid)
-        jobs = {"rung1": lambda: rnd.incumbent_jobs() + rnd.rung_jobs(1), "rung2": lambda: rnd.rung_jobs(2),
-                "confirm": rnd.confirm_jobs}[stage]()
-        return [j.to_dict() for j in jobs]
-
-    def p2_job_done(self, rid, x): return self._round(rid)._marker(self._job(x)).exists()
-
-    def p2_close(self, rid, stage, unfunded):
-        rnd = self._round(rid)
-        live = rnd.state["live"]
-        if stage == "confirm":
-            if unfunded:
-                rnd.state["confirm_unfunded"] = list(rnd.state.get("confirm_unfunded", [])) + list(rnd.state.get("confirm_funded", []))
-                rnd.state["confirm_funded"] = []
-            out = rnd.close_confirm()
-            return {"verdicts": {c: {"status": v.status, "mean": v.mean, "z": v.z} for c, v in out.items()},
-                    "champion": rnd.champion}
-        n = int(stage[-1])
-        if unfunded:
-            return {"verdicts": {c: {"status": "unfunded"} for c in live[str(n)]}, "next": None}
-        out = rnd.close_rung(n)
-        nxt = "rung2" if n == 1 and live["2"] else ("confirm" if n == 2 and live.get("confirm") else None)
-        return {"verdicts": {c: {"status": v.status, "mean": v.mean, "z": v.z} for c, v in out.items()}, "next": nxt}

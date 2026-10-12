@@ -169,6 +169,7 @@ class Backend:
     def finalize(self, champion: str) -> dict: raise NotImplementedError
     def finalized(self) -> bool: raise NotImplementedError
     def log(self, event: str, **kw) -> None: pass
+    def initial_champion(self) -> str: return "seed"
     def remaining_rollouts(self) -> int | None: return None      # P2: what the run dir has left after reservations
     def reserved_rollouts(self) -> int: return 0
     # ---- P2 rounds (promotion_rule: P2). Jobs are plain dicts; run_job is idempotent (done markers).
@@ -235,6 +236,10 @@ class Conductor:
         w = None if self.cfg.ref_pooled else self.st["nodes"].get(tag, {}).get("ref_window")
         return window_key(w) if w else (0, self.cfg.screen_n)
 
+    def _is_base(self, tag) -> bool:
+        """The run's starting incumbent: a node with no edit, never a candidate to evaluate or merge."""
+        return self.st["nodes"].get(tag, {}).get("edit_kind") == "seed"
+
     def n_decided(self) -> int:
         return sum(1 for n in self.st["nodes"].values() if n["status"] in TERMINAL and n.get("decided"))
 
@@ -260,9 +265,11 @@ class Conductor:
         if "tokens_base" not in self.st:
             self.st["tokens_base"] = int(self.b.spent_tokens())
         if "champion_seeded" not in self.st:
-            self.st["nodes"].setdefault("seed", {"tag": "seed", "status": "champion", "parents": [],
-                                                 "edit_kind": "seed", "hash": self.b.cap_hash("seed"),
-                                                 "decided": False, "rung": 0, "epoch": 0})
+            base = self.b.initial_champion()
+            self.st["champion"] = base
+            self.st["nodes"].setdefault(base, {"tag": base, "status": "champion", "parents": [],
+                                               "edit_kind": "seed", "hash": self.b.cap_hash(base),
+                                               "decided": False, "rung": 0, "epoch": 0})
             self.st["champion_seeded"] = True
         self.reap()
         self.promote()
@@ -408,7 +415,7 @@ class Conductor:
             return
         for tag in sorted(self.st["nodes"]):
             n = self.st["nodes"][tag]
-            if n["status"] in ("proposed", "rung", "full", "stale") and tag != "seed":
+            if n["status"] in ("proposed", "rung", "full", "stale") and not self._is_base(tag):
                 self._advance(tag, n)
         for tag in sorted(self.st["nodes"]):
             n = self.st["nodes"][tag]
@@ -502,17 +509,14 @@ class Conductor:
         self.b.commit_accept(tag, {**ev, "k0": n["k0"]})
         old = self.champion
         self._finish_node(tag, "champion", "promoted", ev)
-        if old in self.st["nodes"] and old != "seed":
-            self.node(old)["status"] = "superseded"
-        elif old == "seed":
-            self.node("seed")["status"] = "superseded"
+        self.node(old)["status"] = "superseded"
         n["ref_window"] = [n["k0"], n["k0"] + p.n_conf]
         self.st.update(champion=tag, epoch=self.st["epoch"] + 1, proposals_since_improve=0)
 
     # ---- 3. merge -----------------------------------------------------------------------
     def alive_tips(self) -> list[str]:
         return sorted(t for t, n in self.st["nodes"].items()
-                      if t not in ("seed", self.champion) and n["status"] in PRE_CONFIRM + ("confirming", "unconfirmed"))
+                      if not self._is_base(t) and t != self.champion and n["status"] in PRE_CONFIRM + ("confirming", "unconfirmed"))
 
     def _merge_jobs(self) -> int:
         return len(cs.live(self.st, "merge"))
@@ -595,7 +599,7 @@ class Conductor:
                 cids = self.b.confirm_ids()
                 out.append((1, tag, tag, cids, w, tag, "confirm"))
                 out.append((1, tag, n["ref"], cids, w, tag, "confirm"))
-            elif n["status"] in ("proposed", "rung", "full", "stale") and tag != "seed":
+            elif n["status"] in ("proposed", "rung", "full", "stale") and not self._is_base(tag):
                 sids = self._stage_ids(n)
                 out.append((2, f"{-n.get('p_beat', 0.5):+.6f}:{tag}", tag, sids, (0, self.cfg.screen_n), tag, "rung"))
         return sorted(out, key=lambda w: (w[0], w[1]))
@@ -646,7 +650,7 @@ class Conductor:
     # ---- P2 rounds ------------------------------------------------------------------------
     def _p2_pool(self) -> list[str]:
         return sorted(t for t, n in self.st["nodes"].items()
-                      if t != "seed" and n["status"] == "proposed" and not n.get("round"))
+                      if not self._is_base(t) and n["status"] == "proposed" and not n.get("round"))
 
     def _p2_step(self) -> None:
         r = self.st.get("round")
@@ -802,7 +806,7 @@ class Conductor:
 
     # ---- 5. propose ---------------------------------------------------------------------
     def in_flight_nodes(self) -> int:
-        return sum(1 for t, n in self.st["nodes"].items() if t != "seed" and n["status"] in PRE_CONFIRM + ("confirming",))
+        return sum(1 for t, n in self.st["nodes"].items() if not self._is_base(t) and n["status"] in PRE_CONFIRM + ("confirming",))
 
     def propose(self) -> None:
         cap = self.cfg.caps
@@ -898,7 +902,7 @@ class Conductor:
 
     def finish(self) -> None:
         for t, n in self.st["nodes"].items():
-            if n["status"] in PRE_CONFIRM and t != "seed":
+            if n["status"] in PRE_CONFIRM and not self._is_base(t):
                 self.b.node_event(t, "gated" if n["status"] == "screened" else "proposed", stage="pending_at_stop")
         if not self.b.finalized():
             self.st["final"] = self.b.finalize(self.champion)
