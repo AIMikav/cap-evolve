@@ -38,20 +38,26 @@ KNOWN_TASK_ID = "icinga-011-aap2-job-status-alert"  # one of the 21; real dir on
 
 
 class TestAdapterTaskResolution(unittest.TestCase):
-    def test_raises_clearly_when_task_id_unset(self):
+    def test_raises_clearly_when_v4n_unset(self):
+        """An unconfigured checkout must stop construction, not default to one."""
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(RuntimeError) as ctx:
                 adapter_mod.Adapter()
-            self.assertIn("TASK_ID", str(ctx.exception))
+            self.assertIn("PARSEC_V4N", str(ctx.exception))
 
-    def test_raises_clearly_when_task_dir_missing(self):
+    def test_empty_tasks_dir_yields_no_tasks_rather_than_raising(self):
+        """A tasks dir with no bench-v4-* entries returns zero tasks.
+
+        Worth pinning precisely because it does NOT raise: a run against the
+        wrong checkout would otherwise "succeed" having measured nothing, and
+        zero tasks is the only signal that happened.
+        """
         with tempfile.TemporaryDirectory() as tmp:
-            fake_tasks_dir = Path(tmp)
-            with patch.object(adapter_mod, "V4N", fake_tasks_dir), \
-                 patch.object(adapter_mod, "TASKS_DIR", fake_tasks_dir), \
-                 patch.dict(os.environ, {"TASK_ID": "not-a-real-task-xyz"}, clear=True):
-                with self.assertRaises(FileNotFoundError):
-                    adapter_mod.Adapter()
+            empty = Path(tmp)
+            with patch.object(adapter_mod, "V4N", empty), \
+                 patch.object(adapter_mod, "TASKS_DIR", empty), \
+                 patch.dict(os.environ, {"PARSEC_V4N": str(empty)}, clear=True):
+                self.assertEqual(adapter_mod.Adapter().tasks("val"), [])
 
     @unittest.skipUnless(_REAL_TASKS_DIR_PRESENT, "real bench-v4 tasks dir not present (set PARSEC_V4N)")
     def test_tasks_returns_the_one_pinned_task(self):
