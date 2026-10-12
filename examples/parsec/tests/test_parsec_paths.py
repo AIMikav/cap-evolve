@@ -1,4 +1,4 @@
-# scripts/parsec/v4_t2_e1/tests/test_parsec_paths.py
+# examples/parsec/v4_t2_e1/tests/test_parsec_paths.py
 from __future__ import annotations
 
 import os
@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "common"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import parsec_paths  # noqa: E402
 

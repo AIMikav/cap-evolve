@@ -65,15 +65,15 @@ from pathlib import Path
 from urllib.request import urlopen
 
 # This file is reached through a chain of symlinks (project/adapters ->
-# v4_t2_e1_common/adapters -> scripts/parsec/v4_t2_e1/common/adapters). .resolve()
+# parsec_common/adapters -> examples/parsec/adapters). .resolve()
 # fully follows every hop, landing on the real physical path regardless —
 # so this always finds the actual repo root, not wherever the caller's
 # --project happened to point.
-_REPO_ROOT = Path(__file__).resolve().parents[5]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-# common/ (this file's parent's parent) holds parsec_paths.py, the single
-# source of truth for PARSEC_V4N/MCP_PORTS — see that module's docstring.
+# The example root (this file's parent's parent) holds parsec_paths.py, the
+# single source of truth for PARSEC_V4N/MCP_PORTS — see that module's docstring.
 _COMMON_DIR = Path(__file__).resolve().parents[1]
 if str(_COMMON_DIR) not in sys.path:
     sys.path.insert(0, str(_COMMON_DIR))

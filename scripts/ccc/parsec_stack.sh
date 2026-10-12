@@ -44,7 +44,7 @@ esac
 # a false "already running" that silently skips starting parsec-live.
 PID_DIR="$PARSEC_V4N/_run/logs/pids/$(hostname -s)"
 
-# The four overrides below exist for parallel eval lanes (scripts/parsec/h4):
+# The four overrides below exist for parallel eval lanes (examples/parsec/h4):
 # $PARSEC_V4N is one shared GPFS tree, so N concurrent lanes pointed at the
 # defaults would collide on the live clone's prompts, the skills store, and the
 # log dir the cost-attribution window is read from. Defaults are unchanged, so
@@ -74,7 +74,7 @@ SKILLS_DIR="${PARSEC_SKILLS_DIR:-$PARSEC_V4N/_run/skills}"
 PARSEC_SIM_TRACE="${PARSEC_SIM_TRACE:-$PARSEC_V4N/_run/logs/parsec-trace/trace.jsonl}"
 
 # name:published_port:kind. The port numbers are the single source of truth in
-# scripts/parsec/v4_t2_e1/common/parsec_paths.py's MCP_PORTS — change them there.
+# examples/parsec/parsec_paths.py's MCP_PORTS — change them there.
 SERVICES=(
   "platform:8086:sim"
   "github:8087:sim"

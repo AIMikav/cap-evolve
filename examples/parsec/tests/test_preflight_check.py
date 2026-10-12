@@ -1,4 +1,4 @@
-# scripts/parsec/v4_t2_e1/tests/test_preflight_check.py
+# examples/parsec/v4_t2_e1/tests/test_preflight_check.py
 from __future__ import annotations
 
 import subprocess
@@ -8,7 +8,7 @@ import unittest.mock
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "v4_t2_e1"))
 
 import preflight_check  # noqa: E402
 

@@ -1,4 +1,4 @@
-# scripts/parsec/v4_t2_e1/tests/test_adapter.py
+# examples/parsec/v4_t2_e1/tests/test_adapter.py
 from __future__ import annotations
 
 import json
@@ -12,16 +12,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "common" / "adapters"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "adapters"))
 # adapter.py adds the repo root to sys.path itself (so `capevolve_harbor` imports),
 # but `cap_evolve` lives under core/ — which only an installed cap-evolve or an
 # explicit PYTHONPATH=core provides. Add it here, in the TEST, rather than in
 # adapter.py: a second copy of cap_evolve ahead of the installed one inside a
 # real `cap-evolve run` process would be a far worse bug than an awkward test
 # invocation. This is what makes
-#     python3 scripts/parsec/v4_t2_e1/tests/test_adapter.py -v
+#     python3 examples/parsec/v4_t2_e1/tests/test_adapter.py -v
 # work from a clean shell with no PYTHONPATH set.
-sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "core"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "core"))
 
 import adapter as adapter_mod  # noqa: E402
 

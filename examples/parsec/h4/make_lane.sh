@@ -32,9 +32,9 @@
 #
 # Usage:
 #   export PARSEC_V4N=/path/to/rhdp-parsec/v4_2026-09-16
-#   bash scripts/parsec/h4/make_lane.sh <lane-id>            # create or verify
-#   bash scripts/parsec/h4/make_lane.sh <lane-id> --force     # rebuild config/+data/
-#   bash scripts/parsec/h4/make_lane.sh --verify-only <lane-id>
+#   bash examples/parsec/h4/make_lane.sh <lane-id>            # create or verify
+#   bash examples/parsec/h4/make_lane.sh <lane-id> --force     # rebuild config/+data/
+#   bash examples/parsec/h4/make_lane.sh --verify-only <lane-id>
 #
 # Exit codes:
 #   0  lane present and verified
