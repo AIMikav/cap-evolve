@@ -34,6 +34,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+from .evaluator import thread_map
+
 
 @dataclass(frozen=True)
 class HC2Params:
@@ -149,7 +151,8 @@ def read_traces(run_dir, split_dirs, feedback_ids, tag_ok) -> list:
 
 
 def incumbent_tag_ok(cid: str):
-    return lambda tag: tag == cid or tag.startswith(cid + "__")
+    """The incumbent's draws: its own tag, or a round tag (``<round>__<cid>__...``) the evaluator wrote."""
+    return lambda tag: cid in tag.split("__")
 
 
 # ---- clusters, pairs ----------------------------------------------------------------------------
@@ -192,6 +195,19 @@ def cluster_failures(failed: dict, task_ids, sim: float) -> list:
         else:
             clusters.append([toks[t], [t]])
     return [c[1] for c in sorted(clusters, key=lambda c: -len(c[1]))]
+
+
+def split_to_k(clusters: list, k: int) -> list:
+    """Top ``k`` clusters; if there are fewer, halve the largest (interleaved) so each proposal still
+    gets a different slice of the failures."""
+    clusters = [list(c) for c in clusters]
+    while len(clusters) < k:
+        clusters.sort(key=len, reverse=True)
+        if not clusters or len(clusters[0]) < 2:
+            break
+        big = clusters.pop(0)
+        clusters += [big[0::2], big[1::2]]
+    return sorted(clusters, key=len, reverse=True)[:k]
 
 
 def contrastive_pairs(traces, task_ids, limit: int) -> list:
@@ -404,7 +420,7 @@ def hc2_loop(adapter, *, run_dir, optimizer, evaluator, params: HC2Params, ctx, 
         exhausted, _ = run_dir.budget_exhausted()
         if exhausted:
             break
-        plan = evaluator.plan_round(params.k)
+        plan = evaluator.plan_round(params.k, incumbent_dir=run_dir.candidate_dir(run_dir.best_id))
         if not plan.funded:
             stop = "budget_unfunded"
             break
@@ -416,7 +432,7 @@ def hc2_loop(adapter, *, run_dir, optimizer, evaluator, params: HC2Params, ctx, 
                              incumbent_tag_ok(incumbent_id))
         failed = failing_tasks(traces)
         batch = rotating_minibatch(failed, params.minibatch, r)
-        clusters = cluster_failures(failed, batch, params.cluster_sim)[:plan.k]
+        clusters = split_to_k(cluster_failures(failed, batch, params.cluster_sim), plan.k)
         if not clusters:
             stop = "no_failures"
             break
@@ -494,12 +510,12 @@ def hc2_loop(adapter, *, run_dir, optimizer, evaluator, params: HC2Params, ctx, 
         champion = None
         if live:
             rnd = evaluator.open_round(live, (incumbent_id, incumbent_dir))
-            map_fn = _pool_map(workers)
+            map_fn = thread_map(workers)
             rung1 = rnd.run_rung(1, map_fn=map_fn)
             if any(v.status == "advance" for v in rung1.values()):
                 rung2 = rnd.run_rung(2, map_fn=map_fn)
             if any(v.status == "advance" for v in (rung2 or rung1).values()):
-                confirm = _run_confirm(rnd, map_fn)
+                confirm = rnd.confirm(map_fn=map_fn)
             champion = rnd.champion
 
         for cid in cids:
@@ -514,18 +530,6 @@ def hc2_loop(adapter, *, run_dir, optimizer, evaluator, params: HC2Params, ctx, 
     _, why = run_dir.budget_exhausted()
     return {"algorithm": algorithm, "best_id": run_dir.best_id, "iterations": len(steps), "accepts": sum(1 for s in steps if s["accepted"]),
             "stop_reason": why or stop or "max_iterations", "steps": steps}
-
-
-def _pool_map(workers: int):
-    def map_fn(fn, jobs):
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            return list(pool.map(fn, jobs))
-    return map_fn
-
-
-def _run_confirm(rnd, map_fn) -> dict:
-    map_fn(rnd.run_job, list(rnd.confirm_jobs()))
-    return rnd.close_confirm()
 
 
 def _rejected_notes(run_dir, n: int) -> list:

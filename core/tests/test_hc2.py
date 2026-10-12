@@ -67,6 +67,9 @@ class FakeRound:
     def run_job(self, job):
         pass
 
+    def confirm(self, map_fn=None):
+        return self.close_confirm()
+
     def close_confirm(self):
         first = sorted(self.cands)[0]
         self.champion = first if self.ev.accept else None
@@ -86,7 +89,7 @@ class FakeEvaluator:
     def confirm_ids(self):
         return list(C_IDS)
 
-    def plan_round(self, k_wanted):
+    def plan_round(self, k_wanted, incumbent_dir=None):
         return RoundPlan(min(k_wanted, self.k), 100, True)
 
     def open_round(self, candidates, incumbent):
@@ -240,3 +243,38 @@ def test_baseline_passes_workers_to_evaluations(tmp_path, monkeypatch):
     monkeypatch.setattr(RunDir, "read_splits", lambda self: SimpleNamespace(train=["a"], val=["b"], test=["c"]))
     harness.baseline(None, seed, run_dir=rd, workers=4)
     assert seen == [("val", 4), ("train", 4)]
+
+
+# ---- against the real P2 evaluator --------------------------------------------------------------
+
+def test_hc2_round_on_the_real_evaluator(tmp_path):
+    from p2_fakes import make_run
+    from cap_evolve import evaluator, harness as h, promotion
+    adapter, rd = make_run(tmp_path, n_train=24, n_val=24, default=0.4, max_metric_calls=3000)
+    h.baseline_pooled(adapter, tmp_path / "seed", run_dir=rd, n_trials=2)
+    params = promotion.P2Params.from_spec({"promotion_rule": "P2", "p2_conf_n": 96, "p2_ctrl_m": 4})
+    ev = evaluator.P2Evaluator(adapter, rd, params)
+    seen = []
+
+    def opt(workdir, instructions):
+        seen.append(Path(workdir))
+        i = len(seen)
+        cfg = json.loads((Path(workdir) / "cfg.json").read_text())
+        cfg.update(default=0.85 if i == 1 else 0.4, salt=i)        # only the first proposal helps
+        (Path(workdir) / "cfg.json").write_text(json.dumps(cfg, indent=1))
+
+    out = hc2.hc2_loop(adapter, run_dir=rd, optimizer=opt, evaluator=ev,
+                       params=hc2.HC2Params(k=3, per_cluster=2), ctx=harness.OptimizerContext(),
+                       max_iterations=1, workers=2)
+    assert len(seen) >= 3 and out["iterations"] >= 3
+    assert out["accepts"] == 1 and rd.best_id != "seed"
+    c_ids = set(ev.confirm_ids())
+    for wd in seen:
+        for f in (wd / "trajectories").glob("*.json"):
+            assert f.name.split("__")[0] not in c_ids
+
+
+def test_split_to_k_gives_distinct_slices_when_clusters_are_few():
+    out = hc2.split_to_k([["a", "b", "c", "d"]], 3)
+    assert len(out) == 3 and sorted(sum(out, [])) == ["a", "b", "c", "d"]
+    assert hc2.split_to_k([["a"]], 3) == [["a"]]
