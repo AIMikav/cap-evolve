@@ -52,6 +52,7 @@ import pregate
 from cap_evolve import RunDir, eval_index, graph, harness, lineage, mdblocks, optimizer_config, posterior
 from cap_evolve.gate import ParetoObjectiveError, _DEFAULT_PARETO_OBJECTIVES
 from cap_evolve.pareto_archive import ArchivePoint, ParetoArchive
+from cap_evolve import helpers as helpers_mod
 from cap_evolve.specfile import spec_for_run
 
 #: Gate measurement concurrency. The default is deliberately low; the ceiling is where the
@@ -533,7 +534,8 @@ def pregate_failure(run_dir, project, parent_tag: str, cand_dir: Path, cmd: str 
                 max_growth=None if cfg.get("max_policy_growth") is None
                 else float(cfg["max_policy_growth"]),
                 strict=bool(cfg.get("strict")), write_tools=cfg.get("write_tools"),
-                tool_dirs=tuple(cfg.get("tool_paths") or ("tools",)))
+                tool_dirs=tuple(cfg.get("tool_paths") or ("tools",)),
+                helpers=helpers_mod.resolve(spec))
         except Exception as e:  # noqa: BLE001
             res = {"ok": True, "failure": "", "warnings": [f"built-in pre-gate crashed: {type(e).__name__}: {e}"]}
         if res["warnings"]:  # surfaced in events.jsonl for the digest; never a refusal

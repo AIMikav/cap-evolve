@@ -123,6 +123,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from cap_evolve import CapabilityAdapter, Rollout, Score, Task
+from cap_evolve import helpers as _helpers
 
 import model_config
 
@@ -591,9 +592,10 @@ if __name__ == "__main__":
 
 
 class _Sandbox:
-    def __init__(self) -> None:
+    def __init__(self, skills_src: Path | None = None) -> None:
         vendor = _Vendor.get()
         data_dir = _data_dir()
+        self.leases = 0     # rollouts currently using this server (skills sandboxes are evicted when idle)
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind(("127.0.0.1", 0))
@@ -605,9 +607,15 @@ class _Sandbox:
             (self.runtime_dir / name).write_text(
                 (vendor["code_dir"] / name).read_text(encoding="utf-8"), encoding="utf-8"
             )
-        (self.runtime_dir / "config.json").write_text(
-            json.dumps({"volumes_path": str(data_dir.resolve())}), encoding="utf-8"
-        )
+        config = {"volumes_path": str(data_dir.resolve())}
+        if skills_src is not None:
+            # v2 helpers: ONLY this candidate's skills/, copied outside the agent view, made read-only on
+            # the host, and bound read-only at /mnt/skills by the vendored jupyter.py (second volume).
+            staged = self.runtime_dir / "skills"
+            _helpers.stage_skills(skills_src, staged, forbid_inside=data_dir)
+            _check_skills_mount_is_gold_free(staged, data_dir)
+            config["skills_path"] = str(staged.resolve())
+        (self.runtime_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
         # Serve the wrapper, not api.py itself: same handlers plus /release (see above).
         (self.runtime_dir / "capevolve_server.py").write_text(_RELEASE_SERVER, encoding="utf-8")
 
@@ -721,6 +729,49 @@ def _get_sandbox() -> _Sandbox:
 
             atexit.register(_sandbox.shutdown)
         return _sandbox
+
+
+_skill_sandboxes: dict[str, _Sandbox] = {}
+#: Idle skills sandboxes (one server per distinct candidate skills tree) kept before the oldest is stopped.
+MAX_SKILL_SANDBOXES = int(os.environ.get("SPREADSHEETBENCH_MAX_SKILL_SANDBOXES", "4"))
+_CONTAINER_SKILLS_ROOT = "/mnt/skills"
+
+
+def _check_skills_mount_is_gold_free(staged: Path, data_dir: Path) -> None:
+    """The gold-free assertion, extended to the second (skills) mount: regular text files only, no gold-named
+    file, no symlink, and the mount must not sit inside the agent view (which holds the inputs)."""
+    bad = _helpers.skills_tree_problems(staged)
+    if bad:
+        raise RuntimeError(f"the skills mount {staged} is not gold-free / clean: {'; '.join(bad[:5])}")
+    d, st = data_dir.resolve(), staged.resolve()
+    if st == d or d in st.parents or st in d.parents:
+        raise RuntimeError(f"the skills mount {st} overlaps the agent view {d}")
+
+
+def _get_skills_sandbox(skills_src: Path) -> _Sandbox:
+    """The sandbox whose containers see exactly ``skills_src`` at /mnt/skills (read-only): one server per
+    distinct skills tree, so a rollout can never read another candidate's helpers. The caller must call
+    ``_release_skills_sandbox`` when its rollout ends."""
+    key = _helpers.skills_hash(skills_src)
+    with _sandbox_lock:
+        sb = _skill_sandboxes.get(key)
+        if sb is None:
+            _preflight_mount(_data_dir())
+            for k in [k for k, v in _skill_sandboxes.items() if v.leases == 0]:
+                if len(_skill_sandboxes) < MAX_SKILL_SANDBOXES:
+                    break
+                _skill_sandboxes.pop(k).shutdown()
+            sb = _skill_sandboxes[key] = _Sandbox(skills_src)
+            import atexit
+
+            atexit.register(sb.shutdown)
+        sb.leases += 1
+        return sb
+
+
+def _release_skills_sandbox(sb: _Sandbox) -> None:
+    with _sandbox_lock:
+        sb.leases = max(0, sb.leases - 1)
 
 
 def _sanitize_conv_id(s: str) -> str:
@@ -1080,7 +1131,10 @@ def _read_task_template(ctx) -> str:
     path = Path(ctx) / "task_template.md"
     if not path.exists():
         return _TASK_TEMPLATE
-    return _TEMPLATE_COMMENT_RE.sub("", path.read_text(encoding="utf-8"), count=1).strip() + "\n"
+    text = _TEMPLATE_COMMENT_RE.sub("", path.read_text(encoding="utf-8"), count=1).strip() + "\n"
+    # v2 helpers: {skills_root} is a plain-replace token (not a format field), resolved here so both the
+    # placeholder check and the render see the mount path. Off => untouched (an unknown placeholder, as in v1).
+    return _helpers.render_skills_root(text, _CONTAINER_SKILLS_ROOT) if _helpers.enabled() else text
 
 
 def _task_template_error(ctx) -> str | None:
@@ -1491,6 +1545,7 @@ class Adapter(CapabilityAdapter):
         # Bound before the try so the finally can release the container on EVERY exit path —
         # the early returns (no output, denied mount, LLM failure) as much as the happy one.
         sandbox: _Sandbox | None = None
+        skills_leased = False
         conv_id = ""
         try:
             # Before ANY work: a candidate whose job description lost a required placeholder
@@ -1502,6 +1557,16 @@ class Adapter(CapabilityAdapter):
                 # failure under errored_trial_policy=fail, not missing data.
                 return Rollout(task_id=task.id, error=tmpl_error,
                                metadata={"error_kind": "candidate"})
+
+            # v2 helpers (off unless helpers.enabled): the candidate's skills/ tree is mounted into the
+            # executor read-only. A tree that cannot be mounted (symlink, gold-named file, binary) is the
+            # candidate's own fault and is refused before any container or LLM call.
+            use_skills = _helpers.enabled() and _helpers.has_skills(Path(ctx))
+            if use_skills:
+                bad_skills = _helpers.skills_tree_problems(Path(ctx) / "skills")
+                if bad_skills:
+                    return Rollout(task_id=task.id, error="skills/ tree refused: " + "; ".join(bad_skills[:5]),
+                                   metadata={"error_kind": "candidate"})
 
             entry = _entries_by_id().get(task.id)
             if entry is None:
@@ -1542,7 +1607,8 @@ class Adapter(CapabilityAdapter):
             )
 
             try:
-                sandbox = _get_sandbox()
+                sandbox = _get_skills_sandbox(Path(ctx) / "skills") if use_skills else _get_sandbox()
+                skills_leased = use_skills
                 client = sandbox.client_for(conv_id)
             except Exception as e:  # noqa: BLE001
                 return Rollout(
@@ -1551,6 +1617,12 @@ class Adapter(CapabilityAdapter):
                 )
 
             system_prompt = _read_system_prompt(ctx)
+            if _helpers.enabled():
+                system_prompt = _helpers.render_skills_root(system_prompt, _CONTAINER_SKILLS_ROOT)
+                if use_skills and (idx := _helpers.skills_index(Path(ctx) / "skills")):
+                    system_prompt = (system_prompt.rstrip() + "\n\nHelper skills (read-only, offline) under "
+                                     f"{_CONTAINER_SKILLS_ROOT}/<name>/ (SKILL.md, scripts/); import or run "
+                                     "their scripts from your Python code:\n" + idx).lstrip()
             # A blank capability means NO system message — that is the no-skill control, and
             # it must not degrade into an empty-string system turn (providers differ on
             # whether they accept one, and a run that half-sends it measures neither thing).
@@ -1634,6 +1706,16 @@ class Adapter(CapabilityAdapter):
                         break
 
             if not case1_path.exists():
+                crash = _helpers.helper_crash_in(exec_results, _CONTAINER_SKILLS_ROOT) if use_skills else None
+                if crash:
+                    # The candidate's own helper raised and no answer was written: a measured failure
+                    # (error_kind=candidate), not missing data, so crashing out of a task cannot help.
+                    return Rollout(
+                        task_id=task.id, output=last_code, trace=messages, cost_usd=cost, tokens=tokens,
+                        error=f"candidate helper crashed: {crash}",
+                        metadata={"run_tag": run_tag, "id": sid, "model": model_config.MODEL, "seed": seed,
+                                  **_helpers.candidate_fault_metadata(crash)},
+                    )
                 blocked = _sandbox_access_denied(exec_results, container_out_dir)
                 if blocked:
                     # Name the fault precisely: a denial on the OUTPUT dir is the uid
@@ -1693,6 +1775,8 @@ class Adapter(CapabilityAdapter):
             # needs the container alive.
             if sandbox is not None and conv_id:
                 sandbox.release(conv_id)
+            if skills_leased and sandbox is not None:
+                _release_skills_sandbox(sandbox)
 
     # ---- scoring -------------------------------------------------------------
 

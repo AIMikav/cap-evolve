@@ -57,6 +57,7 @@ from cap_evolve import (RunDir, eval_index, graph, harness, hypotheses, optimize
                         schema_v2)
 from cap_evolve.candidate_graph import CandidateGraph
 from cap_evolve.rundir import _file_lock
+from cap_evolve import helpers as helpers_mod
 from cap_evolve.specfile import spec_for_run
 
 HERE = Path(__file__).resolve().parent
@@ -219,7 +220,8 @@ def propose(a, ctx):
     pg = {"skipped": "ablation pregate=false"}
     if ctx.cfg["pregate"]:
         cmd = [PY, HERE / "pregate.py", "--candidate", work, "--parent", digest.cand_dir(run_dir, parent),
-               "--run-dir", ctx.root] + (["--strict"] if ctx.strict else [])
+               "--run-dir", ctx.root] + (["--strict"] if ctx.strict else []) + (
+            ["--helpers-config", json.dumps(helpers_mod.resolve(ctx.spec))] if helpers_mod.enabled(ctx.spec) else [])
         rc, so, se = sh(cmd)
         pg = jload(so)
         if pg is None or rc not in (0, 1):

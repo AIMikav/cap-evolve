@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from cap_evolve import CapabilityAdapter, Rollout, Score, Task
+from cap_evolve import helpers as _helpers
 
 DOMAIN = "airline"
 
@@ -502,6 +503,14 @@ class Adapter(CapabilityAdapter):
         except Exception:
             messages = None
 
+        fault_meta: dict = {}
+        if _helpers.enabled() and reward < 1.0 and (hit := _helpers.fault_in_messages(messages)):
+            # v2 helpers: a helper method in the candidate's tools.py (decorated ``@candidate_helper``)
+            # raised during the sim. A candidate fault scores 0 under errored_trial_policy=fail; it is
+            # not missing data, so crashing out of a hard task cannot raise the mean.
+            error = f"candidate helper fault: {hit}"
+            fault_meta = _helpers.candidate_fault_metadata(hit)
+
         if error is None and reward < 1.0 and _leaked_stop_continuation(messages):
             error = (
                 "tau2 user-simulator emitted ###STOP### alongside leaked reasoning that "
@@ -527,6 +536,7 @@ class Adapter(CapabilityAdapter):
                 "tau2_reward_info": reward_info_dump,
                 "termination_reason": str(term),
                 **cost_meta,
+                **fault_meta,
             },
         )
 

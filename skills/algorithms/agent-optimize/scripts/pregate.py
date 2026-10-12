@@ -20,6 +20,11 @@ Checks (each ``{name, ok, detail, skipped, warnings?, error?}``):
   for undecorated names), else the parent's decorated-WRITE names and the public-name prefixes
   in ``WRITE_PREFIXES``. Plain helpers (``format_reservation``) are never writes.
 * ``tool_smoke``    — changed tools re-run on ``tool_fixtures.jsonl`` rows; a NEW exception fails.
+* ``helper_surface`` / ``helper_lint`` / ``helper_smoke`` — only when ``helpers.enabled`` (v2, D6):
+  executable files only in the surface's declared dirs; a lint refusing task ids, copied answers,
+  task-identity branches, evaluator paths, network and subprocess use; and the smoke run (import,
+  two deterministic runs on recorded-trace fixtures, writes only to declared outputs, no network, no
+  gold). A failure here costs 0 rollouts. See ``cap_evolve.helpers`` / ``cap_evolve.helper_smoke``.
 * ``replay``        — tool-call-level replay (below). Candidate must equal the parent on tools
   UNCHANGED between them; diffs on changed tools are info only (a legitimate fix changes them).
 
@@ -416,15 +421,37 @@ def _smoke_and_replay(cand, parent, factory_spec, fixtures, traces, tool_dirs, s
     return out
 
 
+def helper_checks(cand: Path, parent: Path | None, cfg: dict, traces=(), strict=False) -> list[dict]:
+    """The three v2 helper checks for a resolved ``cap_evolve.helpers`` config (empty when off)."""
+    from cap_evolve import helper_smoke, helpers
+    if not cfg or not cfg.get("enabled"):
+        return []
+    out = [_guard("helper_surface", lambda: (lambda p: _check("helper_surface", not p, "; ".join(p)))(
+        helpers.surface_problems(cand, cfg)), strict)]
+    if cfg.get("lint", True):
+        def lint():
+            r = helpers.lint_candidate(cand, cfg, parent)
+            return _check("helper_lint", r["ok"], "; ".join(r["findings"][:8]), files=r["files"])
+        out.append(_guard("helper_lint", lint, strict))
+    if cfg.get("smoke", True):
+        def smoke():
+            rows = helper_smoke.load_fixtures(Path(cfg["fixtures"]) if cfg.get("fixtures") else None, traces)
+            r = helper_smoke.run_smoke(cand, cfg, parent=parent, fixtures=rows)
+            return _check("helper_smoke", r["ok"], r["detail"], skipped=r["skipped"], runs=r["runs"])
+        out.append(_guard("helper_smoke", smoke, strict))
+    return out
+
+
 def run(cand: Path, parent: Path | None = None, *, fixtures: Path | None = None,
         toolkit: str | None = None, traces: list[Path] = (), max_growth: float | None = None,
-        strict: bool = False, write_tools=None, tool_dirs=("tools",)) -> dict:
+        strict: bool = False, write_tools=None, tool_dirs=("tools",), helpers: dict | None = None) -> dict:
     explicit = set(write_tools) if write_tools else None
     checks = [_guard("static", lambda: static_check(cand, parent, max_growth, tool_dirs), strict)]
     if checks[0]["ok"] or checks[0].get("error"):  # nothing below is meaningful on code that does not compile
         checks.append(_guard("hidden_writes",
                              lambda: hidden_writes_dirs(cand, parent, tool_dirs, explicit), strict))
         checks += _smoke_and_replay(cand, parent, toolkit, fixtures, traces, tool_dirs, strict)
+        checks += helper_checks(cand, parent, helpers or {}, traces, strict)
     failed = [c for c in checks if not c["ok"]]
     return {"ok": not failed, "checks": checks,
             "warnings": [w for c in checks for w in c.get("warnings") or []],
@@ -443,12 +470,15 @@ def main(argv=None) -> int:
                    help=f"FAIL above this policy growth fraction (default: only warn above "
                         f"{MAX_POLICY_GROWTH:.2f})")
     p.add_argument("--strict", action="store_true", help="infra errors in checks fail instead of warn")
+    p.add_argument("--helpers-config", help="JSON: the resolved cap_evolve.helpers.resolve(spec) config "
+                                            "(default: off, v1 behaviour)")
     p.add_argument("--write-tool", action="append", default=[], help="explicit write tool name (repeatable)")
     a = p.parse_args(argv)
     fx = Path(a.fixtures) if a.fixtures else (Path(a.run_dir) / "tool_fixtures.jsonl" if a.run_dir else None)
     res = run(Path(a.candidate), Path(a.parent) if a.parent else None, fixtures=fx,
               toolkit=a.toolkit, traces=[Path(t) for t in a.trace], max_growth=a.max_policy_growth,
-              strict=a.strict, write_tools=a.write_tool)
+              strict=a.strict, write_tools=a.write_tool,
+              helpers=json.loads(a.helpers_config) if a.helpers_config else None)
     print(json.dumps(res, indent=2))
     return 0 if res["ok"] else 1
 

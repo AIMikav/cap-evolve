@@ -290,13 +290,19 @@ class JupyterGatewayDocker:
         absolute_path = os.path.abspath(docker_config['volumes_path'])
 
         port = self._get_free_port()
+        volumes = {absolute_path: {'bind': '/mnt/data', 'mode': 'rw'}}
+        # CapEvolve (v2 helpers): an optional SECOND bind, read-only and outside the data mount,
+        # holding only the current candidate's skills/ tree. Absent key => unchanged behaviour.
+        skills_path = docker_config.get('skills_path')
+        if skills_path:
+            volumes[os.path.abspath(skills_path)] = {'bind': '/mnt/skills', 'mode': 'ro'}
         # Run the container and expose the port
         self.container = self.client.containers.run(
             self.DOCKER_IMAGE,
             name=self.name,
             detach=True,
             ports={"8888/tcp": port},
-            volumes={absolute_path: {'bind': '/mnt/data', 'mode': 'rw'}},
+            volumes=volumes,
             remove=True,  # Removes container when it's stopped
             **self.RESOURCE_CONSTRAINTS,
         )
