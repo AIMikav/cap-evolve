@@ -523,6 +523,7 @@ def _evaluate_candidate(
     """
     workers = _resolve_workers(workers)
     errored_policy = resolve_errored_policy(errored_policy, run_dir)
+    attribute = gatecfg.GateConfig.for_run(run_dir).fault_attribution
     n_reclassified = 0      # candidate-attributed errors counted as 0.0 (policy=fail)
     if split == "test":
         run_dir.reserve_test()  # raises TestSealError on reuse; does NOT burn the seal yet
@@ -732,9 +733,9 @@ def _evaluate_candidate(
     run_dir.log_event("eval_start", split=split, tag=tag, n_tasks=len(tasks),
                       n_trials=n_trials, workers=workers,
                       rollouts=len(tasks) * max(1, int(n_trials)),
-                      **({"subset": True} if ids is not None else {}))
+                      **({"subset": True} if ids is not None else {}),
+                      **({"fault_attribution": True} if attribute else {}))
 
-    attribute = gatecfg.GateConfig.for_run(run_dir).fault_attribution
     with contextlib.redirect_stdout(sys.stderr), _live(adapter, candidate_dir) as ctx, \
             (candidate_scope(candidate_dir, ctx if isinstance(ctx, (str, os.PathLike)) else None)
              if attribute else contextlib.nullcontext()):

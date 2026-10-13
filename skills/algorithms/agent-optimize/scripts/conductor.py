@@ -69,6 +69,7 @@ class Cfg:
     max_confirm: int = 1                # simultaneous confirmations
     target_alive: int | None = None     # nodes in flight before confirm; default K (K=1 => serial = hill-climb)
     merge: bool = False
+    merge_bar: float = policy.COMPLEMENTARY   # complementarity a pair of tips needs to be merged
     job_token_cap: int = 150_000
     chunk_timeout: float = 3 * 3600.0
     eval_retries: int = 3
@@ -78,6 +79,7 @@ class Cfg:
     ref_pooled: bool = False            # screen reference = all of the champion's draws (pooled splits)
     params: promotion.PromotionParams = dataclasses.field(default_factory=promotion.PromotionParams)
     p2: object | None = None            # promotion.P2Params when promotion_rule is P2 (round mode)
+    cost_eps: float | None = None       # second objective (a ``cost`` objective in the spec): cost per success
     pipeline: int = 1                   # P2: proposals may run this many rounds ahead of the evaluating round
     caps: policy.Caps = dataclasses.field(default_factory=policy.Caps)
 
@@ -88,7 +90,7 @@ class Cfg:
     @classmethod
     def from_spec(cls, spec: dict, budget: dict | None = None) -> "Cfg":
         spec, budget = spec or {}, budget or {}
-        refuse_multi_objective(spec)
+        cost_eps = refuse_multi_objective(spec)
         params = promotion.PromotionParams.from_spec({"promotion_rule": "P", **spec}) or promotion.PromotionParams()
         deadline = spec.get("deadline_utc")
         if deadline:
@@ -116,26 +118,36 @@ class Cfg:
             finalize_tokens=num("ao_finalize_tokens", default=0))
         k = num("ao_k_prop", default=1)
         p2 = promotion.P2Params.from_spec(spec) if hasattr(promotion, "P2Params") else None
+        if p2 and cost_eps is not None:
+            raise Refused("a `cost` objective is supported with promotion_rule P only, not P2")
         return cls(slots=num("ao_slots", "gateway_max_concurrency", default=cls.slots), k_prop=k,
                    chunk=caps.chunk, rungs=tuple(int(x) for x in (spec.get("ao_rungs") or ())),
                    screen_n=num("ao_screen_n", default=1), max_confirm=num("ao_max_confirm", default=1),
                    target_alive=num("ao_target_alive"), merge=bool(spec.get("ao_merge")),
                    job_token_cap=job_cap, chunk_timeout=num("ao_chunk_timeout", cast=float, default=cls.chunk_timeout),
                    seed=num("ao_seed", default=0), tick_s=num("ao_tick_s", cast=float, default=cls.tick_s), ref_pooled=spec.get("split_mode") == "pooled",
-                   params=params, caps=caps, p2=p2, pipeline=num("ao_pipeline", default=2 if p2 and k > 1 else 1))
+                   params=params, caps=caps, p2=p2, pipeline=num("ao_pipeline", default=2 if p2 and k > 1 else 1),
+                   cost_eps=cost_eps, merge_bar=num("ao_merge_bar", cast=float, default=policy.COMPLEMENTARY))
 
 
-def refuse_multi_objective(spec: dict) -> None:
-    """AO optimizes ONE scalar objective. Objectives declared with a role other than ``display``
-    (gate / pareto / epsilon-constraint) make it multi-objective: refuse, loudly, before spending."""
+def refuse_multi_objective(spec: dict) -> float | None:
+    """AO optimizes reward, plus at most ONE second objective: ``cost`` (minimize), read as cost per
+    success (see ``policy.mo_verdict``). Returns its tolerance ``eps`` (objective ``eps``, else spec
+    ``ao_cost_eps``, default 0.10), None when there is no cost objective. Any other objective declared
+    with a role other than ``display`` (gate / pareto / epsilon-constraint): refuse, loudly, before spending."""
     objs = [o for o in (spec.get("objectives") or []) if isinstance(o, dict)]
-    active = [o for o in objs if o.get("role") != "display" and o.get("name") not in (None, "reward")]
+    cost = [o for o in objs if o.get("role") != "display" and o.get("name") == "cost"
+            and o.get("direction", "minimize") in ("minimize", "min")]
+    active = [o for o in objs if o.get("role") != "display" and o.get("name") not in (None, "reward")
+              and o not in cost]
     if len(active) > 0 or spec.get("pareto") or spec.get("objective_mode") in ("pareto", "multi"):
         names = [o.get("name") for o in active] or ["pareto"]
-        raise Refused("agent-optimize (AO-2) optimizes a single scalar objective; this spec declares "
-                      f"additional gating objectives {names}. Cost is reported, never optimized: mark "
-                      "cost objectives `role: display` (reported only), or use hill-climb for "
-                      "multi-objective search.")
+        raise Refused("agent-optimize (AO-2) optimizes a single scalar objective, plus optionally `cost` "
+                      f"(cost per success); this spec declares additional gating objectives {names}. Mark "
+                      "them `role: display` (reported only), or use hill-climb for other multi-objective search.")
+    if cost:
+        return float(cost[0].get("eps", spec.get("ao_cost_eps", 0.10)))
+    return None
 
 
 # ---- backend contract -------------------------------------------------------------------------
@@ -149,6 +161,7 @@ class Backend:
     def cap_hash(self, tag: str) -> str | None: raise NotImplementedError
     def missing(self, tag: str, ids, window: tuple[int, int]) -> dict[str, int]: raise NotImplementedError
     def rewards(self, tag: str, ids, window: tuple[int, int] | None) -> dict[str, list[float]]: raise NotImplementedError
+    def costs(self, tag: str, ids, window: tuple[int, int] | None) -> dict[str, list]: return {}   # aligned with rewards
     def spent_rollouts(self) -> int: raise NotImplementedError
     def spent_tokens(self) -> int: return 0
     def best_reward(self, tag: str) -> float | None: return None
@@ -366,9 +379,25 @@ class Conductor:
         if j["kind"] in ("propose", "merge"):
             self._lost_proposal(j)
 
+    def _missing(self, tag, ids, window) -> dict:
+        """``b.missing`` minus cells dropped after ``eval_retries`` runs that never landed (a rollout that
+        always errors): missing data, which ``paired_deltas`` already drops, never a wait forever."""
+        drop = self.st.get("dropped_cells", {})
+        lo, hi = window_key(window)
+        return {t: k for t, k in self.b.missing(tag, ids, window).items() if f"{tag}|{t}|{lo}|{hi}" not in drop}
+
     def _reaped_eval(self, j, res) -> None:
         if j.get("p2seq") or j.get("p2"):
             return self._p2_reaped(j, res)
+        if res.get("ok", True):
+            lo, hi = window_key(j["window"])
+            tries, drop = self.st.setdefault("cell_tries", {}), self.st.setdefault("dropped_cells", {})
+            for t in self.b.missing(j["tag"], j["ids"], j["window"]):
+                key = f"{j['tag']}|{t}|{lo}|{hi}"
+                tries[key] = tries.get(key, 0) + 1
+                if tries[key] >= self.cfg.eval_retries and key not in drop:
+                    drop[key] = tries[key]
+                    self.b.log("cell_dropped", tag=j["tag"], task=t, window=[lo, hi], tries=tries[key])
         n = self.st["nodes"].get(j.get("owner"))
         if not res.get("ok", True) and n is not None:
             n["eval_failures"] = int(n.get("eval_failures", 0)) + 1
@@ -460,6 +489,11 @@ class Conductor:
         if self.st["epoch"] != self.st.get("rebased_epoch", 0):
             self._rebase_all()
 
+    def _cps(self, tag, ids, w, ref, ref_w) -> dict:
+        """Paired cost per success of ``tag`` (window ``w``) vs ``ref`` (window ``ref_w``) on ``ids``."""
+        return policy.cost_per_success(self.b.rewards(tag, ids, w), self.b.costs(tag, ids, w),
+                                       self.b.rewards(ref, ids, ref_w), self.b.costs(ref, ids, ref_w))
+
     def _ref(self) -> dict:
         w = self.ref_window(self.champion)
         return self.b.rewards(self.champion, self.screen_ids(), w)
@@ -479,7 +513,7 @@ class Conductor:
         for _ in range(len(self.cfg.rungs) + 2):
             ids = self._stage_ids(n)
             full = ids == self.screen_ids()
-            if self.b.missing(tag, ids, (0, self.cfg.screen_n)) or self.b.missing(self.champion, ids, self.ref_want(self.champion)):
+            if self._missing(tag, ids, (0, self.cfg.screen_n)) or self._missing(self.champion, ids, self.ref_want(self.champion)):
                 n["status"] = "rung" if not full else "full"
                 return
             deltas = policy.paired_deltas(self._cand_rewards(tag, ids), self._ref(), ids)
@@ -496,8 +530,13 @@ class Conductor:
             n["screen"] = {k: (None if isinstance(v, float) and v != v else v) for k, v in s.items() if k != "z"}
             n["screen_n"] = s["n"]
             n["p_beat"] = policy.p_beat(deltas)
+            route = "reward"
+            if self.cfg.cost_eps is not None:
+                cps = self._cps(tag, ids, (0, FRESH_BASE), self.champion, self.ref_window(self.champion))
+                s["pass"], route = policy.mo_verdict(s["pass"], s["mean"], s["se"], s["n"], cps, self.cfg.cost_eps, self.cfg.params.k_se)
+                n["screen"]["cost_rel"], n["screen"]["route"] = round(cps.get("rel", 0.0), 4), route
             if not s["pass"]:
-                self._finish_node(tag, "pruned", "screen_reject", {"stage": "screen", "mean_delta": round(s["mean"], 6)})
+                self._finish_node(tag, "pruned", "screen_reject", {"stage": "screen", "mean_delta": round(s["mean"], 6), "route": route})
             else:
                 n["status"] = "screened"
                 self.b.node_event(tag, "gated", stage="screened", mean_delta=round(s["mean"], 6), se=round(s["se"], 6))
@@ -526,12 +565,18 @@ class Conductor:
         ids = self.b.confirm_ids()
         w = (n["k0"], n["k0"] + self.cfg.params.n_conf)
         ref = n["ref"]
-        if self.b.missing(tag, ids, w) or self.b.missing(ref, ids, w):
+        if self._missing(tag, ids, w) or self._missing(ref, ids, w):
             return
         deltas = policy.paired_deltas(self.b.rewards(tag, ids, w), self.b.rewards(ref, ids, w), ids)
         p = self.cfg.params
         c = promotion.confirm(deltas, p.dmin, p.z_conf, n.get("screen_n"), p.min_coverage)
         ev = {"stage": "confirm", "confirm_mean": round(c["mean"], 6), "z": None if c["z"] in (float("inf"), float("-inf")) else round(c["z"], 4)}
+        if self.cfg.cost_eps is not None:
+            cps = self._cps(tag, ids, w, ref, w)
+            ok, route = policy.mo_verdict(c["pass"], c["mean"], c["se"], c["n"], cps, self.cfg.cost_eps, p.z_conf)
+            c["pass"] = ok and c["n"] >= 2 and c["coverage"] >= p.min_coverage
+            ev.update(route=route, cost_per_success_rel=round(cps.get("rel", 0.0), 4),
+                      cost_z=None if abs(cps.get("z", 0.0)) == float("inf") else round(cps.get("z", 0.0), 4))
         if not c["pass"]:
             self._finish_node(tag, "rejected", "confirm_reject", ev)
             return
@@ -590,7 +635,7 @@ class Conductor:
         else:
             eligible = [t for t in tips if self.node(t)["status"] == "screened"
                         or (self.node(t)["status"] in ("full", "rung") and self.node(t).get("rung", 0) >= 1)]
-        pairs = policy.merge_pairs(eligible, wins, self.b.related, merged)
+        pairs = policy.merge_pairs(eligible, wins, self.b.related, merged, bar=self.cfg.merge_bar)
         if pairs:
             a, b, _ = pairs[0]
             self.st.setdefault("merged_pairs", []).append(sorted((a, b)))
@@ -648,7 +693,7 @@ class Conductor:
         else:
             wants = self._wants()
         for prio, _k, tag, ids, window, owner, purpose in wants:
-            miss = self.b.missing(tag, ids, window)
+            miss = self._missing(tag, ids, window)
             for t in self._inflight(tag, window):
                 miss.pop(t, None)
             for ch in policy.chunks(miss, self.cfg.chunk):
@@ -911,8 +956,8 @@ class Conductor:
         confirming = [t for t, n in self.st["nodes"].items() if n["status"] == "confirming"]
         for t in confirming:
             n = self.node(t)
-            if not cs.live(self.st, "eval") and (self.b.missing(t, self.b.confirm_ids(), (n["k0"], n["k0"] + self.cfg.params.n_conf))
-                                                or self.b.missing(n["ref"], self.b.confirm_ids(), (n["k0"], n["k0"] + self.cfg.params.n_conf))):
+            if not cs.live(self.st, "eval") and (self._missing(t, self.b.confirm_ids(), (n["k0"], n["k0"] + self.cfg.params.n_conf))
+                                                or self._missing(n["ref"], self.b.confirm_ids(), (n["k0"], n["k0"] + self.cfg.params.n_conf))):
                 if not self._confirm_launchable(t, n):
                     n["status"] = "unconfirmed"
                     n["reserved"] = 0

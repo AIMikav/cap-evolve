@@ -179,14 +179,15 @@ class RealBackend(P2Port, conductor.Backend):
             self._hash[key] = eval_index.cap_hash(d)
         return self._hash[key]
 
-    def _cells(self, tag, ids, window):
+    def _cells(self, tag, ids, window, field="reward"):
         h, fp, lo, hi = self.cap_hash(tag), eval_index.env_fp(), *window
         want = set(map(str, ids))
         out: dict[str, dict[int, float]] = {}
         for r in self._ledger():
             if (r["cap_hash"] == h and r["split"] == "val" and r["env_fp"] == fp and r["task"] in want
                     and lo <= int(r["trial_idx"]) < hi):
-                out.setdefault(r["task"], {})[int(r["trial_idx"])] = float(r["reward"])
+                v = r[field] if field == "reward" else r.get(field)
+                out.setdefault(r["task"], {})[int(r["trial_idx"])] = None if v is None else float(v)
         return out
 
     def missing(self, tag, ids, window):
@@ -196,6 +197,11 @@ class RealBackend(P2Port, conductor.Backend):
 
     def rewards(self, tag, ids, window):
         cells = self._cells(tag, ids, window if window is not None else (0, 10 ** 12))
+        return {t: [c[k] for k in sorted(c)] for t, c in cells.items()}
+
+    def costs(self, tag, ids, window):
+        """Per-cell agent cost (USD), aligned with ``rewards``; None where the row has none."""
+        cells = self._cells(tag, ids, window if window is not None else (0, 10 ** 12), "cost")
         return {t: [c[k] for k in sorted(c)] for t, c in cells.items()}
 
     def initial_champion(self):
@@ -236,8 +242,9 @@ class RealBackend(P2Port, conductor.Backend):
 
     def eval_cmd(self, job) -> list[str]:
         tag, ids, (lo, hi) = job["tag"], job["ids"], job["window"]
-        if lo == 0:
-            return act.topup_cmd(self.ctx, tag, hi, ids)
+        # ponytail: always the exact trial window, never --topup-to (that numbers refills after the tag's
+        # highest k, so an errored trial 1 came back as trial 2 and the window [0, 2) waited forever).
+        # A partial refill re-runs the cells it already has; dedupe per cell if that waste ever matters.
         cmd = eval_index.eval_cmd(self.root, self.project, tag, "val", hi - lo, ids=ids, trial_offset=lo,
                                   fixed_seeds=True, skills_dir=SKILLS)
         cmd[cmd.index("--candidate") + 1] = str(digest.cand_dir(self.run_dir, tag))
@@ -258,10 +265,19 @@ class RealBackend(P2Port, conductor.Backend):
     def _start_llm(self, job):
         tag, parent, kind = job["tag"], job["parent"], job["kind"]
         work = self.ctx.work(tag)
-        if kind == "propose":
+        conflicts = job.get("conflicts")
+        if kind == "merge":
+            # merge_n stops on a conflict without writing a merge dir: the job edits a copy of the trunk
+            # and ports the donor's version of each conflicting block, read from the donor's own dir.
+            parent = job["parent"] = ((conflicts or [{}])[0].get("trunk") or [parent])[0]   # register() diffs against it
+            conflicts = [f"{c.get('where')} (port the version in {digest.cand_dir(self.run_dir, (c.get('donor') or ['?'])[0])})"
+                         if isinstance(c, dict) else str(c) for c in conflicts or []]
+        if kind == "propose" or (kind == "merge" and not work.exists()):
             if work.exists():
                 shutil.rmtree(work)                 # a retry starts from a clean copy of the parent
-            rc, out, err = act.sh([act.PY, HERE / "prepare_candidate.py", "-r", self.root, "-t", tag, "--parent", parent])
+            rc, out, err = act.sh([act.PY, HERE / "prepare_candidate.py", "-r", self.root, "-t", tag, "--parent", parent,
+                                   "--source", digest.cand_dir(self.run_dir, parent),     # an unpromoted tip lives in work/
+                                   "--allow-uncommitted-source"])
             if rc != 0:
                 raise RuntimeError(f"prepare_candidate failed: {(err or out)[-300:]}")
             (work.parent / f".parent_{tag}").write_text(parent)
@@ -269,13 +285,16 @@ class RealBackend(P2Port, conductor.Backend):
             dg, text = digest.fit(digest.build(self.run_dir, self.project, self.spec))
         except Exception:  # noqa: BLE001 - a digest failure must not stop a proposal
             dg, text = {}, ""
+        if self.cfg.cost_eps is not None:
+            text = ("Objectives: reward first, then cost per success (agent USD per unit reward); an edit that "
+                    "adds cost per success beyond " f"{self.cfg.cost_eps:.0%} is rejected even when reward rises.\n" + text)
         taken = {j.get("cluster") for j in conductor_jobs(self.root) if j.get("state") in ("queued", "running")}
-        cluster = proposer.pick_cluster(dg, int(job.get("slot") or 0), taken)
+        cluster = proposer.pick_cluster(dg, int(job.get("slot") or 0), taken) if kind == "propose" else None
         job["cluster"] = (cluster or {}).get("id")
         log, rcf, prompt = self._paths(job)
         prompt.write_text(proposer.build_prompt(workdir=work, parent=parent, cluster=cluster, digest_text=text,
                                                 strict=bool(job.get("strict")), kind=kind,
-                                                conflicts=job.get("conflicts")), encoding="utf-8")
+                                                conflicts=conflicts), encoding="utf-8")
         cmd = [act.PY, RUN_OPTIMIZER, "--name", self.optimizer, "--workdir", work, "--prompt", prompt, "--json",
                "--transcript", str(self.transcript(job))]
         turns = int(self.spec.get("optimizer_max_turns") or 40)
