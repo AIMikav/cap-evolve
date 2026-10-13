@@ -117,6 +117,7 @@ rollout. Without the flag, nothing here runs and the loop below is unchanged.
 | cluster stuck (2 failed attempts) | re-read raw full traces (never test), change the edit FORM, not wording |
 | same tool-error signature across tasks | fix it in tool code; no multi-task argument needed |
 | pregate warning (tool fixture fails, policy growth) | fix before any probe; it is free |
+| same procedure fails or is redone by hand in >= 2 distinct traces, surface allows scripts | codify it into a helper ([`references/helpers.md`](references/helpers.md)); 1 trace never justifies one |
 | tip at full coverage, P(beat champion) high | `promote` |
 | tip P(beat parent) low after full probe | `prune` with the numbers |
 | tip partial coverage, undecided | `probe --auto` for more cells |
@@ -157,5 +158,6 @@ One level deep; load only when the digest points there.
 - [`references/objectives-cost.md`](references/objectives-cost.md) — cost gating, budget, stop_condition. **Load** when objectives are set or budget is tight.
 - [`references/ablation.md`](references/ablation.md) — the seven switches. **Load** before disabling any.
 - [`references/tool-edit-lessons.md`](references/tool-edit-lessons.md) — edit forms, guard closure. **Load** before editing a surface the first time or after a stuck cluster.
+- [`references/helpers.md`](references/helpers.md) — when to codify a procedure into a deterministic helper, and the lint/smoke it must pass. **Load** when the surface allows scripts and a procedure recurs.
 - [`references/stats.md`](references/stats.md) — what the numbers resolve, sign test. **Load** when a result surprises you.
 - [`references/legacy.md`](references/legacy.md) — all switches off: pointer to the archived round-loop docs. **Load** only in legacy mode (old SKILL sections live in docs/archive/agent-optimize-legacy/legacy-SKILL.md).

@@ -123,6 +123,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from cap_evolve import CapabilityAdapter, Rollout, Score, Task
+from cap_evolve import helpers as _helpers
 
 import model_config
 
@@ -190,6 +191,8 @@ REWARD_RECALC = os.environ.get("SPREADSHEETBENCH_REWARD_RECALC", "0") == "1"
 # Where the vendored sandbox bind-mounts SPREADSHEETBENCH_DATA_DIR inside every container
 # (code_exec_docker/jupyter.py hardcodes this bind target).
 _CONTAINER_DATA_ROOT = "/mnt/data"
+#: v2 helpers reach the kernel as TEXT (cap_evolve.helpers.kernel_bootstrap), importable as skills.<skill>.<script>.
+_SKILLS_IMPORT_ROOT = "skills"
 LIBRE_TIMEOUT = int(os.environ.get("SPREADSHEETBENCH_LIBREOFFICE_TIMEOUT", "120"))
 
 _TASK_TEMPLATE = """You need to solve the following spreadsheet manipulation question. It contains six pieces of information:
@@ -1080,7 +1083,10 @@ def _read_task_template(ctx) -> str:
     path = Path(ctx) / "task_template.md"
     if not path.exists():
         return _TASK_TEMPLATE
-    return _TEMPLATE_COMMENT_RE.sub("", path.read_text(encoding="utf-8"), count=1).strip() + "\n"
+    text = _TEMPLATE_COMMENT_RE.sub("", path.read_text(encoding="utf-8"), count=1).strip() + "\n"
+    # v2 helpers: {skills_root} is a plain-replace token (not a format field), resolved here so both the
+    # placeholder check and the render see it. Off => untouched (an unknown placeholder, as in v1).
+    return _helpers.render_skills_root(text, _SKILLS_IMPORT_ROOT) if _helpers.enabled() else text
 
 
 def _task_template_error(ctx) -> str | None:
@@ -1503,6 +1509,22 @@ class Adapter(CapabilityAdapter):
                 return Rollout(task_id=task.id, error=tmpl_error,
                                metadata={"error_kind": "candidate"})
 
+            # v2 helpers (off unless helpers.enabled): the candidate's skills/*/scripts are defined once in
+            # the rollout's own kernel (text only: no mount, nothing under the data view, and only THIS
+            # candidate's code is ever visible). A tree that cannot be loaded is the candidate's fault.
+            use_skills = _helpers.enabled() and _helpers.has_skills(Path(ctx))
+            bootstrap_src = ""
+            if use_skills:
+                bad_skills = _helpers.skills_tree_problems(Path(ctx) / "skills")
+                try:
+                    if not bad_skills:
+                        bootstrap_src = _helpers.kernel_bootstrap(Path(ctx) / "skills")
+                except (ValueError, OSError, SyntaxError) as e:
+                    bad_skills = [str(e)]
+                if bad_skills:
+                    return Rollout(task_id=task.id, error="skills/ tree refused: " + "; ".join(bad_skills[:5]),
+                                   metadata={"error_kind": "candidate"})
+
             entry = _entries_by_id().get(task.id)
             if entry is None:
                 return Rollout(task_id=task.id, error=f"task id {task.id} not found in dataset")
@@ -1550,7 +1572,28 @@ class Adapter(CapabilityAdapter):
                     metadata={"run_tag": run_tag, "error_kind": "infra"},
                 )
 
+            if bootstrap_src:
+                try:
+                    boot = vendor["exec_code"](client, bootstrap_src)
+                except Exception as e:  # noqa: BLE001
+                    return Rollout(task_id=task.id, error=f"sandbox exec failed: {e}",
+                                   metadata={"run_tag": run_tag, "error_kind": "infra"})
+                if not _helpers.bootstrap_ok(boot):
+                    # The candidate's fault only when its own code is named (the fault marker, or a helper
+                    # frame); a busy / timed-out / dead kernel is infrastructure and must not be scored.
+                    crash = _helpers.helper_crash_in([boot], _helpers.KERNEL_ROOT)
+                    if crash:
+                        return Rollout(task_id=task.id, error=f"candidate helpers failed to load: {crash}",
+                                       metadata={"run_tag": run_tag, **_helpers.candidate_fault_metadata(crash)})
+                    why = (boot.strip().splitlines() or ["no output"])[-1][:300]
+                    return Rollout(task_id=task.id, error=f"sandbox could not load the helpers: {why}",
+                                   metadata={"run_tag": run_tag, "error_kind": "infra"})
+
             system_prompt = _read_system_prompt(ctx)
+            if _helpers.enabled():
+                system_prompt = _helpers.render_skills_root(system_prompt, _SKILLS_IMPORT_ROOT)
+                if use_skills and (idx := _helpers.skills_prompt(Path(ctx) / "skills")):
+                    system_prompt = (system_prompt.rstrip() + "\n\n" + idx).lstrip()
             # A blank capability means NO system message — that is the no-skill control, and
             # it must not degrade into an empty-string system turn (providers differ on
             # whether they accept one, and a run that half-sends it measures neither thing).
@@ -1634,7 +1677,21 @@ class Adapter(CapabilityAdapter):
                         break
 
             if not case1_path.exists():
+                # A sandbox denial is checked first: it is infrastructure whatever else was printed. Only the
+                # LAST result is looked at for a helper crash (an early crash the agent then worked around
+                # says nothing about why no answer exists now).
                 blocked = _sandbox_access_denied(exec_results, container_out_dir)
+                crash = (None if blocked or not use_skills
+                         else _helpers.helper_crash_in(exec_results[-1:], _helpers.KERNEL_ROOT))
+                if crash:
+                    # The candidate's own helper raised and no answer was written: a measured failure
+                    # (error_kind=candidate), not missing data, so crashing out of a task cannot help.
+                    return Rollout(
+                        task_id=task.id, output=last_code, trace=messages, cost_usd=cost, tokens=tokens,
+                        error=f"candidate helper crashed: {crash}",
+                        metadata={"run_tag": run_tag, "id": sid, "model": model_config.MODEL, "seed": seed,
+                                  **_helpers.candidate_fault_metadata(crash)},
+                    )
                 if blocked:
                     # Name the fault precisely: a denial on the OUTPUT dir is the uid
                     # mismatch on a dir we created, while a denial anywhere else under the
@@ -1675,13 +1732,22 @@ class Adapter(CapabilityAdapter):
                     except Exception:  # noqa: BLE001
                         pass  # that test case's output simply won't exist; scored as a miss
 
+            meta = {"run_tag": run_tag, "id": sid, "model": model_config.MODEL, "seed": seed}
+            if use_skills and case1_path.exists():
+                # Inputs of the helper calls that returned, from the same kernel (one extra exec). Kept raw in
+                # the rollout; only feedback-split rollouts are ever turned into smoke fixtures.
+                try:
+                    meta["helper_calls"] = _helpers.parse_harvest(
+                        vendor["exec_code"](client, _helpers.harvest_snippet()))
+                except Exception:  # noqa: BLE001
+                    pass
             return Rollout(
                 task_id=task.id,
                 output=solution_code or last_code,
                 trace=messages,
                 cost_usd=cost,
                 tokens=tokens,
-                metadata={"run_tag": run_tag, "id": sid, "model": model_config.MODEL, "seed": seed},
+                metadata=meta,
             )
         except Exception as e:  # noqa: BLE001
             return Rollout(task_id=task.id, error=f"run_target failed: {e}")
