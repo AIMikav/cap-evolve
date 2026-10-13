@@ -61,7 +61,7 @@ class P2Params:
     Spec keys are ``p2_<field>``; ``promotion_rule: P2`` turns the rule on (rule P is untouched).
 
     One error convention for both paths: every accept test is one-sided with a per-test false-accept
-    rate of about 0.05 (``z_conf`` 1.6 for the K >= 2 confirmation, ``gs_c`` 1.6 for the K = 1
+    rate of about 0.05 (``z_conf`` 1.7 for the K >= 2 confirmation, ``gs_c`` 1.6 for the K = 1
     group-sequential test). A round of K >= 2 sends at most ``max_survivors`` (2) candidates to
     confirmation, which bounds the round false-accept rate by about 0.10; a K = 1 round has one test, so
     its round rate is about 0.05."""
@@ -73,7 +73,7 @@ class P2Params:
     conf_n: int = 147                # fresh rollouts per confirmed candidate on C
     ctrl_m: int = 4                  # incumbent control trials per C task
     incumbent_trials: int = 4        # incumbent trials per F task (ranking only)
-    z_conf: float = 1.6              # one-sided; <= max_survivors tests per round (round FWER <= 0.10, also with heterogeneous per-task effects)
+    z_conf: float = 1.7              # one-sided; <= max_survivors tests per round (round FWER <= 0.10, also with heterogeneous per-task effects)
     dmin: float = 0.02
     min_coverage: float = 0.6
     chunk: int = 20                  # rollouts per Job

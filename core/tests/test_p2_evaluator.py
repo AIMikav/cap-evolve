@@ -8,6 +8,7 @@ import pytest
 from p2_fakes import make_candidate, make_run
 
 from cap_evolve import evaluator, harness, promotion  # noqa: E402
+from cap_evolve.rundir import BudgetExhausted  # noqa: E402
 from cap_evolve.splits import make_pooled_partition  # noqa: E402
 
 PARAMS = promotion.P2Params.from_spec({"promotion_rule": "P2", "p2_conf_n": 96, "p2_ctrl_m": 4})
@@ -246,3 +247,12 @@ def test_control_and_candidate_jobs_are_interleaved(tmp_path):
     assert stages[0] == "control" and "confirm" in stages[:3]
     first_confirm = stages.index("confirm")
     assert "control" in stages[first_confirm:]          # control chunks still to come after a candidate chunk
+
+
+def test_final_estimate_checks_both_arms_fit_before_running_either(tmp_path):
+    adapter, run_dir, ev, cands = _world(tmp_path, [0.4])
+    n = len(ev.confirm_ids())
+    run_dir.update_budget(max_metric_calls=run_dir.spent.metric_calls + 4 * n + 1)     # one arm fits, two do not
+    with pytest.raises(BudgetExhausted):
+        ev.final_estimate(cands["c0"], run_dir.candidate_dir("seed"))
+    assert adapter.calls == []

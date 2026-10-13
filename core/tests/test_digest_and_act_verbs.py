@@ -383,6 +383,7 @@ def test_decision_event_records_whether_the_digest_was_followed(tmp_path, capsys
     (rd.root / "digest_last.json").write_text(json.dumps({"suggested": []}))
     import shutil
     shutil.copytree(rd.root / "work" / "cand_1", rd.root / "work" / "cand_2")
+    (rd.root / "work" / "cand_2" / "edit.txt").write_text("a different edit")   # identical bytes are refused (#811)
     _act(monkeypatch, capsys, ["propose", "cand_2", "--parent", "cur", *_args(rd)], sh)
     ev = [json.loads(ln) for ln in rd.events_path.read_text().splitlines()]
     assert [e["followed_digest"] for e in ev if e["kind"] == "decision"] == [True, False]

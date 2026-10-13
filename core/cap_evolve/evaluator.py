@@ -270,6 +270,10 @@ class P2Evaluator:
         plus the spread of the per-task deltas, and it is not an unbiased estimate for new tasks (the
         |C| tasks were chosen by the partition, and the search stopped on what the bits said about
         them). The sealed test split is the estimate for unseen tasks."""
+        need = 2 * int(n_trials) * len(self.splits.confirm)
+        if not self.run_dir.can_afford(need):       # both arms fit, or neither runs
+            raise BudgetExhausted(f"final estimate needs {need} rollouts, "
+                                  f"{self.run_dir.remaining_metric_calls()} remain")
         res = {}
         base = SEED_BASE["final"]
         for name, d in (("champion", champion_dir), ("seed", seed_dir)):

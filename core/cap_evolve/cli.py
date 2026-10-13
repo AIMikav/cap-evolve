@@ -759,6 +759,10 @@ def _cmd_run(argv):
         # finalize bookends): the phase scripts read it from the environment they inherit.
         from .harness import ERRORED_POLICY_ENV, resolve_errored_policy
         os.environ[ERRORED_POLICY_ENV] = resolve_errored_policy(str(spec["errored_trial_policy"]))
+    from . import helpers as _helpers
+    if _helpers.enabled(spec):
+        # adapters (a subprocess) read the v2 helper switch from the environment they inherit
+        os.environ["CAPEVOLVE_HELPERS"] = "1"
     from .optimizer_config import enabled as _ablation_enabled
     if not _ablation_enabled("history", spec):
         # the harness (a subprocess) reads the switch from the environment it inherits
@@ -935,6 +939,15 @@ def _cmd_run(argv):
     # primitives, and sealing by running the finalize phase script. cap-evolve run does
     # setup+baseline, then hands off here — no algorithm subprocess, no auto-finalize.
     if orchestration_mode == "agent":
+        if str(spec.get("ao_engine") or "") == "conductor":
+            # AO-2 (opt-in, ``ao_engine: conductor``): code runs the loop and the LLM only does bounded
+            # one-shot jobs; the supervisor relaunches the conductor until it exits 0.
+            cond = skills_dir / "algorithms" / "agent-optimize" / "scripts" / "conductor.py"
+            cond_cmd = [py, str(cond), "supervise", "--run-dir", str(workdir / run_dir),
+                        "--project", str(proj_abs)]
+            if args.agent_driver:
+                cond_cmd += ["--optimizer", args.agent_driver]
+            return done(subprocess.run(cond_cmd, cwd=str(workdir)).returncode)
         if args.agent_driver:
             # Opt-in only: without --agent-driver this branch is unreachable and behavior
             # is byte-identical to before. host.py is the existing headless driver for

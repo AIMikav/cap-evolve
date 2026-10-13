@@ -57,6 +57,7 @@ from cap_evolve import (RunDir, eval_index, graph, harness, hypotheses, optimize
                         schema_v2)
 from cap_evolve.candidate_graph import CandidateGraph
 from cap_evolve.rundir import _file_lock
+from cap_evolve import helpers as helpers_mod
 from cap_evolve.specfile import spec_for_run
 
 HERE = Path(__file__).resolve().parent
@@ -219,7 +220,8 @@ def propose(a, ctx):
     pg = {"skipped": "ablation pregate=false"}
     if ctx.cfg["pregate"]:
         cmd = [PY, HERE / "pregate.py", "--candidate", work, "--parent", digest.cand_dir(run_dir, parent),
-               "--run-dir", ctx.root] + (["--strict"] if ctx.strict else [])
+               "--run-dir", ctx.root] + (["--strict"] if ctx.strict else []) + (
+            ["--helpers-config", json.dumps(helpers_mod.resolve(ctx.spec))] if helpers_mod.enabled(ctx.spec) else [])
         rc, so, se = sh(cmd)
         pg = jload(so)
         if pg is None or rc not in (0, 1):
@@ -230,6 +232,11 @@ def propose(a, ctx):
             raise Refused(f"pregate failed: {pg.get('failure')}", pregate=pg, stage="proposed")
         for w in pg.get("warnings") or []:
             ctx.warn(f"pregate: {w}")
+    dup = duplicate_of(ctx, tag, eval_index.cap_hash(work))
+    if dup:
+        raise Refused(f"duplicate candidate: {tag}'s capability bytes are identical to {dup!r} (same cap_hash): "
+                      "an identical candidate would re-spend rollouts on a measured edit; change the edit or prune it",
+                      duplicate_of=dup, stage="proposed")
     rec = None
     if h is not None:
         rec = hypotheses.append(run_dir, {**h, "id": h.get("id") or f"h_{tag}", "candidate": tag})
@@ -242,6 +249,19 @@ def propose(a, ctx):
     ctx.decision("propose", tag, near=(h or {}).get("cluster_ids") or (), hypothesis=(rec or {}).get("id"),
                  pregate=pg.get("ok"))
     return 0, out
+
+
+def duplicate_of(ctx, tag, h: str) -> str | None:
+    """The tag of an already-recorded candidate (or the seed / champion) with byte-identical capability
+    content, else None. Identical bytes share a ledger hash, so re-evaluating them is pure waste."""
+    for t, n in sorted(graph.build_dag(ctx.run_dir).items()):
+        if t != tag and (n.get("capability_hash") == h) and n.get("status") not in ("superseded",):
+            return t
+    for t in ("seed", ctx.champion()):
+        d = digest.cand_dir(ctx.run_dir, t)
+        if t != tag and d.is_dir() and eval_index.cap_hash(d) == h:
+            return t
+    return None
 
 
 def topup_cmd(ctx, tag, n, ids) -> list[str]:
@@ -746,11 +766,61 @@ def verify_merge(a, ctx):
 
 # ---- finalize --------------------------------------------------------------------------------
 
+def _bookend(run_dir, tag) -> dict:
+    """train + val of ``tag`` read from rollouts already on disk (no evaluation)."""
+    sp = run_dir.read_splits()
+    val = harness.split_result_from_rollouts(run_dir, tag, "val")
+    train = harness.split_result_from_rollouts(run_dir, tag, "train")
+    tr, va = set(sp.train), set(sp.val)
+    return {"train": (train.to_dict() if train.per_task else
+                      {"status": "skipped: train ids are identical to val" if tr == va else "not measured"}),
+            "val": val.to_dict() if val.per_task else {"status": "not measured"}}
+
+
+def complete_finalize(ctx, intent: dict) -> dict:
+    """A finalize attempt died AFTER scoring test but before ``final.json`` / the seal: finish it from the
+    test rollouts already on disk. Test is NOT scored again (it would be a second look)."""
+    from cap_evolve.rundir import _atomic_write
+    run_dir = ctx.run_dir
+    best = intent.get("champion") or run_dir.best_id
+    test = harness.split_result_from_rollouts(run_dir, "FINAL", "test")
+    if not test.per_task:
+        raise Refused("finalize.intent exists but there are no FINAL test rollouts to complete from")
+    payload = {"test": test.to_dict(), "best_id": best}
+    if best != "seed":
+        base = harness.split_result_from_rollouts(run_dir, "FINAL_seed", "test")
+        if not base.per_task:
+            raise Refused("the earlier finalize died between the champion's and the seed's test scoring; the seed's "
+                          "test rollouts (FINAL_seed) are missing. Scoring them now continues the same sealed finalize "
+                          "but needs CAPEVOLVE_ALLOW_TEST_RESCORE=1, which is recorded in the run")
+        payload.update(test_baseline=base.to_dict(), baseline_id="seed", test_delta=round(test.reward - base.reward, 6))
+    else:
+        payload.update(test_baseline=test.to_dict(), baseline_id=best, test_delta=0.0)
+    payload["best"] = {**_bookend(run_dir, best), "test": payload["test"]}
+    payload["seed"] = {**_bookend(run_dir, "seed"), "test": payload["test_baseline"]}
+    payload["completed_from_existing_rollouts"] = True
+    sp = run_dir.read_splits()
+    payload["train_equals_val"] = bool(sp.train) and set(sp.train) == set(sp.val)
+    _atomic_write(run_dir.root / "final.json", json.dumps(payload, indent=2))
+    if not run_dir.read_splits().test_used:
+        run_dir.commit_test()
+    run_dir.log_event("finalize_completed_from_existing", best_id=best, test_reward=test.reward)
+    return payload
+
+
 def finalize(a, ctx):
     run_dir = ctx.run_dir
     project = ctx.need_project()
+    final_path, intent_path = ctx.root / "final.json", ctx.root / "finalize.intent"
     if run_dir.read_splits().test_used:
-        raise Refused("test is already sealed (scored once): a second finalize is refused")
+        if final_path.exists():       # idempotent: a relaunch after DONE reports the sealed result
+            return 0, {"already_finalized": True, "final": jload(final_path.read_text(encoding="utf-8"))}
+        raise Refused("test is already sealed (scored once) but final.json is missing: a second finalize is refused")
+    if intent_path.exists() and (run_dir.rollouts / "test").is_dir() and any((run_dir.rollouts / "test").glob("*.json")):
+        out = {"final": complete_finalize(ctx, jload(intent_path.read_text(encoding="utf-8")) or {}),
+               "champion": ctx.champion(), "completed_from_existing": True}
+        final_path.write_text(json.dumps(out, indent=2, default=str), encoding="utf-8")
+        return 0, out
     champ = ctx.champion()
     d = digest.cand_dir(run_dir, champ)   # the committed snapshot: the bytes the finalize phase seals
     out = {"champion": champ}
@@ -791,6 +861,7 @@ def finalize(a, ctx):
             out["claim"] = ("the champion did NOT beat the seed on confirmation: report this run as having no "
                             "accepted change (the test score below is for the best-so-far, not an improvement)")
     n_trials = a.n_trials or int(ctx.spec.get("num_trials") or 1)
+    intent_path.write_text(json.dumps({"champion": champ, "n_trials": n_trials, "ts": time.time()}), encoding="utf-8")
     rc, so, se = sh([PY, SKILLS / "phases" / "finalize" / "scripts" / "run.py", "--run-dir", ctx.root,
                      "--project", project, "--n-trials", str(n_trials)])
     if rc != 0:

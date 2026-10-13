@@ -140,8 +140,18 @@ is that you must reproduce the handover surface `run_step` normally builds —
 rejected edits into the next iteration's prompt. Skip it and the dashboard goes dark
 and the optimizer re-proposes edits already refuted.
 
+## Helpers in the surface (v2, off by default)
+
+When `helpers.enabled` and the surface allows executable files, the proposer should **codify a recurring procedure
+into a deterministic helper** once it fails or recurs in 2 or more distinct feedback traces, instead of adding more
+prose. A helper must be a general, offline, deterministic function; the pregate lint and `helper_smoke` reject
+task ids, copied answers, network use and nondeterminism before any rollout is charged. Details:
+`references/helpers.md`.
+
 ## References
 
+- `references/helpers.md` — when and how to write a helper, and the checks it must pass. Load when the surface
+  allows scripts and a procedure recurs.
 - `references/run-step.md` — the shared step's exact contract: the handover files and
   their ownership, the rejected/accepted memory, the version store, the snapshot
   filter, and the tamper path. Load it when you need the contract verbatim, or when
