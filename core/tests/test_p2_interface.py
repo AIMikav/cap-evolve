@@ -18,7 +18,7 @@ def test_p2_is_opt_in_and_rule_p_is_untouched():
     assert promotion.PromotionParams.from_spec({"promotion_rule": "P2"}) is None
     assert promotion.PromotionParams.from_spec({"promotion_rule": "P"}) == promotion.PromotionParams()
     p = promotion.P2Params.from_spec({"promotion_rule": "P2", "p2_conf_n": 98})
-    assert p.conf_n == 98 and p.z_conf == 1.5 and p.rung_sizes == (12, 36) and p.ctrl_m == 4
+    assert p.conf_n == 98 and p.z_conf == 1.6 and p.rung_sizes == (12, 36) and p.ctrl_m == 4
     with pytest.raises(ValueError):
         promotion.P2Params.from_spec({"promotion_rule": "P2", "p2_rung_sizes": [40, 12]})
 

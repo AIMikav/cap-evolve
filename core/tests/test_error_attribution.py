@@ -6,6 +6,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 from p2_fakes import make_run
 
 from cap_evolve import harness, trials  # noqa: E402
@@ -38,6 +40,11 @@ class _ModAdapter:
 
     def apply(self, d, edits=None):
         return None
+
+
+@pytest.fixture(autouse=True)
+def _flag(monkeypatch):
+    monkeypatch.setenv("CAPEVOLVE_FAULT_ATTRIBUTION", "1")
 
 
 def _run(tmp_path, ids, crash, policy):
@@ -117,3 +124,59 @@ def test_tau2_adapter_hook_classifies_errors():
     assert mod.classify_error_kind("TerminationReason.UNEXPECTED_ERROR", "KeyError in tools.py line 4") == "candidate"
     assert mod.classify_error_kind("TerminationReason.UNEXPECTED_ERROR", "connection reset") == "infra"
     assert mod.classify_error_kind("TerminationReason.TIMEOUT", "tools.py") == "infra"
+
+
+def test_flag_off_by_default_leaves_rollouts_untagged(tmp_path, monkeypatch):
+    monkeypatch.delenv("CAPEVOLVE_FAULT_ATTRIBUTION")
+    ids = [f"t{i:03d}" for i in range(20)]
+    res, run_dir = _run(tmp_path, ids, CRASH_ON, "fail")
+    assert res.n_scored == 20 - len([t for t in ids if t in CRASH_ON])      # crashes stay missing
+    rollout = next((run_dir.rollouts / "val").glob("t000__c__t0.json"))
+    assert "error_kind" not in json.loads(rollout.read_text())["rollout"]["metadata"]
+
+
+def test_third_party_transient_and_cause_chains_are_not_blamed(tmp_path):
+    d = tmp_path / "c"
+    d.mkdir()
+    (d / "m.py").write_text("\n".join([
+        "import json",
+        "def parse(s):",
+        "    return json.loads(s)",
+        "def rate():",
+        "    raise RuntimeError('HTTP 429 too many requests')",
+        "def own():",
+        "    raise KeyError('x')",
+        "def swallow():",
+        "    try:",
+        "        own()",
+        "    except KeyError:",
+        "        raise ValueError('later')",
+        ""]))
+    spec = importlib.util.spec_from_file_location("mm2", d / "m.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    def catch(fn, *a):
+        try:
+            fn(*a)
+        except Exception as e:      # noqa: BLE001
+            return e
+    with trials.candidate_scope(d):
+        assert trials.raised_in_candidate_code(catch(mod.own)) is True
+        assert trials.raised_in_candidate_code(catch(mod.rate)) is False          # 429 text
+        assert trials.raised_in_candidate_code(catch(mod.parse, "{")) is True    # stdlib frames are skipped: the candidate called it
+        assert trials.raised_in_candidate_code(catch(mod.swallow)) is True         # raised in candidate code, __context__ not walked
+
+
+def test_a_project_root_or_adapter_dir_is_never_attributed(tmp_path):
+    d = tmp_path / "proj"
+    d.mkdir()
+    (d / "adapter.py").write_text("def boom():\n    raise KeyError('adapter bug')\n")
+    spec = importlib.util.spec_from_file_location("adp", d / "adapter.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    try:
+        mod.boom()
+    except KeyError as e:
+        exc = e
+    with trials.candidate_scope(d):
+        assert trials.raised_in_candidate_code(exc) is False

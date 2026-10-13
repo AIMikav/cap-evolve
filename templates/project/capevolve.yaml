@@ -108,7 +108,7 @@ gate_k_se: 1.0
 # promotion_rule: P2            # rule P2 (SH-C): K-candidate rounds, kill-only rungs on the feedback stratum F, one fresh
 #                               #   confirmation on the hidden stratum C against a concurrently re-measured incumbent.
 #                               #   Needs split_mode: pooled. Keys: p2_k (8), p2_rung_sizes ([12, 36]), p2_conf_n (147),
-#                               #   p2_ctrl_m (4), p2_z_conf (1.5), p2_dmin (0.02), p2_max_survivors (2), p2_chunk (20)
+#                               #   p2_ctrl_m (4), p2_z_conf (1.6), p2_dmin (0.02), p2_max_survivors (2), p2_chunk (20)
 # split_mode: pooled            # pool = train + val, partitioned ONCE (seeded, stratified, persisted) into F and C
 # confirm_fraction: 0.48        #   share of the pool held as C; the proposer sees F, and only the accept/reject bit for C
 # budget_reserve: true          # reserve rollouts before every evaluation; a confirmation that does not fit is `unconfirmed`
@@ -116,6 +116,7 @@ gate_k_se: 1.0
 # min_joint_coverage: 0.75      #   hard floor of joint coverage on the evaluable set (instead of the gate_min_coverage veto)
 # missing_impute: -0.5          #   delta imputed for each missing pair by the tipping-point check
 # missing_retries: 2            #   attempts to re-run a missing cell
+# fault_attribution: true      # tag exceptions raised by the candidate's own code (innermost non-stdlib frame under its dir) as error_kind=candidate
 # ledger_noise_guard: true      # LEDGER.md: no causal broke/fixed below ledger_min_trials (3) trials per task
 # merge_verify: true            # agent-optimize: `act.py verify-merge` (parent + both branches + merge on the same fresh block,
 #                               #   interaction estimate, bounded delta-debugging on a loss); `promote` of a merge needs a pass

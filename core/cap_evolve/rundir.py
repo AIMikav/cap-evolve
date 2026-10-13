@@ -359,7 +359,7 @@ class RunDir:
                     f"{label or 'evaluation'} needs {n} rollouts but only "
                     f"{max(0, b.max_metric_calls - sp.metric_calls - held_n)} of max_metric_calls="
                     f"{b.max_metric_calls} remain ({sp.metric_calls} spent, {held_n} reserved)")
-            if b.max_usd and est_usd and sp.total_usd + held_usd + est_usd > b.max_usd:
+            if b.max_usd and sp.total_usd + held_usd + est_usd > b.max_usd:
                 raise BudgetExhausted(
                     f"{label or 'evaluation'} is estimated at ${est_usd:.2f}; "
                     f"${max(0.0, b.max_usd - sp.total_usd - held_usd):.2f} of max_usd remain")

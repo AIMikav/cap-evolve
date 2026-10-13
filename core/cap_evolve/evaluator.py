@@ -20,11 +20,11 @@ every value this module returns about C is an aggregate (mean, z, n) or a verdic
 a trace, or a per-task score.
 
 The unit of work is a ``Job`` (at most ``chunk`` rollouts of one candidate on one stage). Jobs are plain
-data: a caller may run them inline (``Round.run``), on a thread pool, or in the conductor's shared slot
+data: a caller may run them inline (``Round.run``), on a thread pool, or in a caller's shared slot
 pool, in any order and across processes, because ``Round.collect`` rebuilds every statistic from the
 rollouts on disk. Every job reserves its rollouts before dispatch (``RunDir.reserve_metric_calls``).
 
-Public surface (stable; PR-2 AO conductor and PR-4 HC-2 build on exactly this):
+Public surface (stable; the agent-optimize conductor and the hill-climb rounds share exactly this):
 
     ev = P2Evaluator(adapter, run_dir, params)
     ev.feedback_ids() / ev.confirm_ids()        split accessors (C ids are for the evaluator only)
@@ -130,6 +130,17 @@ def thread_map(max_workers: int) -> Callable:
     return _map
 
 
+def interleave(*job_lists) -> list:
+    """Round-robin merge, so a control and its candidates are measured in the same time window
+    (drift between them cancels instead of landing on the candidate)."""
+    out, lists = [], [list(x) for x in job_lists]
+    while any(lists):
+        for lst in lists:
+            if lst:
+                out.append(lst.pop(0))
+    return out
+
+
 def _serial_map(fn, jobs):
     return [fn(j) for j in jobs]
 
@@ -162,7 +173,7 @@ class P2Evaluator:
                              f"(got {len(self.splits.feedback)} / {len(self.splits.confirm)})")
         self.errored_policy = errored_policy or self._default_policy()
         self._lock = threading.Lock()
-        (run_dir.root / "p2").mkdir(parents=True, exist_ok=True)
+        self._round_dir().mkdir(parents=True, exist_ok=True)
 
     def _default_policy(self) -> str:
         from .specfile import spec_for_run
@@ -222,7 +233,16 @@ class P2Evaluator:
 
     # -- rounds -----------------------------------------------------------------------------------
     def _round_dir(self) -> Path:
-        return self.run_dir.root / "p2"
+        """Round state: job dicts carry C task ids, so it lives under ``private/`` (never proposer-readable)."""
+        return self.run_dir.root / "private" / "p2"
+
+    def _private(self, kind: str, **fields) -> None:
+        """Append C-derived numbers (means, z, n) to ``private/p2_confirm.jsonl``; events get the bit only."""
+        path = self.run_dir.root / "private" / "p2_confirm.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        clean = {k: (None if isinstance(v, float) and not math.isfinite(v) else v) for k, v in fields.items()}
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"kind": kind, "ts": time.time(), **clean}) + "\n")
 
     def open_round(self, candidates: Mapping[str, Path], incumbent: tuple) -> "Round":
         """``candidates = {cid: workdir}``, ``incumbent = (cid, dir)``. Persists the round."""
@@ -243,11 +263,13 @@ class P2Evaluator:
         return Round(self, json.loads((self._round_dir() / f"{round_id}.json").read_text(encoding="utf-8")))
 
     def final_estimate(self, champion_dir: Path, seed_dir: Path, *, n_trials: int = 4) -> dict:
-        """Champion vs seed on C with fresh seeds: ``{mean, se, n}``; the unbiased internal estimate.
+        """Fresh-trial estimate of champion minus seed on C: ``{mean, se, n, scope}``.
 
-        Selection touched C only through accept/reject bits, so this is conditionally unbiased for the
-        effect on C's tasks (the +0.03 winner's curse of the selection data disappears). Aggregates only.
-        Interval note: add the task-sampling term sd/sqrt(|C|) to report generalisation to new tasks."""
+        Selection touched C only through accept/reject bits, so the winner's curse of the selection data
+        is gone; but the estimate is CONDITIONAL ON THE C TASKS (``scope``): ``se`` is rollout noise
+        plus the spread of the per-task deltas, and it is not an unbiased estimate for new tasks (the
+        |C| tasks were chosen by the partition, and the search stopped on what the bits said about
+        them). The sealed test split is the estimate for unseen tasks."""
         res = {}
         base = SEED_BASE["final"]
         for name, d in (("champion", champion_dir), ("seed", seed_dir)):
@@ -259,15 +281,16 @@ class P2Evaluator:
         s = {pt["task_id"]: pt.get("trial_rewards") or [] for pt in res["seed"].per_task}
         r = racing.confirm_with_control(c, s, z_conf=0.0, dmin=-1.0, n_planned=len(self.splits.confirm))
         out = {"mean": r["mean"], "se": r["se"], "z": r["z"], "n": r["n"], "coverage": r["coverage"],
+               "scope": "fresh trials, conditional on the C tasks",
                "n_trials": n_trials, "champion_reward": res["champion"].reward,
                "seed_reward": res["seed"].reward}
-        self.run_dir.log_event("p2_final_estimate", **{k: (None if isinstance(v, float) and not math.isfinite(v) else v)
-                                                      for k, v in out.items()})
+        self._private("final_estimate", **out)
+        self.run_dir.log_event("p2_final_estimate", n=out["n"])
         return out
 
 
 class Round:
-    """State of one round; persisted under the run dir so a conductor can crash and resume."""
+    """State of one round; persisted under the run dir so a scheduler can crash and resume."""
 
     def __init__(self, ev: P2Evaluator, state: dict):
         self.ev, self.state = ev, state
@@ -302,13 +325,23 @@ class Round:
     def _draw_key(self, role: str) -> str:
         return f"{self.ev.splits.pool_seed}:{self.state['no']}:{role}"
 
+    def _existing_jobs(self, cid: str, stage: str, tag_prefix: str) -> list:
+        """Jobs already created for (cid, stage, tag prefix): a restarted caller gets the same jobs back."""
+        mark = f"__{tag_prefix}"
+        return [Job(**{**j, "ids": tuple(j["ids"])}) for j in self.state["jobs"].values()
+                if j["cid"] == cid and j["stage"] == stage and mark in j["tag"]]
+
     def _make_jobs(self, cid: str, stage: str, role: str, draws: list, passes: list, kind: str,
                    tag_prefix: str, seed_shift: int = 0) -> list:
         """Chunk ``draws`` of one candidate into jobs (grouped by pass so a job never repeats a task).
+        Idempotent per (cid, stage, tag_prefix): called again after a restart it returns the jobs it made before.
 
         ``passes`` = ``[(task, pass_idx)]`` parallel to ``draws``; the pass index is part of the seed
         (``trial_offset = SEED_BASE[kind] + round block + seed_shift + pass``)."""
         p = self.ev.params
+        done = self._existing_jobs(cid, stage, tag_prefix)
+        if done:
+            return done
         by_pass: dict = {}
         for t, k in passes:
             by_pass.setdefault(k, []).append(t)
@@ -338,7 +371,7 @@ class Round:
     # ---- jobs ------------------------------------------------------------------------------------
     def run_job(self, job: Job):
         """Execute one job: reserve -> ``evaluate_candidate`` -> convert reservation. Idempotent
-        (a finished job is skipped, so a restarted conductor re-runs nothing). Raises
+        (a finished job is skipped, so a restarted caller re-runs nothing). Raises
         ``BudgetExhausted`` before dispatching a rollout when the job does not fit."""
         mk = self._marker(job)
         if mk.exists():
@@ -372,6 +405,9 @@ class Round:
         """Top-up jobs bringing the incumbent's F draws to ``incumbent_trials`` per task (pooled over
         every earlier draw of the same capability hash). Empty when it is already measured."""
         inc_cid, inc_dir = self.state["incumbent"]
+        done = self._existing_jobs(inc_cid, "incumbent", "inc_p")
+        if done:
+            return done
         need = self.ev._incumbent_shortfall(Path(inc_dir))
         jobs, idx = [], 0
         for k in range(max(need.values(), default=0)):
@@ -522,15 +558,16 @@ class Round:
         C = self.ev.splits.confirm
         inc_cid = self.state["incumbent"][0]
         ctrl_draws = [t for _ in range(p.ctrl_m) for t in C]
-        jobs = self._make_jobs(inc_cid, "control", "confirm", ctrl_draws, _passes(ctrl_draws), "control",
-                               "ctrl")
+        ctrl_jobs = self._make_jobs(inc_cid, "control", "confirm", ctrl_draws, _passes(ctrl_draws),
+                                    "control", "ctrl")
+        cand_jobs = []
         for i, cid in enumerate(funded):
             draws = racing.draw_order(C, p.conf_n, self._draw_key(f"C:{cid}"))
             # each survivor gets its own seed block, so confirmations are independent of each other
-            jobs += self._make_jobs(cid, "confirm", "confirm", draws, _passes(draws), "confirm", "conf",
-                                    seed_shift=100 * i)
+            cand_jobs.append(self._make_jobs(cid, "confirm", "confirm", draws, _passes(draws), "confirm",
+                                             "conf", seed_shift=100 * i))
         self._save()
-        return jobs
+        return interleave(ctrl_jobs, *cand_jobs)
 
     def _trials_on_c(self, cid: str, stage: str) -> dict:
         tags = self._tags(cid, stage)
@@ -569,10 +606,11 @@ class Round:
         self.state["confirms"] = {c: asdict(v) for c, v in out.items()}
         self.state["champion"], self.state["stage"] = champ, "closed"
         self._save()
+        self.ev._private("confirm", round=self.round_id, champion=champ,
+                         verdicts={c: {"status": v.status, "mean": v.mean, "z": v.z, "n": v.n}
+                                   for c, v in out.items()})
         self.ev.run_dir.log_event("p2_confirm", round=self.round_id, champion=champ,
-                                  verdicts={c: {"bit": v.bit(), "mean": v.mean if v.mean is None else round(v.mean, 4),
-                                                "z": v.z if v.z is None or not math.isfinite(v.z) else round(v.z, 3)}
-                                            for c, v in out.items()})
+                                  bits={c: v.bit() for c, v in out.items()})
         return out
 
     def confirm(self, map_fn: Callable | None = None) -> dict:
@@ -599,21 +637,19 @@ class Round:
         if left is not None and self._cost_ctrl() + p.gs_looks[0] > left:
             return self._seq_done(cid, ConfirmVerdict(cid, "unconfirmed", reason="budget"))
         ctrl_draws = [t for _ in range(p.ctrl_m) for t in C]
-        jobs = self._make_jobs(inc_cid, "control", "confirm", ctrl_draws, _passes(ctrl_draws), "control", "ctrl")
-        if not self._run_jobs(jobs, map_fn):
-            return self._seq_done(cid, ConfirmVerdict(cid, "unconfirmed", reason="control unfunded"))
-        ctrl = self._trials_on_c(inc_cid, "control")
-        phat = {t: sum(ys) / len(ys) for t, ys in ctrl.items() if ys}
+        ctrl_jobs = self._make_jobs(inc_cid, "control", "confirm", ctrl_draws, _passes(ctrl_draws),
+                                    "control", "ctrl")
         draws = racing.draw_order(C, n_max, self._draw_key(f"S:{cid}"))
         passes = _passes(draws)
         prev = 0
         for i, n in enumerate(p.gs_looks):
-            seg_draws, seg_passes = draws[prev:n], passes[prev:n]
-            stage = "seq"
-            jobs = []
-            for job in self._make_jobs(cid, stage, "confirm", seg_draws, seg_passes, "seq", f"seq{i}"):
-                jobs.append(job)
-            if not self._run_jobs(jobs, map_fn):
+            jobs = self._make_jobs(cid, "seq", "confirm", draws[prev:n], passes[prev:n], "seq", f"seq{i}")
+            if i == 0:      # the control is measured in the same window as the first look
+                if not self._run_jobs(interleave(ctrl_jobs, jobs), map_fn):
+                    return self._seq_done(cid, ConfirmVerdict(cid, "unconfirmed", n=prev, reason="budget"))
+                ctrl = self._trials_on_c(inc_cid, "control")
+                phat = {t: sum(ys) / len(ys) for t, ys in ctrl.items() if ys}
+            elif not self._run_jobs(jobs, map_fn):
                 return self._seq_done(cid, ConfirmVerdict(cid, "unconfirmed", n=prev, reason="budget"))
             prev = n
             cand = self._trials_on_c(cid, "seq")
@@ -629,7 +665,7 @@ class Round:
         return self._seq_done(cid, ConfirmVerdict(cid, "reject", n=prev, reason="no decision"))
 
     def _seq_stat(self, cand: dict, phat: dict, m: int) -> tuple:
-        n, tot, counts, rows = 0, 0.0, [], []
+        n, tot, counts, rows, task_d = 0, 0.0, [], [], []
         for t, ys in cand.items():
             if t not in phat:
                 continue
@@ -637,10 +673,11 @@ class Round:
             n += len(ys)
             counts.append(len(ys))
             rows.append(ys)
+            task_d.append(sum(ys) / len(ys) - phat[t])
         if n == 0:
             return 0.0, 0.0, 0
         v = racing.within_task_variance({str(i): ys for i, ys in enumerate(rows)})
-        se = racing.pooled_se(n, counts, v, max(1, m))
+        se = max(racing.pooled_se(n, counts, v, max(1, m)), racing.heterogeneity_se(task_d))
         mean = tot / n
         return mean, (mean / se if se > 0 else 0.0), n
 
@@ -649,6 +686,7 @@ class Round:
         self.state["champion"] = cid if v.status == "accept" else None
         self.state["stage"] = "closed"
         self._save()
-        self.ev.run_dir.log_event("p2_sequential", round=self.round_id, candidate=cid, bit=v.bit(),
-                                  n=v.n, mean=v.mean, z=(v.z if v.z is None or math.isfinite(v.z) else None))
+        self.ev._private("sequential", round=self.round_id, candidate=cid, status=v.status, n=v.n,
+                         mean=v.mean, z=v.z, reason=v.reason)
+        self.ev.run_dir.log_event("p2_sequential", round=self.round_id, candidate=cid, bit=v.bit())
         return v

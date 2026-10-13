@@ -143,7 +143,7 @@ def test_jobs_are_idempotent_and_resumable(tmp_path):
         rnd.run_job(j)
     n = len(adapter.calls)
     for j in jobs:
-        rnd.run_job(j)                                  # a restarted conductor re-runs nothing
+        rnd.run_job(j)                                  # a restarted caller re-runs nothing
     assert len(adapter.calls) == n
     again = ev.resume_round(rnd.round_id)
     assert again.state["jobs"].keys() == rnd.state["jobs"].keys()
@@ -222,3 +222,27 @@ def test_final_estimate_compares_champion_and_seed_on_C(tmp_path):
     res = ev.final_estimate(cands["c0"], run_dir.candidate_dir("seed"))
     assert 0.2 < res["mean"] < 0.6 and res["n"] == len(ev.confirm_ids()) and set(res) >= {"mean", "se", "z", "n"}
     assert all(t in set(ev.confirm_ids()) for t, _ in adapter.calls)
+
+
+def test_job_creation_is_idempotent_so_a_resumed_caller_gets_the_same_jobs(tmp_path):
+    adapter, run_dir, ev, cands = _world(tmp_path, [0.3, 0.0], max_metric_calls=4000)
+    rnd = ev.open_round(cands, ("seed", run_dir.candidate_dir("seed")))
+    first = {"inc": rnd.incumbent_jobs(), "r1": rnd.rung_jobs(1)}
+    assert first["inc"] and first["r1"]
+    rnd.run_job(first["r1"][0])                                     # partial progress, then a "restart"
+    again = ev.resume_round(rnd.round_id)
+    assert again.incumbent_jobs() == first["inc"] and again.rung_jobs(1) == first["r1"]
+    assert len(again.state["jobs"]) == len(first["inc"]) + len(first["r1"])
+    assert len({j.job_id for j in again.rung_jobs(1)}) == len(first["r1"])
+
+
+def test_control_and_candidate_jobs_are_interleaved(tmp_path):
+    adapter, run_dir, ev, cands = _world(tmp_path, [0.4, 0.4])
+    rnd = ev.open_round(cands, ("seed", run_dir.candidate_dir("seed")))
+    rnd.run_rung(1)
+    rnd.run_rung(2)
+    jobs = rnd.confirm_jobs()
+    stages = [j.stage for j in jobs]
+    assert stages[0] == "control" and "confirm" in stages[:3]
+    first_confirm = stages.index("confirm")
+    assert "control" in stages[first_confirm:]          # control chunks still to come after a candidate chunk
