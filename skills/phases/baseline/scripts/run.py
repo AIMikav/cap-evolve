@@ -95,6 +95,19 @@ def main(argv=None) -> int:
                     max_optimizer_usd=args.max_optimizer_usd, stop_at_reward=args.stop_at_reward)
     run_dir = RunDir.create(Path(args.base), ts=args.run_ts, budget=budget, exist_ok=args.resume)
 
+    # Pin the spec to the run NOW. Everything that reads config through specfile.spec_for_run (split_mode,
+    # coverage/budget switches, the P2 keys) resolves the spec from the run dir's events, and the CLI logs
+    # its run_config only AFTER this phase, so without this the baseline silently takes the legacy path.
+    try:
+        _spec = Path(args.spec) if args.spec else Path(args.project, "capevolve.yaml")
+        if _spec.is_file() and not any(
+                '"spec"' in ln and ('"run_config"' in ln or '"spec_resolved"' in ln)
+                for ln in (run_dir.events_path.read_text(encoding="utf-8").splitlines()
+                           if run_dir.events_path.exists() else [])):
+            run_dir.log_event("spec_resolved", spec=str(_spec.resolve()), project=str(Path(args.project).resolve()))
+    except Exception:  # noqa: BLE001 — provenance must never block a baseline
+        pass
+
     try:
         try:
             from cap_evolve.specfile import read_yaml
