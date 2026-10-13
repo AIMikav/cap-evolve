@@ -226,7 +226,10 @@ def resolve_spec_path(run_dir, project: Path | None = None) -> Path | None:
                     ev = _json.loads(line)
                 except Exception:  # noqa: BLE001
                     continue
-                if ev.get("kind") == "run_config" and ev.get("spec"):
+                # ``spec_resolved`` is logged by the baseline phase the moment the run dir exists, BEFORE
+                # cli.py logs ``run_config`` (which comes after the baseline): config that decides how the
+                # baseline itself runs (split_mode) must already resolve to the run's spec.
+                if ev.get("kind") in ("run_config", "spec_resolved") and ev.get("spec"):
                     candidates.append(Path(str(ev["spec"])))
                     break
     except Exception:  # noqa: BLE001

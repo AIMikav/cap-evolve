@@ -58,6 +58,8 @@ def main(argv=None) -> int:
                    help="prior run dir: reuse its splits/baseline/seed/val-rollouts and "
                         "SKIP the baseline eval (algorithm starts at iter 1 on it)")
     p.add_argument("--n-trials", type=int, default=1)
+    p.add_argument("--workers", type=int, default=None,
+                   help="concurrent rollouts for the seed evaluation (unset = CAPEVOLVE_WORKERS or serial)")
     p.add_argument("--max-iterations", type=int, default=10)
     p.add_argument("--stall", type=int, default=0)
     p.add_argument("--max-metric-calls", type=int, default=0, help="0 = unlimited")
@@ -92,6 +94,19 @@ def main(argv=None) -> int:
                     max_metric_calls=args.max_metric_calls, max_usd=args.max_usd,
                     max_optimizer_usd=args.max_optimizer_usd, stop_at_reward=args.stop_at_reward)
     run_dir = RunDir.create(Path(args.base), ts=args.run_ts, budget=budget, exist_ok=args.resume)
+
+    # Pin the spec to the run NOW. Everything that reads config through specfile.spec_for_run (split_mode,
+    # coverage/budget switches, the P2 keys) resolves the spec from the run dir's events, and the CLI logs
+    # its run_config only AFTER this phase, so without this the baseline silently takes the legacy path.
+    try:
+        _spec = Path(args.spec) if args.spec else Path(args.project, "capevolve.yaml")
+        if _spec.is_file() and not any(
+                '"spec"' in ln and ('"run_config"' in ln or '"spec_resolved"' in ln)
+                for ln in (run_dir.events_path.read_text(encoding="utf-8").splitlines()
+                           if run_dir.events_path.exists() else [])):
+            run_dir.log_event("spec_resolved", spec=str(_spec.resolve()), project=str(Path(args.project).resolve()))
+    except Exception:  # noqa: BLE001 — provenance must never block a baseline
+        pass
 
     try:
         try:
@@ -193,7 +208,19 @@ def main(argv=None) -> int:
             cand = Path(args.project) / args.capability
             if cand.exists():
                 cap_path = cand
-        result = harness.baseline(adapter, cap_path, run_dir=run_dir, n_trials=args.n_trials)
+        from cap_evolve import gatecfg
+        if gatecfg.GateConfig.for_run(run_dir).split_mode == "pooled":
+            # split_mode: pooled -> pool = train + val, partitioned once into F and C; the seed is
+            # measured on F only (incumbent_trials per task), never on the hidden confirm stratum.
+            from cap_evolve import promotion as _promotion
+            from cap_evolve.specfile import spec_for_run as _spec_for_run
+            _p2 = _promotion.P2Params.from_spec({**(_spec_for_run(run_dir) or {}), "promotion_rule": "P2"})
+            result = harness.baseline_pooled(adapter, cap_path, run_dir=run_dir,
+                                             n_trials=max(args.n_trials, _p2.incumbent_trials),
+                                             workers=args.workers)
+        else:
+            result = harness.baseline(adapter, cap_path, run_dir=run_dir, n_trials=args.n_trials,
+                                       workers=args.workers)
 
         # Materialize ./guidance/<cap>/SKILL.md (+ diagnose + capability_sources) into the
         # RUN dir itself, once, here — regardless of orchestration_mode. Deterministic mode

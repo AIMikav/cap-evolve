@@ -73,10 +73,11 @@ SWITCH_MODEL = {
     "failure_clustering": "edits target PARAMS.cluster_tasks tasks instead of PARAMS.single_tasks",
     "pregate": "defective proposals rejected before any rollout; off = evaluated like any other",
     "context_digest": "NO-OP in the simulator (acts on LLM proposal quality, not measurable here)",
+    "history": "NO-OP in the simulator (changes only what the proposer sees, not measurable here)",
 }
 KEYS = tuple(optimizer_config.DEFAULTS)
 _ORDER = ("dag_parallel", "active_eval", "smart_merge", "cost_gating", "pregate", "failure_clustering",
-          "context_digest")
+          "context_digest", "history")
 ARMS = {"baseline_original": (), "dag_only": ("dag_parallel",), "adaptive_only": ("active_eval",),
         "dag_adaptive": ("dag_parallel", "active_eval"),
         "plus_smart_merge": ("dag_parallel", "active_eval", "smart_merge"),
@@ -87,7 +88,7 @@ ARMS["shipped_default"] = tuple(k for k, v in optimizer_config.DEFAULTS.items() 
 
 
 def arm_config(name: str) -> dict[str, bool]:
-    """The explicit, validated ``optimizer.ablation`` table of an arm (all seven keys set)."""
+    """The explicit, validated ``optimizer.ablation`` table of an arm (every key set)."""
     on = ARMS[name]
     return {k: k in on for k in KEYS}
 

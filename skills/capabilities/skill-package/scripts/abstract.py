@@ -294,6 +294,24 @@ def apply(capability_dir: Path, edits: list[dict] | None = None) -> dict:
     return report
 
 
+def _helpers_on() -> bool:
+    """v2 helpers (``helpers.enabled`` / CAPEVOLVE_HELPERS): risky code is an error, ``skills/`` is a root."""
+    try:
+        from cap_evolve import helpers
+        return helpers.enabled()
+    except Exception:  # noqa: BLE001 — a standalone copy of this skill has no cap_evolve
+        return False
+
+
+def _skills_root(capability_dir: Path) -> Path | None:
+    """With helpers on, a candidate that keeps its skill packages under ``skills/`` (next to prompt.md)
+    is validated as a multi-skill root."""
+    sk = Path(capability_dir) / "skills"
+    if _helpers_on() and not (Path(capability_dir) / "SKILL.md").exists() and _subpackages(sk):
+        return sk
+    return None
+
+
 def is_empty(capability_dir: Path) -> bool:
     """Return True when the capability directory has no meaningful skill content yet.
 
@@ -301,7 +319,7 @@ def is_empty(capability_dir: Path) -> bool:
     so the optimizer can create the initial skill from failing trajectories."""
     capability_dir = Path(capability_dir)
     subs = _subpackages(capability_dir)
-    if subs:
+    if subs or _skills_root(capability_dir):
         return False
     return not (capability_dir / "SKILL.md").exists()
 
@@ -317,6 +335,8 @@ def validate(capability_dir: Path) -> dict:
     sub-package and aggregate: problems/warnings are namespaced by ``<skill>:`` and
     ``ok`` is True only if every sub-package is valid."""
     capability_dir = Path(capability_dir)
+    if (nested := _skills_root(capability_dir)) is not None:
+        capability_dir = nested
     if is_empty(capability_dir):
         return {"ok": True, "empty": True, "name": "", "problems": [], "warnings": [],
                 "scripts": []}
@@ -525,8 +545,12 @@ def _validate_scripts(pkg: Path, problems: list, warnings: list) -> list[dict]:
             rep["stub"] = True
         risky = _risky(tree)
         if risky:
-            warnings.append(f"{rel} uses {', '.join(risky)} — a bundled script is "
-                            "executable context; confirm this is intended in the diff")
+            if _helpers_on():   # v2 helpers run in the target's kernel, offline: network/exec is an error
+                problems.append(f"{rel} uses {', '.join(risky)} — not allowed in a helper script "
+                                "(offline, no subprocess, no dynamic exec)")
+            else:
+                warnings.append(f"{rel} uses {', '.join(risky)} — a bundled script is "
+                                "executable context; confirm this is intended in the diff")
             rep["risky"] = risky
         rep.update(_script_self_check(f, pkg))
         if rep.get("self_check") == "absent":

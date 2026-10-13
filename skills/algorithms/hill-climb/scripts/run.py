@@ -70,10 +70,15 @@ def main(argv=None) -> int:
                         "from rollouts) instead of baseline")
     # The shared optimizer read-context flags (one declaration for every algorithm).
     harness.OptimizerContext.add_arguments(p)
+    harness.add_paper_switch_arguments(p)
     p.add_argument("--protected-paths", default="",
                    help="comma-separated globs sealing the eval surface (scorer/gold/tasks/"
                         "tests). 'default' expands to the built-in set. Empty = off. A "
                         "candidate that edits one is INDECISIVE, not scored 0.0.")
+    p.add_argument("--hc2", default=None,
+                   help="OPT-IN HC-2 (cap_evolve.hc2): JSON of the spec keys hc2, hc2_*, p2_*, "
+                        "promotion_rule, split_mode. K parallel proposals per round on the shared "
+                        "P2 evaluator. Unset = the v1 loop, unchanged.")
     p.add_argument("--convergence", action="store_true",
                    help="graded plateau signal (warn -> paradigm shift -> stop) injected "
                         "into the optimizer prompt; off by default")
@@ -104,7 +109,7 @@ def main(argv=None) -> int:
     adapter = load_adapter(Path(args.project))
     optimizer = harness.optimizer_from_command(shlex.split(args.optimizer))
     if args.resume and run_dir.best_id:
-        current_val = harness.split_result_from_rollouts(run_dir, run_dir.best_id, "val")
+        current_val = harness.resume_val(run_dir, run_dir.best_id, bool(getattr(args, "promotion_rule", None)))
     else:
         current_val = SplitResult.from_dict(
             json.loads((run_dir.root / "baseline.json").read_text())["val"])
@@ -116,12 +121,33 @@ def main(argv=None) -> int:
                    else {"mode": args.gate_mode, "k_se": args.k_se})
     if args.gate_max_broke is not None:
         gate_kwargs["gate_max_broke"] = int(args.gate_max_broke)
+    gate_kwargs.update(harness.paper_switch_kwargs(args))
     if args.objectives:
         try:
             gate_kwargs["objectives"] = json.loads(args.objectives)
         except json.JSONDecodeError as exc:
             print(json.dumps({"error": f"--objectives is not valid JSON: {exc}"}))
             return 2
+
+    if args.hc2:
+        from cap_evolve import hc2, promotion
+        hc2_spec = json.loads(args.hc2)
+        try:
+            hc2_params = hc2.HC2Params.from_spec(hc2_spec)
+            p2 = promotion.P2Params.from_spec(hc2_spec)
+        except ValueError as exc:
+            print(json.dumps({"error": f"--hc2: {exc}"}))
+            return 2
+        from cap_evolve.evaluator import P2Evaluator
+        # workers=1: concurrency lives in hc2_loop's job map, not inside each job
+        evaluator = P2Evaluator(adapter, run_dir, p2, workers=1,
+                                errored_policy=gate_kwargs.get("errored_trial_policy"))
+        result = hc2.hc2_loop(adapter, run_dir=run_dir, optimizer=optimizer, evaluator=evaluator,
+                              params=hc2_params, ctx=ctx, max_iterations=args.max_iterations,
+                              store=store, workers=harness.DEFAULT_WORKERS)
+        run_dir.close_observers()
+        print(json.dumps(result, indent=2))
+        return 0
 
     result = harness.hill_climb_loop(
         adapter, run_dir=run_dir, optimizer=optimizer, current_val=current_val,

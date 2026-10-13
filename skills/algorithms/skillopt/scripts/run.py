@@ -80,6 +80,7 @@ def main(argv=None) -> int:
                    help="continue from the run's current best instead of baseline")
     # The shared optimizer read-context flags — identical set to hill-climb/gepa.
     harness.OptimizerContext.add_arguments(p)
+    harness.add_paper_switch_arguments(p)
     p.add_argument("--protected-paths", default="",
                    help="comma-separated globs sealing the eval surface (scorer/gold/tasks/"
                         "tests). 'default' expands to the built-in set. Empty = off. A "
@@ -103,7 +104,7 @@ def main(argv=None) -> int:
     adapter = load_adapter(Path(args.project))
     optimizer = harness.optimizer_from_command(shlex.split(args.optimizer))
     if args.resume and run_dir.best_id:
-        current_val = harness.split_result_from_rollouts(run_dir, run_dir.best_id, "val")
+        current_val = harness.resume_val(run_dir, run_dir.best_id, bool(getattr(args, "promotion_rule", None)))
     else:
         current_val = SplitResult.from_dict(
             json.loads((run_dir.root / "baseline.json").read_text())["val"])
@@ -114,6 +115,7 @@ def main(argv=None) -> int:
                    else {"mode": args.gate_mode, "k_se": args.k_se})
     if args.gate_max_broke is not None:
         gate_kwargs["gate_max_broke"] = int(args.gate_max_broke)
+    gate_kwargs.update(harness.paper_switch_kwargs(args))
 
     result = skillopt.skillopt_loop(
         adapter, run_dir=run_dir, optimizer=optimizer, current_val=current_val,

@@ -95,6 +95,21 @@ python "$A/act.py" merge cand_1 cand_2 --run-dir "$R" --project "$P" --tag cand_
    then probe and promote `cand_m` like any node. [`references/merge.md`](references/merge.md).
 7. **Repeat** from the digest until it says stop (budget, goal met, or `stop_condition`). Then finalize.
 
+## Conductor engine (opt-in: `ao_engine: conductor`)
+
+With `ao_engine: conductor` in `orchestration_mode: agent`, `cap-evolve run` starts
+`scripts/conductor.py supervise` instead of handing the loop to a conversational agent. Code runs a tick
+loop (reap, promote, merge or rebase, rungs, propose, stop); the LLM only runs bounded one-shot jobs
+(propose, merge-resolve) with a per-job token cap, and never polls or waits. Evaluations are chunked
+(`ao_chunk`, default 20 rollouts) in a shared slot pool, with `promotion_rule: P2` going through the shared
+P2 evaluator. State is `graph.jsonl` plus `conductor.json`; a killed run resumes and `finalize` is
+idempotent. Stopping is structured only (rollouts, tokens, wall `deadline_utc`, `stop_at_reward`, plateau
+with a floor); prose in `stop_condition` is never parsed into a cap. A `cost` objective (minimize) adds cost per
+success: promote on reward with cost per success at most `eps` (default 0.10) worse, or on cost per
+success at least `eps` lower with reward non-inferior. Any other gating objective is refused (exit 2). With K=1, rungs off and merge off it makes the same decisions as hill-climb. When PR-3 helper
+checks are importable and `helpers.enabled`, each proposal gets `lint_candidate` and `run_smoke` before any
+rollout. Without the flag, nothing here runs and the loop below is unchanged.
+
 ## If the digest says X, do Y
 
 | digest says | do |
@@ -103,6 +118,7 @@ python "$A/act.py" merge cand_1 cand_2 --run-dir "$R" --project "$P" --tag cand_
 | cluster stuck (2 failed attempts) | re-read raw full traces (never test), change the edit FORM, not wording |
 | same tool-error signature across tasks | fix it in tool code; no multi-task argument needed |
 | pregate warning (tool fixture fails, policy growth) | fix before any probe; it is free |
+| same procedure fails or is redone by hand in >= 2 distinct traces, surface allows scripts | codify it into a helper ([`references/helpers.md`](references/helpers.md)); 1 trace never justifies one |
 | tip at full coverage, P(beat champion) high | `promote` |
 | tip P(beat parent) low after full probe | `prune` with the numbers |
 | tip partial coverage, undecided | `probe --auto` for more cells |
@@ -143,5 +159,6 @@ One level deep; load only when the digest points there.
 - [`references/objectives-cost.md`](references/objectives-cost.md) — cost gating, budget, stop_condition. **Load** when objectives are set or budget is tight.
 - [`references/ablation.md`](references/ablation.md) — the seven switches. **Load** before disabling any.
 - [`references/tool-edit-lessons.md`](references/tool-edit-lessons.md) — edit forms, guard closure. **Load** before editing a surface the first time or after a stuck cluster.
+- [`references/helpers.md`](references/helpers.md) — when to codify a procedure into a deterministic helper, and the lint/smoke it must pass. **Load** when the surface allows scripts and a procedure recurs.
 - [`references/stats.md`](references/stats.md) — what the numbers resolve, sign test. **Load** when a result surprises you.
 - [`references/legacy.md`](references/legacy.md) — all switches off: pointer to the archived round-loop docs. **Load** only in legacy mode (old SKILL sections live in docs/archive/agent-optimize-legacy/legacy-SKILL.md).

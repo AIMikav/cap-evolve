@@ -39,8 +39,23 @@ def env_fp() -> str:
     return os.environ.get("CAPEVOLVE_ENV_FP", "")
 
 
-def rows(run_dir) -> list[dict]:
-    path = Path(run_dir.root) / LEDGER
+def _ledger_paths(run_dir) -> list:
+    """The run's ledger, plus the sealed one (rows of the hidden confirm stratum) when pooled."""
+    paths = [Path(run_dir.root) / LEDGER]
+    sealed = getattr(run_dir, "sealed_dir", None)
+    if sealed is not None:
+        paths.append(Path(sealed) / LEDGER)
+    return paths
+
+
+def _path_for(run_dir, split: str) -> Path:
+    sealed = getattr(run_dir, "sealed_dir", None)
+    if split == "confirm" and sealed is not None:
+        return Path(sealed) / LEDGER
+    return Path(run_dir.root) / LEDGER
+
+
+def _rows_of(path: Path) -> list[dict]:
     if not path.exists():
         return []
     out = []
@@ -50,6 +65,10 @@ def rows(run_dir) -> list[dict]:
         except ValueError:
             continue  # a torn trailing line must not poison the ledger
     return out
+
+
+def rows(run_dir) -> list[dict]:
+    return [r for p in _ledger_paths(run_dir) for r in _rows_of(p)]
 
 
 def counts(run_dir, hash_: str, split: str = "val", fp: str | None = None) -> dict[str, tuple[float, int]]:
@@ -95,14 +114,14 @@ def record(run_dir, candidate_dir, split: str, tag: str, task_ids, ks, *, seed_b
     if not enabled() or split == "test":
         return 0
     h, fp = cap_hash(candidate_dir), env_fp()
-    path = Path(run_dir.root) / LEDGER
+    path = _path_for(run_dir, split)
     with _file_lock(path.with_suffix(".lock")):
-        have = rows(run_dir)
+        have = _rows_of(path)
         old = {(r["tag"], r["split"], r["task"], r["k"]): r for r in have}
         new = []
         for tid in task_ids:
             for j, k in enumerate(ks):
-                f = Path(run_dir.rollouts) / split / f"{tid}__{tag}__t{k}.json"
+                f = run_dir.rollout_dir(split) / f"{tid}__{tag}__t{k}.json"
                 try:
                     d = json.loads(f.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
@@ -116,7 +135,7 @@ def record(run_dir, candidate_dir, split: str, tag: str, task_ids, ks, *, seed_b
                     continue
                 new.append({"cap_hash": h, "split": split, "task": tid, "trial_idx": seed_base + j,
                             "tag": tag, "k": k, "env_fp": fp, "window_id": 0, "reward": reward,
-                            "subset": subset, "cost": float(ro.get("cost_usd") or 0.0),
+                            "subset": subset, "cost": None if ro.get("cost_usd") is None else float(ro["cost_usd"]),
                             "tokens": int(ro.get("tokens") or 0), "ts": time.time()})
         if new:
             gone = {(r["tag"], r["split"], r["task"], r["k"]) for r in new}
@@ -125,6 +144,22 @@ def record(run_dir, candidate_dir, split: str, tag: str, task_ids, ks, *, seed_b
             tmp.write_text("".join(json.dumps(r) + "\n" for r in keep + new), encoding="utf-8")
             os.replace(tmp, path)
         return len(new)
+
+
+def forget_tags(run_dir, tags) -> int:
+    """Drop the ledger rows of scratch ``tags`` (e.g. delta-debugging probes that are not candidates)."""
+    gone = set(tags)
+    dropped = 0
+    for path in _ledger_paths(run_dir):
+        with _file_lock(path.with_suffix(".lock")):
+            have = _rows_of(path)
+            keep = [r for r in have if r["tag"] not in gone]
+            if len(keep) != len(have):
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text("".join(json.dumps(r) + "\n" for r in keep), encoding="utf-8")
+                os.replace(tmp, path)
+            dropped += len(have) - len(keep)
+    return dropped
 
 
 def backfill(run_dir) -> int:
@@ -150,7 +185,7 @@ _EVALUATE = Path(__file__).resolve().parents[2] / "skills" / "phases" / "evaluat
 
 
 def eval_cmd(run_dir, project, tag: str, split: str, n_trials: int, *, ids=None,
-             trial_offset: int = 0, skills_dir=None) -> list[str]:
+             trial_offset: int = 0, fixed_seeds: bool = False, skills_dir=None) -> list[str]:
     script = (Path(skills_dir) / "phases" / "evaluate" / "scripts" / "run.py") if skills_dir else _EVALUATE
     cmd = [sys.executable, str(script), "--run-dir", str(run_dir), "--project", str(project),
            "--candidate", str(Path(run_dir) / "work" / tag), "--split", split,
@@ -159,4 +194,6 @@ def eval_cmd(run_dir, project, tag: str, split: str, n_trials: int, *, ids=None,
         cmd += ["--ids", ",".join(map(str, ids))]
     if trial_offset:
         cmd += ["--trial-offset", str(trial_offset)]
+    if fixed_seeds:
+        cmd += ["--fixed-seeds"]
     return cmd

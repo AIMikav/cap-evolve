@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from cap_evolve import CapabilityAdapter, Rollout, Score, Task
+from cap_evolve import helpers as _helpers
 
 DOMAIN = "airline"
 
@@ -50,6 +51,26 @@ _STOP_LEAK_RE = re.compile(
     r"keep\s+(?:going|talking)|not\s+(?:done|finished)\s+yet)\b.{0,400}###\s*stop\s*###",
     re.I | re.S,
 )
+
+
+#: Markers that tie an error to something the CANDIDATE owns (its edited ``tools.py`` / tool schema /
+#: ``policy.md`` template), as opposed to the serving path. Matched against the error text tau2 records.
+_CANDIDATE_FAULT_RE = re.compile(
+    r"tools\.py|tool[_ ]definition|tool[_ ]schema|invalid\s+tool|unknown\s+tool|"
+    r"ValidationError|policy\.md|failed to render|template", re.IGNORECASE)
+
+
+def classify_error_kind(termination: str, evidence: str = "") -> str:
+    """``"candidate"`` | ``"infra"`` for an errored tau2 simulation (the ``error_kind`` hook).
+
+    The harness scores a ``candidate`` error as a measured failure (0.0) under ``errored_trial_policy:
+    fail`` and keeps ``infra`` errors as missing data, so an edit that breaks its own tools cannot hide
+    behind dropped trials. Only ``UNEXPECTED_ERROR`` whose recorded text points at candidate-owned
+    files is attributed to the candidate; timeouts, ``INFRASTRUCTURE_ERROR`` and the user-simulator
+    leak stay infra."""
+    if "UNEXPECTED_ERROR" in str(termination) and _CANDIDATE_FAULT_RE.search(evidence or ""):
+        return "candidate"
+    return "infra"
 
 
 def _leaked_stop_continuation(messages) -> bool:
@@ -285,6 +306,9 @@ def _native_sims_enabled() -> bool:
         "0", "false", "no", "off"}
 
 class Adapter(CapabilityAdapter):
+    #: Tags errored rollouts with metadata["error_kind"] ("candidate" | "infra").
+    supports_error_kind = True
+
 
     # Snapshot of the pristine airline env constructor (set on first apply).
     _original_env_ctor = None
@@ -502,6 +526,14 @@ class Adapter(CapabilityAdapter):
         except Exception:
             messages = None
 
+        fault_meta: dict = {}
+        if _helpers.enabled() and reward < 1.0 and (hit := _helpers.fault_in_messages(messages)):
+            # v2 helpers: a helper method in the candidate's tools.py (decorated ``@candidate_helper``)
+            # raised during the sim. A candidate fault scores 0 under errored_trial_policy=fail; it is
+            # not missing data, so crashing out of a hard task cannot raise the mean.
+            error = f"candidate helper fault: {hit}"
+            fault_meta = _helpers.candidate_fault_metadata(hit)
+
         if error is None and reward < 1.0 and _leaked_stop_continuation(messages):
             error = (
                 "tau2 user-simulator emitted ###STOP### alongside leaked reasoning that "
@@ -513,6 +545,13 @@ class Adapter(CapabilityAdapter):
         reward_info_dump = (
             reward_info.model_dump(mode="json") if reward_info is not None else None
         )
+
+        kind_meta: dict = {}
+        if error is not None:
+            evidence = " ".join(str(x) for x in (
+                getattr(sim, "error", None), getattr(sim, "termination_error", None),
+                getattr(reward_info, "info", None) if reward_info is not None else None) if x)
+            kind_meta["error_kind"] = classify_error_kind(str(term), evidence)
 
         return Rollout(
             task_id=task_id,
@@ -527,6 +566,8 @@ class Adapter(CapabilityAdapter):
                 "tau2_reward_info": reward_info_dump,
                 "termination_reason": str(term),
                 **cost_meta,
+                **kind_meta,
+                **fault_meta,
             },
         )
 

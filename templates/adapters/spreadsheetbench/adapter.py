@@ -46,6 +46,8 @@ SETUP:
        SPREADSHEETBENCH_CONCURRENCY=4                # parallel tasks (each = one Docker container)
        SPREADSHEETBENCH_EXEC_TIMEOUT=180             # per code-exec call timeout (s)
        SPREADSHEETBENCH_LIBREOFFICE_BIN=/path/to/soffice
+       SPREADSHEETBENCH_AGENT_VIEW=1                 # default: sandbox sees a gold-free copy of the data (#782); 0 needs ALLOW_GOLD_IN_MOUNT=1
+       SPREADSHEETBENCH_GOLD_DIR=/path/to/pristine   # read gold from here instead (DATA_DIR is then the agent's view)
 
   8. Run: cap-evolve check && cap-evolve run
 
@@ -121,12 +123,30 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from cap_evolve import CapabilityAdapter, Rollout, Score, Task
+from cap_evolve import helpers as _helpers
 
 import model_config
 
 # --- configuration -----------------------------------------------------------
 HARNESS_DIR = os.environ.get("SPREADSHEETBENCH_HARNESS_DIR", "")
 DATA_DIR = os.environ.get("SPREADSHEETBENCH_DATA_DIR", "")
+# Where the GOLD answer workbooks are read from at SCORING time. Unset (default) = DATA_DIR, i.e. the
+# historical behaviour in which the gold sits inside the very directory that is bind-mounted read-write
+# into the agent's sandbox at /mnt/data. Setting it to a separate, read-only, evaluator-owned tree
+# lets DATA_DIR be a gold-free "agent view" (inputs + writable outputs/ only). Layout is identical:
+# <GOLD_DIR>/spreadsheet/<id>/<n>_<id>_{answer|golden}.xlsx.
+GOLD_DIR = os.environ.get("SPREADSHEETBENCH_GOLD_DIR", "")
+# SAFE BY DEFAULT (#782): the sandbox mounts a gold-free COPY of the dataset (inputs + dataset.json + a
+# writable outputs/) instead of SPREADSHEETBENCH_DATA_DIR itself, and gold is read from the original dir at
+# scoring time. Otherwise the answer workbooks sit next to the inputs inside the read-write /mnt/data mount,
+# where agent-generated code can list and read them. SPREADSHEETBENCH_AGENT_VIEW_DIR pins where the copy is
+# built (default: a temp dir removed at exit). SPREADSHEETBENCH_GOLD_DIR names the gold dir explicitly (DATA_DIR
+# is then taken to be the agent's view). The historical shared mount needs BOTH SPREADSHEETBENCH_AGENT_VIEW=0 and
+# SPREADSHEETBENCH_ALLOW_GOLD_IN_MOUNT=1, and logs a loud warning. Whatever is mounted is scanned: a gold-named
+# file under it stops the run unless ALLOW_GOLD_IN_MOUNT=1.
+AGENT_VIEW = os.environ.get("SPREADSHEETBENCH_AGENT_VIEW", "1") == "1"
+ALLOW_GOLD_IN_MOUNT = os.environ.get("SPREADSHEETBENCH_ALLOW_GOLD_IN_MOUNT", "0") == "1"
+AGENT_VIEW_DIR = os.environ.get("SPREADSHEETBENCH_AGENT_VIEW_DIR", "")
 TASK_IDS = [s.strip() for s in os.environ.get("SPREADSHEETBENCH_TASK_IDS", "").split(",") if s.strip()]
 MAX_TURNS = int(os.environ.get("SPREADSHEETBENCH_MAX_TURNS", "5"))
 PREVIEW_ROWS = int(os.environ.get("SPREADSHEETBENCH_ROWS", "5"))
@@ -171,6 +191,8 @@ REWARD_RECALC = os.environ.get("SPREADSHEETBENCH_REWARD_RECALC", "0") == "1"
 # Where the vendored sandbox bind-mounts SPREADSHEETBENCH_DATA_DIR inside every container
 # (code_exec_docker/jupyter.py hardcodes this bind target).
 _CONTAINER_DATA_ROOT = "/mnt/data"
+#: v2 helpers reach the kernel as TEXT (cap_evolve.helpers.kernel_bootstrap), importable as skills.<skill>.<script>.
+_SKILLS_IMPORT_ROOT = "skills"
 LIBRE_TIMEOUT = int(os.environ.get("SPREADSHEETBENCH_LIBREOFFICE_TIMEOUT", "120"))
 
 _TASK_TEMPLATE = """You need to solve the following spreadsheet manipulation question. It contains six pieces of information:
@@ -263,7 +285,19 @@ class _Vendor:
         return cls._mod
 
 
-def _data_dir() -> Path:
+_GOLD_FILE_RE = re.compile(r"(_answer|_golden|^golden|^answer)", re.I)
+# ALLOWLIST of what the agent's mount may hold under spreadsheet/<id>/: indexed input workbooks of every release
+# (`1_<id>_input.xlsx`, `1_<id>_init.xlsx`, tolerating the 912 set's stray space / .xlsm), the bare
+# `initial.xlsx`, and the verified-400's `prompt.txt`. Checked on all three shipped datasets: every non-gold file
+# matches. Anything else is refused by the startup assertion, so a new file type upstream cannot leak by default.
+_INPUT_FILE_RE = re.compile(r"^(\d+_.+?_(input|init)\s*\.xls[xm]?|initial\.xls[xm]?|prompt\.txt)$", re.I)
+_VIEW_MARKER = ".capevolve_agent_view"
+_VIEWS: dict[tuple, Path] = {}
+_VIEW_LOCK = threading.Lock()
+
+
+def _source_dir() -> Path:
+    """The pristine dataset dir (SPREADSHEETBENCH_DATA_DIR), validated."""
     if not DATA_DIR:
         raise RuntimeError(
             "SPREADSHEETBENCH_DATA_DIR is not set. Run "
@@ -274,6 +308,147 @@ def _data_dir() -> Path:
     if not (d / "dataset.json").exists():
         raise RuntimeError(f"SPREADSHEETBENCH_DATA_DIR={d} has no dataset.json.")
     return d
+
+
+def _build_agent_view(src: Path, dst: Path) -> Path:
+    """Copy dataset.json and the ALLOWLISTED input files of the (selected) tasks into dst, plus an empty outputs/.
+
+    Refuses symlinks in the source task dirs (copy2 would follow one and copy gold content under an input name).
+    An existing dst is replaced only if it is empty or carries our marker file; anything else is somebody's
+    data and is never deleted.
+    """
+    if dst.exists():
+        if not dst.is_dir() or dst.is_symlink():
+            raise RuntimeError(f"agent view dir {dst} exists and is not a plain directory; refusing to replace it")
+        if any(dst.iterdir()) and not (dst / _VIEW_MARKER).exists():
+            raise RuntimeError(
+                f"agent view dir {dst} is not empty and was not created by this adapter (no {_VIEW_MARKER} "
+                "marker); refusing to delete it. Point SPREADSHEETBENCH_AGENT_VIEW_DIR at an empty or new dir."
+            )
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True)
+    (dst / _VIEW_MARKER).write_text("created by templates/adapters/spreadsheetbench/adapter.py\n")
+    shutil.copy2(src / "dataset.json", dst / "dataset.json")
+    wanted = set(TASK_IDS)
+    skipped = 0
+    for sd in sorted((src / "spreadsheet").iterdir()):
+        if sd.is_symlink():
+            raise RuntimeError(f"{sd} is a symlink; refusing to build an agent view from a dataset with symlinks")
+        if not sd.is_dir() or (wanted and sd.name not in wanted):
+            continue
+        dd = dst / "spreadsheet" / sd.name
+        dd.mkdir(parents=True)
+        for f in sorted(sd.iterdir()):
+            if f.is_symlink():
+                raise RuntimeError(f"{f} is a symlink; refusing to copy it into the agent view (it could point at gold)")
+            if not f.is_file():
+                continue
+            if _INPUT_FILE_RE.match(f.name) and not _GOLD_FILE_RE.search(f.name):
+                shutil.copy2(f, dd / f.name)
+            else:
+                skipped += 1
+    if skipped:
+        print(f"spreadsheetbench: agent view withheld {skipped} non-input file(s) (gold and unrecognised names)",
+              file=sys.stderr)
+    (dst / "outputs").mkdir()
+    # the executor container runs as another uid: it needs traverse/read on the tree and write on outputs/
+    for dp, _dn, _fn in os.walk(dst):
+        os.chmod(dp, 0o755)
+    os.chmod(dst / "outputs", 0o777)
+    return dst
+
+
+def _agent_view(src: Path) -> Path:
+    # keyed by the task selection too: the copy only holds the selected tasks
+    key = (str(src.resolve()), tuple(sorted(TASK_IDS)))
+    with _VIEW_LOCK:
+        if key not in _VIEWS:
+            if AGENT_VIEW_DIR:
+                dst = Path(AGENT_VIEW_DIR).expanduser()
+            else:
+                # NB the default view is a temp dir deleted at interpreter exit, and the per-rollout outputs live in
+                # it, so they are gone afterwards. run_suite.sh pins SPREADSHEETBENCH_AGENT_VIEW_DIR (and moves the
+                # outputs into the kept-run slot) for exactly that reason; set it yourself if you need the workbooks.
+                dst = Path(tempfile.mkdtemp(prefix="capevolve_sb_view_")) / "view"
+                import atexit
+                atexit.register(shutil.rmtree, dst.parent, True)
+            _VIEWS[key] = _build_agent_view(src, dst)
+        return _VIEWS[key]
+
+
+def _gold_dir() -> Path:
+    """Directory holding the gold answers: SPREADSHEETBENCH_GOLD_DIR if set, else the pristine data dir."""
+    if GOLD_DIR:
+        return Path(GOLD_DIR).expanduser()
+    return _source_dir()
+
+
+_MOUNT_CHECKED: set[str] = set()
+
+
+def _offending_files_under(mount: Path) -> tuple[list[Path], list[Path], list[Path]]:
+    """(gold-named files, files whose name is not on the input allowlist, symlinks) under mount/spreadsheet."""
+    gold: list[Path] = []
+    unexpected: list[Path] = []
+    links: list[Path] = []
+    root = mount / "spreadsheet"
+    if not root.is_dir():
+        return gold, unexpected, links
+    for p in root.rglob("*"):
+        if p.is_symlink():
+            links.append(p)
+        elif p.is_file():
+            if _GOLD_FILE_RE.search(p.name):
+                gold.append(p)
+            elif not _INPUT_FILE_RE.match(p.name):
+                unexpected.append(p)
+    return gold, unexpected, links
+
+
+def _check_mount_is_gold_free(mount: Path) -> None:
+    """Startup assertion on the directory the agent's sandbox will mount (allowlist, not denylist).
+
+    Refuses: gold-named files (answer/golden), ANY file whose name is not a recognised input name, and symlinks
+    (which could point at gold). Covers the historical shared mount, GOLD_DIR set while DATA_DIR still holds
+    gold, and a stale or hand-built view. ALLOW_GOLD_IN_MOUNT=1 downgrades it to a warning.
+    """
+    key = str(mount.resolve())
+    if key in _MOUNT_CHECKED:
+        return
+    gold, unexpected, links = _offending_files_under(mount)
+    bad = gold + unexpected + links
+    if bad and not ALLOW_GOLD_IN_MOUNT:
+        raise RuntimeError(
+            f"the directory the agent sandbox mounts ({mount}) holds {len(gold)} gold-named file(s), "
+            f"{len(unexpected)} file(s) with an unrecognised name and {len(links)} symlink(s), e.g. {bad[0].name}. "
+            "Agent-generated code could read them (#782). Use SPREADSHEETBENCH_AGENT_VIEW=1 (default) or point "
+            "SPREADSHEETBENCH_DATA_DIR at a clean view, or set SPREADSHEETBENCH_ALLOW_GOLD_IN_MOUNT=1 to accept "
+            "the leak knowingly."
+        )
+    if bad:
+        print(f"spreadsheetbench: WARNING: {len(gold)} gold file(s), {len(unexpected)} unrecognised file(s) and "
+              f"{len(links)} symlink(s) are visible to the agent's sandbox under {mount} "
+              "(SPREADSHEETBENCH_ALLOW_GOLD_IN_MOUNT=1). Results are NOT comparable to a gold-free run.",
+              file=sys.stderr)
+    _MOUNT_CHECKED.add(key)
+
+
+def _data_dir() -> Path:
+    """The directory the agent's sandbox sees (inputs + outputs/): a gold-free view by default."""
+    d = _source_dir()
+    if GOLD_DIR:
+        mount = d                       # explicit: DATA_DIR is the agent's view, gold lives in GOLD_DIR
+    elif AGENT_VIEW:
+        mount = _agent_view(d)
+    elif ALLOW_GOLD_IN_MOUNT:
+        mount = d
+    else:
+        raise RuntimeError(
+            "SPREADSHEETBENCH_AGENT_VIEW=0 would mount the gold answers into the agent sandbox (#782). "
+            "Set SPREADSHEETBENCH_ALLOW_GOLD_IN_MOUNT=1 as well if that is really intended."
+        )
+    _check_mount_is_gold_free(mount)
+    return mount
 
 
 _dataset_cache: list[dict] | None = None
@@ -418,6 +593,64 @@ if __name__ == "__main__":
 '''
 
 
+# The vendored jupyter.py stops reading at the shell channel's execute_reply, but iopub
+# stream output travels on another socket and can arrive after it; the late output is then
+# dropped and the call returns "[Code executed successfully with no output]" (intermittent,
+# seen after long idle). third_party/ must stay byte-identical to upstream, so the staged
+# copy is patched: wait for the iopub status:idle that follows the reply (5 s grace).
+_WAIT_FOR_MESSAGES_FIXED = r'''        async def wait_for_messages():
+            # The kernel publishes stream/iopub output and the shell channel's
+            # execute_reply on different sockets, so the reply can overtake the
+            # last iopub messages. Stopping at execute_reply then drops output
+            # (observed as "no output" after long idle). Wait for the iopub
+            # status:idle that follows the reply, with a short grace so a kernel
+            # that never reports idle cannot hang the call.
+            reply_seen = False
+            idle_seen = False
+            while not (reply_seen and idle_seen):
+                try:
+                    if reply_seen:
+                        raw = await asyncio.wait_for(self.ws.read_message(), 5.0)
+                    else:
+                        raw = await self.ws.read_message()
+                except asyncio.TimeoutError:
+                    break
+                msg = json_decode(raw)
+                msg_type = msg['msg_type']
+                parent_msg_id = msg['parent_header'].get('msg_id', None)
+
+                if parent_msg_id != msg_id:
+                    continue
+
+                if os.environ.get("DEBUG", False):
+                    logging.info(f"MSG TYPE: {msg_type.upper()} REPLY:{reply_seen} IDLE:{idle_seen}\nCONTENT: {msg['content']}")
+
+                if msg_type == 'error':
+                    traceback = "\n\n\n\n".join(msg["content"]["traceback"])
+                    outputs.append(traceback)
+                elif msg_type == 'stream':
+                    outputs.append(msg['content']['text'])
+                elif msg_type in ['execute_result', 'display_data']:
+                    outputs.append(msg['content']['data']['text/plain'])
+                    if 'image/png' in msg['content']['data']:
+                        # use markdone to display image (in case of large image)
+                        # outputs.append(f"\n<img src=\"data:image/png;base64,{msg['content']['data']['image/png']}\"/>\n")
+                        outputs.append(f"![image](data:image/png;base64,{msg['content']['data']['image/png']})")
+                elif msg_type == 'status' and msg['content'].get('execution_state') == 'idle':
+                    idle_seen = True
+                elif msg_type == 'execute_reply':
+                    reply_seen = True
+            return reply_seen
+
+'''
+
+
+def _patch_jupyter_wait(src: str) -> str:
+    start = src.index("        async def wait_for_messages():")
+    end = src.index("        async def interrupt_kernel():")
+    return src[:start] + _WAIT_FOR_MESSAGES_FIXED + src[end:]
+
+
 class _Sandbox:
     def __init__(self) -> None:
         vendor = _Vendor.get()
@@ -430,9 +663,10 @@ class _Sandbox:
 
         self.runtime_dir = Path(tempfile.mkdtemp(prefix="capevolve_sb_sandbox_"))
         for name in ("api.py", "jupyter.py"):
-            (self.runtime_dir / name).write_text(
-                (vendor["code_dir"] / name).read_text(encoding="utf-8"), encoding="utf-8"
-            )
+            text = (vendor["code_dir"] / name).read_text(encoding="utf-8")
+            if name == "jupyter.py":
+                text = _patch_jupyter_wait(text)
+            (self.runtime_dir / name).write_text(text, encoding="utf-8")
         (self.runtime_dir / "config.json").write_text(
             json.dumps({"volumes_path": str(data_dir.resolve())}), encoding="utf-8"
         )
@@ -908,7 +1142,10 @@ def _read_task_template(ctx) -> str:
     path = Path(ctx) / "task_template.md"
     if not path.exists():
         return _TASK_TEMPLATE
-    return _TEMPLATE_COMMENT_RE.sub("", path.read_text(encoding="utf-8"), count=1).strip() + "\n"
+    text = _TEMPLATE_COMMENT_RE.sub("", path.read_text(encoding="utf-8"), count=1).strip() + "\n"
+    # v2 helpers: {skills_root} is a plain-replace token (not a format field), resolved here so both the
+    # placeholder check and the render see it. Off => untouched (an unknown placeholder, as in v1).
+    return _helpers.render_skills_root(text, _SKILLS_IMPORT_ROOT) if _helpers.enabled() else text
 
 
 def _task_template_error(ctx) -> str | None:
@@ -1326,7 +1563,26 @@ class Adapter(CapabilityAdapter):
             # burning 30 turns per task on a prompt with no output path in it.
             tmpl_error = _task_template_error(ctx)
             if tmpl_error:
-                return Rollout(task_id=task.id, error=tmpl_error)
+                # The CANDIDATE's own fault (its task_template.md is unusable): a measured
+                # failure under errored_trial_policy=fail, not missing data.
+                return Rollout(task_id=task.id, error=tmpl_error,
+                               metadata={"error_kind": "candidate"})
+
+            # v2 helpers (off unless helpers.enabled): the candidate's skills/*/scripts are defined once in
+            # the rollout's own kernel (text only: no mount, nothing under the data view, and only THIS
+            # candidate's code is ever visible). A tree that cannot be loaded is the candidate's fault.
+            use_skills = _helpers.enabled() and _helpers.has_skills(Path(ctx))
+            bootstrap_src = ""
+            if use_skills:
+                bad_skills = _helpers.skills_tree_problems(Path(ctx) / "skills")
+                try:
+                    if not bad_skills:
+                        bootstrap_src = _helpers.kernel_bootstrap(Path(ctx) / "skills")
+                except (ValueError, OSError, SyntaxError) as e:
+                    bad_skills = [str(e)]
+                if bad_skills:
+                    return Rollout(task_id=task.id, error="skills/ tree refused: " + "; ".join(bad_skills[:5]),
+                                   metadata={"error_kind": "candidate"})
 
             entry = _entries_by_id().get(task.id)
             if entry is None:
@@ -1372,10 +1628,31 @@ class Adapter(CapabilityAdapter):
             except Exception as e:  # noqa: BLE001
                 return Rollout(
                     task_id=task.id, error=f"sandbox startup failed: {e}",
-                    metadata={"run_tag": run_tag},
+                    metadata={"run_tag": run_tag, "error_kind": "infra"},
                 )
 
+            if bootstrap_src:
+                try:
+                    boot = vendor["exec_code"](client, bootstrap_src)
+                except Exception as e:  # noqa: BLE001
+                    return Rollout(task_id=task.id, error=f"sandbox exec failed: {e}",
+                                   metadata={"run_tag": run_tag, "error_kind": "infra"})
+                if not _helpers.bootstrap_ok(boot):
+                    # The candidate's fault only when its own code is named (the fault marker, or a helper
+                    # frame); a busy / timed-out / dead kernel is infrastructure and must not be scored.
+                    crash = _helpers.helper_crash_in([boot], _helpers.KERNEL_ROOT)
+                    if crash:
+                        return Rollout(task_id=task.id, error=f"candidate helpers failed to load: {crash}",
+                                       metadata={"run_tag": run_tag, **_helpers.candidate_fault_metadata(crash)})
+                    why = (boot.strip().splitlines() or ["no output"])[-1][:300]
+                    return Rollout(task_id=task.id, error=f"sandbox could not load the helpers: {why}",
+                                   metadata={"run_tag": run_tag, "error_kind": "infra"})
+
             system_prompt = _read_system_prompt(ctx)
+            if _helpers.enabled():
+                system_prompt = _helpers.render_skills_root(system_prompt, _SKILLS_IMPORT_ROOT)
+                if use_skills and (idx := _helpers.skills_prompt(Path(ctx) / "skills")):
+                    system_prompt = (system_prompt.rstrip() + "\n\n" + idx).lstrip()
             # A blank capability means NO system message — that is the no-skill control, and
             # it must not degrade into an empty-string system turn (providers differ on
             # whether they accept one, and a run that half-sends it measures neither thing).
@@ -1405,7 +1682,7 @@ class Adapter(CapabilityAdapter):
                 except Exception as e:  # noqa: BLE001
                     return Rollout(
                         task_id=task.id, error=f"LLM call failed: {e}", cost_usd=cost,
-                        tokens=tokens, metadata={"run_tag": run_tag},
+                        tokens=tokens, metadata={"run_tag": run_tag, "error_kind": "infra"},
                     )
 
                 cost += float(getattr(response, "_hidden_params", {}).get("response_cost", 0) or 0)
@@ -1439,7 +1716,7 @@ class Adapter(CapabilityAdapter):
                     # the prompt.
                     return Rollout(
                         task_id=task.id, error=f"sandbox exec failed: {e}", cost_usd=cost,
-                        tokens=tokens, metadata={"run_tag": run_tag},
+                        tokens=tokens, metadata={"run_tag": run_tag, "error_kind": "infra"},
                     )
 
                 exec_results.append(exec_result)
@@ -1459,7 +1736,21 @@ class Adapter(CapabilityAdapter):
                         break
 
             if not case1_path.exists():
+                # A sandbox denial is checked first: it is infrastructure whatever else was printed. Only the
+                # LAST result is looked at for a helper crash (an early crash the agent then worked around
+                # says nothing about why no answer exists now).
                 blocked = _sandbox_access_denied(exec_results, container_out_dir)
+                crash = (None if blocked or not use_skills
+                         else _helpers.helper_crash_in(exec_results[-1:], _helpers.KERNEL_ROOT))
+                if crash:
+                    # The candidate's own helper raised and no answer was written: a measured failure
+                    # (error_kind=candidate), not missing data, so crashing out of a task cannot help.
+                    return Rollout(
+                        task_id=task.id, output=last_code, trace=messages, cost_usd=cost, tokens=tokens,
+                        error=f"candidate helper crashed: {crash}",
+                        metadata={"run_tag": run_tag, "id": sid, "model": model_config.MODEL, "seed": seed,
+                                  **_helpers.candidate_fault_metadata(crash)},
+                    )
                 if blocked:
                     # Name the fault precisely: a denial on the OUTPUT dir is the uid
                     # mismatch on a dir we created, while a denial anywhere else under the
@@ -1486,7 +1777,8 @@ class Adapter(CapabilityAdapter):
                         cost_usd=cost,
                         tokens=tokens,
                         error=why,
-                        metadata={"run_tag": run_tag, "id": sid, "model": model_config.MODEL, "seed": seed},
+                        metadata={"run_tag": run_tag, "id": sid, "model": model_config.MODEL, "seed": seed,
+                                  "error_kind": "infra"},
                     )
             else:
                 # Case 1 solved — replay the SAME code onto whatever OTHER copies this dataset
@@ -1499,13 +1791,22 @@ class Adapter(CapabilityAdapter):
                     except Exception:  # noqa: BLE001
                         pass  # that test case's output simply won't exist; scored as a miss
 
+            meta = {"run_tag": run_tag, "id": sid, "model": model_config.MODEL, "seed": seed}
+            if use_skills and case1_path.exists():
+                # Inputs of the helper calls that returned, from the same kernel (one extra exec). Kept raw in
+                # the rollout; only feedback-split rollouts are ever turned into smoke fixtures.
+                try:
+                    meta["helper_calls"] = _helpers.parse_harvest(
+                        vendor["exec_code"](client, _helpers.harvest_snippet()))
+                except Exception:  # noqa: BLE001
+                    pass
             return Rollout(
                 task_id=task.id,
                 output=solution_code or last_code,
                 trace=messages,
                 cost_usd=cost,
                 tokens=tokens,
-                metadata={"run_tag": run_tag, "id": sid, "model": model_config.MODEL, "seed": seed},
+                metadata=meta,
             )
         except Exception as e:  # noqa: BLE001
             return Rollout(task_id=task.id, error=f"run_target failed: {e}")
@@ -1570,7 +1871,7 @@ class Adapter(CapabilityAdapter):
         # How many copies this task is graded on comes from the dataset, not from a constant:
         # the 912 set ships three, the verified 400 ships one. See _case_indices.
         for idx in _case_indices(data_dir / "spreadsheet" / sid, sid):
-            gt_path = _resolve_case_file(data_dir / "spreadsheet" / sid, idx, sid, "answer")
+            gt_path = _resolve_case_file(_gold_dir() / "spreadsheet" / sid, idx, sid, "answer")
             proc_path = data_dir / "outputs" / run_tag / f"{idx}_{sid}_output.xlsx"
             if not proc_path.exists():
                 missing.append(idx)
@@ -1631,7 +1932,7 @@ class Adapter(CapabilityAdapter):
                     entry,
                     data_dir / "outputs" / run_tag / f"{idx}_{sid}_output.xlsx",
                     _resolve_case_file(data_dir / "spreadsheet" / sid, idx, sid, "input"),
-                    _resolve_case_file(data_dir / "spreadsheet" / sid, idx, sid, "answer"),
+                    _resolve_case_file(_gold_dir() / "spreadsheet" / sid, idx, sid, "answer"),
                 )
             except Exception:  # noqa: BLE001
                 localized = []
@@ -1655,7 +1956,8 @@ class Adapter(CapabilityAdapter):
             feedback=feedback,
             raw={"test_case_results": test_results,
                  "test_case_results_no_recalc": no_recalc_results,
-                 "reward_recalc": REWARD_RECALC},
+                 "reward_recalc": REWARD_RECALC,
+                 "scorer": _scorer_provenance()},
             # All four are always recorded, whichever is the target — so the other metrics can
             # be recovered from any past run's rollouts without re-running it.
             metrics=[
@@ -1669,6 +1971,40 @@ class Adapter(CapabilityAdapter):
                  "primary": not REWARD_RECALC and SCORING == "hard", "direction": "higher"},
             ],
         )
+
+
+_PROVENANCE: dict | None = None
+
+
+def _scorer_provenance() -> dict:
+    """What produced this score: recorded on every rollout so runs are comparable and auditable.
+
+    LibreOffice's version changes the recalculated metrics (7.1.8.1 evaluates fewer functions than 25.8),
+    REWARD_RECALC changes which metric is the reward, and the vendored evaluation.py is the comparator.
+    Computed once per process; a failure to determine any field yields None for it, never an exception.
+    """
+    global _PROVENANCE
+    if _PROVENANCE is not None:
+        return _PROVENANCE
+    import hashlib
+    info: dict = {"reward_recalc": REWARD_RECALC, "scoring": SCORING,
+                  "gold_separate_from_agent_mount": bool(GOLD_DIR) or AGENT_VIEW,
+                  "gold_in_mount_allowed": ALLOW_GOLD_IN_MOUNT}
+    try:
+        info["evaluation_py_sha256"] = hashlib.sha256(
+            (Path(HARNESS_DIR).expanduser() / "evaluation" / "evaluation.py").read_bytes()).hexdigest()
+    except Exception:  # noqa: BLE001
+        info["evaluation_py_sha256"] = None
+    try:
+        libre = _libreoffice_bin()
+        info["libreoffice_bin"] = libre
+        info["libreoffice_version"] = (subprocess.run([libre, "--version"], capture_output=True, text=True,
+                                                      timeout=60).stdout.strip() or None) if libre else None
+    except Exception:  # noqa: BLE001
+        info.setdefault("libreoffice_bin", None)
+        info["libreoffice_version"] = None
+    _PROVENANCE = info
+    return info
 
 
 def _range_cells(answer_position: str):
