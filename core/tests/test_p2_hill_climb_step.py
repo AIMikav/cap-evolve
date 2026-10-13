@@ -86,3 +86,31 @@ def test_loop_without_p2_has_no_internal_estimate(tmp_path):
                                   current_val=base, max_iterations=1, n_trials=2,
                                   gate_kwargs={"mode": "paired", "k_se": 1.0})
     assert "internal_estimate" not in res
+
+
+def test_c_numbers_and_ids_stay_in_the_private_file_not_in_events_or_the_step_record(tmp_path):
+    adapter, run_dir, base = _setup(tmp_path)
+    step = _step(adapter, run_dir, base, {"default": 0.9, "p": {}})
+    assert "confirm" not in step["promotion"] and step["promotion"]["bit"] == "accept"
+    rung_mean = step["promotion"]["rung1"]["mean"]
+    assert step["decision"]["delta"] == rung_mean                     # an F number, not the C mean
+    events = [json.loads(l) for l in run_dir.events_path.read_text().splitlines()]
+    seq = [e for e in events if e["kind"] == "p2_sequential"]
+    assert seq and set(seq[0]) - {"kind", "ts", "t", "time"} <= {"round", "candidate", "bit"}
+    C = run_dir.read_splits().confirm
+    assert not any(f'"{t}"' in run_dir.events_path.read_text() for t in C)
+    priv = (run_dir.root / "private" / "p2_confirm.jsonl").read_text()
+    assert '"mean"' in priv
+    assert not list((run_dir.root / "p2").glob("*")) if (run_dir.root / "p2").exists() else True
+
+
+def test_the_ledger_of_a_pooled_run_is_not_empty(tmp_path):
+    adapter, run_dir, base = _setup(tmp_path)
+    _step(adapter, run_dir, base, {"default": 0.9, "p": {}})
+    imp = harness._candidate_task_impact(run_dir, "cand_0001", harness.gate_split(run_dir))
+    assert imp is not None and "delta" in imp
+    out = tmp_path / "w"
+    out.mkdir()
+    harness._build_ledger(out, run_dir)
+    row = [l for l in (out / "LEDGER.md").read_text().splitlines() if l.startswith("| 1 |")]
+    assert row and "cand_0001" in row[0]

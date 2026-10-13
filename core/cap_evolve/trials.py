@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
+import socket
 import sys
+import sysconfig
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
@@ -61,22 +64,72 @@ def candidate_scope(*roots):
                     del _ROOTS[k]
 
 
+_STDLIB = os.path.realpath(sysconfig.get_paths()["stdlib"]) + os.sep
+_TRANSIENT = re.compile(r"\b429\b|rate.?limit|too many requests|timed? ?out|connection (?:reset|refused)",
+                        re.IGNORECASE)
+
+
+def _attributable_root(root: str) -> bool:
+    """A directory that may be treated as "the candidate's code": never a project root or a directory
+    holding adapter files (an adapter bug there would be blamed on the candidate)."""
+    for marker in ("adapter.py", "adapters", "capevolve.yaml", "pyproject.toml", ".git"):
+        if os.path.exists(os.path.join(root, marker)):
+            return False
+    return True
+
+
+_HTTP_5XX = re.compile(r"(?:http|status|code)\D{0,6}5\d\d\b|\b5\d\d\s+(?:server|service|bad gateway|gateway|internal)",
+                       re.IGNORECASE)
+
+
+def _is_infra_error(exc: BaseException) -> bool:
+    """Connection/timeout/OS-level errors and HTTP 5xx are the serving path's, whatever frame raised them."""
+    if isinstance(exc, (ConnectionError, TimeoutError, socket.timeout, OSError)):
+        return True
+    for attr in ("status_code", "status", "http_status"):
+        v = getattr(exc, attr, None)
+        if isinstance(v, int) and v >= 500:
+            return True
+    resp = getattr(exc, "response", None)
+    code = getattr(resp, "status_code", None)
+    if isinstance(code, int) and code >= 500:
+        return True
+    return bool(_HTTP_5XX.search(str(exc) or ""))
+
+
 def raised_in_candidate_code(exc: BaseException) -> bool:
-    """Does any traceback frame of ``exc`` (or its causes) sit in a file under a live candidate dir?"""
+    """Did the CANDIDATE's own code raise ``exc``?
+
+    True only when the innermost non-stdlib frame of the traceback is a file under a live candidate dir
+    (so a third-party library failing inside a call the candidate made, an adapter bug, an HTTP 429, a
+    timeout or a connection reset is never blamed on the candidate). Only ``__cause__`` is followed,
+    never ``__context__`` (an unrelated exception being handled when the real one was raised)."""
     with _ROOTS_LOCK:
-        roots = tuple(k.rstrip(os.sep) + os.sep for k in _ROOTS)
+        roots = tuple(k.rstrip(os.sep) + os.sep for k in _ROOTS if _attributable_root(k))
     if not roots:
+        return False
+    # Infrastructure by TYPE anywhere in the __cause__ chain (a candidate wrapping a ConnectionError in a
+    # RuntimeError is still the network's fault): never the candidate's.
+    chain, e = [], exc
+    while e is not None and e not in chain:
+        chain.append(e)
+        e = e.__cause__
+    if any(_is_infra_error(x) for x in chain):
         return False
     seen = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
-        tb = exc.__traceback__
-        while tb is not None:
-            fn = tb.tb_frame.f_code.co_filename
-            if fn and os.path.realpath(fn).startswith(roots):
+        if not _TRANSIENT.search(str(exc) or ""):
+            inner = None
+            tb = exc.__traceback__
+            while tb is not None:
+                fn = os.path.realpath(tb.tb_frame.f_code.co_filename or "")
+                if fn and not fn.startswith(_STDLIB):
+                    inner = fn
+                tb = tb.tb_next
+            if inner and inner.startswith(roots):
                 return True
-            tb = tb.tb_next
-        exc = exc.__cause__ or exc.__context__
+        exc = exc.__cause__
     return False
 
 

@@ -6,6 +6,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 from p2_fakes import make_run
 
 from cap_evolve import harness, trials  # noqa: E402
@@ -38,6 +40,11 @@ class _ModAdapter:
 
     def apply(self, d, edits=None):
         return None
+
+
+@pytest.fixture(autouse=True)
+def _flag(monkeypatch):
+    monkeypatch.setenv("CAPEVOLVE_FAULT_ATTRIBUTION", "1")
 
 
 def _run(tmp_path, ids, crash, policy):
@@ -117,3 +124,94 @@ def test_tau2_adapter_hook_classifies_errors():
     assert mod.classify_error_kind("TerminationReason.UNEXPECTED_ERROR", "KeyError in tools.py line 4") == "candidate"
     assert mod.classify_error_kind("TerminationReason.UNEXPECTED_ERROR", "connection reset") == "infra"
     assert mod.classify_error_kind("TerminationReason.TIMEOUT", "tools.py") == "infra"
+
+
+def test_flag_off_by_default_leaves_rollouts_untagged(tmp_path, monkeypatch):
+    monkeypatch.delenv("CAPEVOLVE_FAULT_ATTRIBUTION")
+    ids = [f"t{i:03d}" for i in range(20)]
+    res, run_dir = _run(tmp_path, ids, CRASH_ON, "fail")
+    assert res.n_scored == 20 - len([t for t in ids if t in CRASH_ON])      # crashes stay missing
+    rollout = next((run_dir.rollouts / "val").glob("t000__c__t0.json"))
+    assert "error_kind" not in json.loads(rollout.read_text())["rollout"]["metadata"]
+
+
+def test_third_party_transient_and_cause_chains_are_not_blamed(tmp_path):
+    d = tmp_path / "c"
+    d.mkdir()
+    (d / "m.py").write_text("\n".join([
+        "import json",
+        "def parse(s):",
+        "    return json.loads(s)",
+        "def rate():",
+        "    raise RuntimeError('HTTP 429 too many requests')",
+        "def own():",
+        "    raise KeyError('x')",
+        "def swallow():",
+        "    try:",
+        "        own()",
+        "    except KeyError:",
+        "        raise ValueError('later')",
+        ""]))
+    spec = importlib.util.spec_from_file_location("mm2", d / "m.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    def catch(fn, *a):
+        try:
+            fn(*a)
+        except Exception as e:      # noqa: BLE001
+            return e
+    with trials.candidate_scope(d):
+        assert trials.raised_in_candidate_code(catch(mod.own)) is True
+        assert trials.raised_in_candidate_code(catch(mod.rate)) is False          # 429 text
+        assert trials.raised_in_candidate_code(catch(mod.parse, "{")) is True    # stdlib frames are skipped: the candidate called it
+        assert trials.raised_in_candidate_code(catch(mod.swallow)) is True         # raised in candidate code, __context__ not walked
+
+
+def test_a_project_root_or_adapter_dir_is_never_attributed(tmp_path):
+    d = tmp_path / "proj"
+    d.mkdir()
+    (d / "adapter.py").write_text("def boom():\n    raise KeyError('adapter bug')\n")
+    spec = importlib.util.spec_from_file_location("adp", d / "adapter.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    try:
+        mod.boom()
+    except KeyError as e:
+        exc = e
+    with trials.candidate_scope(d):
+        assert trials.raised_in_candidate_code(exc) is False
+
+
+def _raise_in_candidate(tmp_path, body_lines):
+    d = tmp_path / "cx"
+    d.mkdir(exist_ok=True)
+    (d / "m.py").write_text("\n".join(["import socket"] + body_lines + [""]))
+    spec = importlib.util.spec_from_file_location("mmx", d / "m.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    try:
+        mod.f()
+    except Exception as e:      # noqa: BLE001
+        return d, e
+
+
+@pytest.mark.parametrize("name,body", [
+    ("connection", ["def f():", "    raise ConnectionError('proxy reset')"]),
+    ("timeout", ["def f():", "    raise TimeoutError('read')"]),
+    ("socket_timeout", ["def f():", "    raise socket.timeout('timed out')"]),
+    ("oserror", ["def f():", "    raise OSError('Network is unreachable')"]),
+    ("http_503", ["class HTTPError(Exception):", "    status_code = 503",
+                  "def f():", "    raise HTTPError('503 Service Unavailable')"]),
+    ("wrapped", ["def f():", "    try:", "        raise ConnectionError('reset')",
+                 "    except ConnectionError as e:", "        raise RuntimeError('tool failed') from e"]),
+])
+def test_infrastructure_errors_are_never_blamed_on_the_candidate(tmp_path, name, body):
+    d, exc = _raise_in_candidate(tmp_path, body)
+    with trials.candidate_scope(d):
+        assert trials.raised_in_candidate_code(exc) is False, name
+
+
+def test_a_plain_candidate_bug_is_still_attributed(tmp_path):
+    d, exc = _raise_in_candidate(tmp_path, ["def f():", "    return {}['missing']"])
+    with trials.candidate_scope(d):
+        assert trials.raised_in_candidate_code(exc) is True
