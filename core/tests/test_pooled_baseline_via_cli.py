@@ -40,7 +40,7 @@ def _project(tmp_path):
     shutil.copytree(EXAMPLE / "capability", tmp_path / "seed_capability")
     text = TEMPLATE_SPEC.read_text(encoding="utf-8").replace(
         "orchestration_mode: deterministic", "orchestration_mode: agent")
-    text += "\nsplit_mode: pooled\n"
+    text += "\nsplit_mode: pooled\nfault_attribution: true\nerrored_trial_policy: fail\nbudget_reserve: true\n"
     spec = project / "capevolve.yaml"
     spec.write_text(text, encoding="utf-8")
     return project, spec
@@ -83,6 +83,13 @@ def _assert_pooled(run_dir: Path):
     assert not (run_dir / "rollouts" / "val").exists() and not (run_dir / "rollouts" / "train").exists()
     assert not _leaks(run_dir, C)
     assert not _leaks(run_dir.parent.parent, C)             # the project: the agent-optimize cwd
+    # every spec-driven switch reached the seed baseline (all go through spec_for_run, before run_config)
+    ev = _events(run_dir)
+    first_eval = next(e for e in ev if e["kind"] == "eval_start")
+    assert first_eval.get("fault_attribution") is True
+    pol = [e for e in ev if e["kind"] == "errored_trial_policy"]
+    assert pol and pol[0]["policy"] == "fail"
+    assert rd.reserved_metric_calls() == 0 and rd.spent.metric_calls > 0
     # the seed was measured on F only
     base = json.loads((run_dir / "baseline.json").read_text())
     assert {pt["task_id"] for pt in base["val"]["per_task"]} <= set(rd.read_splits().feedback)
