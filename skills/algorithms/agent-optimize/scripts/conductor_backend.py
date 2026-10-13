@@ -441,6 +441,10 @@ class RealBackend(P2Port, conductor.Backend):
             raise conductor.Refused(f"finalize blocked: {e}") from e
         return out
 
+    def skip_finalize(self, champion):
+        """``finalize: false``: record the champion; no test FINAL, no bookend, no final estimate."""
+        return harness.skip_finalize(self.run_dir, champion=champion, reason="spec")
+
     def finalized(self):
         return (self.root / "final.json").exists() and RunDir.open(self.root).read_splits().test_used
 
