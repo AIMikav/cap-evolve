@@ -90,6 +90,14 @@ def _logs(dirs: list[Path], sids: list[str] | None) -> list[Path]:
     return sorted(set(out))
 
 
+def harness_launched(run_dir) -> bool:
+    """True for a run whose optimizer sessions are all launched (and so registered) by the harness itself
+    (the AO-2 conductor, marked by ``conductor.json``). Such a run never bills the CURRENT Claude Code
+    session: an operator agent that merely started the conductor is not its optimizer, and the
+    inherited ``CLAUDE_CODE_SESSION_ID`` would bill the operator's whole usage to the run."""
+    return (Path(run_dir.root) / "conductor.json").exists()
+
+
 def _session_ids(run_dir) -> list[str] | None:
     """Session ids billed to this run: the current one (``CLAUDE_CODE_SESSION_ID``) added to
     the list recorded in the run dir. ``None`` = unknown, caller falls back to time-window.
@@ -97,7 +105,7 @@ def _session_ids(run_dir) -> list[str] | None:
     entries = _entries(run_dir)
     sids = [e for e in entries if not _is_path(e)]
     cur = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID")
-    if cur and cur not in sids and not explicit_transcripts(run_dir):
+    if cur and cur not in sids and not explicit_transcripts(run_dir) and not harness_launched(run_dir):
         sids.append(cur)
         _write(Path(run_dir.root) / "optimizer_sessions.json", entries + [cur])
     return sids or None
@@ -139,8 +147,12 @@ def harvest(run_dir, dirs: list[Path], since: float, *, record: bool = True) -> 
     """
     explicit = explicit_transcripts(run_dir)
     sids = _session_ids(run_dir)
-    # explicit transcripts alone never fall back to the unscoped "every session in dir" read
-    logs = sorted(set(explicit) | (set() if explicit and sids is None else set(_logs(dirs, sids))))
+    if harness_launched(run_dir):
+        # only what the harness registered: never the inherited session, never an unscoped read of the dir
+        logs = sorted(set(explicit) | (set(_logs(dirs, sids)) if sids else set()))
+    else:
+        # explicit transcripts alone never fall back to the unscoped "every session in dir" read
+        logs = sorted(set(explicit) | (set() if explicit and sids is None else set(_logs(dirs, sids))))
     if not logs:
         return None
     seen_path = Path(run_dir.root) / "optimizer_cost_seen.json"

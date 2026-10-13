@@ -36,7 +36,7 @@ import act
 import conductor
 import digest
 import proposer
-from cap_evolve import RunDir, eval_index, graph, harness, optimizer_config
+from cap_evolve import RunDir, eval_index, graph, harness, optimizer_config, optimizer_cost
 from cap_evolve.candidate_graph import CandidateGraph
 from cap_evolve.specfile import spec_for_run
 
@@ -342,6 +342,9 @@ class RealBackend(P2Port, conductor.Backend):
         res = {"ok": rc == 0, "rc": rc, "tail": text[-400:]}
         if job["kind"] in ("propose", "merge"):
             res.update(zip(("tokens", "cache_read_tokens"), proposer.usage_from_result(text).values()))
+            tr = self.transcript(job)
+            if tr.exists():                    # bill THIS job's own transcript to the run (idempotent), nothing else
+                optimizer_cost.register(self.run_dir, str(tr))
         return res
 
     def kill(self, job):
