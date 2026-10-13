@@ -593,6 +593,64 @@ if __name__ == "__main__":
 '''
 
 
+# The vendored jupyter.py stops reading at the shell channel's execute_reply, but iopub
+# stream output travels on another socket and can arrive after it; the late output is then
+# dropped and the call returns "[Code executed successfully with no output]" (intermittent,
+# seen after long idle). third_party/ must stay byte-identical to upstream, so the staged
+# copy is patched: wait for the iopub status:idle that follows the reply (5 s grace).
+_WAIT_FOR_MESSAGES_FIXED = r'''        async def wait_for_messages():
+            # The kernel publishes stream/iopub output and the shell channel's
+            # execute_reply on different sockets, so the reply can overtake the
+            # last iopub messages. Stopping at execute_reply then drops output
+            # (observed as "no output" after long idle). Wait for the iopub
+            # status:idle that follows the reply, with a short grace so a kernel
+            # that never reports idle cannot hang the call.
+            reply_seen = False
+            idle_seen = False
+            while not (reply_seen and idle_seen):
+                try:
+                    if reply_seen:
+                        raw = await asyncio.wait_for(self.ws.read_message(), 5.0)
+                    else:
+                        raw = await self.ws.read_message()
+                except asyncio.TimeoutError:
+                    break
+                msg = json_decode(raw)
+                msg_type = msg['msg_type']
+                parent_msg_id = msg['parent_header'].get('msg_id', None)
+
+                if parent_msg_id != msg_id:
+                    continue
+
+                if os.environ.get("DEBUG", False):
+                    logging.info(f"MSG TYPE: {msg_type.upper()} REPLY:{reply_seen} IDLE:{idle_seen}\nCONTENT: {msg['content']}")
+
+                if msg_type == 'error':
+                    traceback = "\n\n\n\n".join(msg["content"]["traceback"])
+                    outputs.append(traceback)
+                elif msg_type == 'stream':
+                    outputs.append(msg['content']['text'])
+                elif msg_type in ['execute_result', 'display_data']:
+                    outputs.append(msg['content']['data']['text/plain'])
+                    if 'image/png' in msg['content']['data']:
+                        # use markdone to display image (in case of large image)
+                        # outputs.append(f"\n<img src=\"data:image/png;base64,{msg['content']['data']['image/png']}\"/>\n")
+                        outputs.append(f"![image](data:image/png;base64,{msg['content']['data']['image/png']})")
+                elif msg_type == 'status' and msg['content'].get('execution_state') == 'idle':
+                    idle_seen = True
+                elif msg_type == 'execute_reply':
+                    reply_seen = True
+            return reply_seen
+
+'''
+
+
+def _patch_jupyter_wait(src: str) -> str:
+    start = src.index("        async def wait_for_messages():")
+    end = src.index("        async def interrupt_kernel():")
+    return src[:start] + _WAIT_FOR_MESSAGES_FIXED + src[end:]
+
+
 class _Sandbox:
     def __init__(self) -> None:
         vendor = _Vendor.get()
@@ -605,9 +663,10 @@ class _Sandbox:
 
         self.runtime_dir = Path(tempfile.mkdtemp(prefix="capevolve_sb_sandbox_"))
         for name in ("api.py", "jupyter.py"):
-            (self.runtime_dir / name).write_text(
-                (vendor["code_dir"] / name).read_text(encoding="utf-8"), encoding="utf-8"
-            )
+            text = (vendor["code_dir"] / name).read_text(encoding="utf-8")
+            if name == "jupyter.py":
+                text = _patch_jupyter_wait(text)
+            (self.runtime_dir / name).write_text(text, encoding="utf-8")
         (self.runtime_dir / "config.json").write_text(
             json.dumps({"volumes_path": str(data_dir.resolve())}), encoding="utf-8"
         )
