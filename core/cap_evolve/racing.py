@@ -1,8 +1,7 @@
 """Pure statistics for the P2 (SH-C) evaluator: pooled SE, kill-only halving, confirmation against a
 concurrent control, and the single-candidate group-sequential boundary.
 
-Stdlib only; nothing here touches a run directory or an adapter. Design and calibration:
-``gate_budget_design.md`` (sections 2-3). Every threshold is an argument; the shipped defaults live in
+Stdlib only; nothing here touches a run directory or an adapter. Every threshold is an argument; the shipped, simulation-calibrated defaults live in
 ``promotion.P2Params``.
 """
 
@@ -43,6 +42,21 @@ def within_task_variance(trials: Mapping[str, Sequence[float]]) -> float:
     return (ss + V_PRIOR_DF * V_PRIOR) / (df + V_PRIOR_DF)
 
 
+def heterogeneity_se(task_deltas) -> float:
+    """SE of the mean from the spread of the per-task deltas: sd / sqrt(T).
+
+    The model-based SE only sees rollout noise. When an edit helps some tasks and hurts others the true
+    per-task effects differ, the same candidate would show a different mean on another draw of tasks, and
+    that spread is part of the uncertainty of "the effect on C". The sample SD of the per-task deltas
+    contains both, so the SE used is the larger of the two."""
+    d = [float(x) for x in task_deltas]
+    n = len(d)
+    if n < 3:
+        return 0.0
+    m = sum(d) / n
+    return math.sqrt(sum((x - m) ** 2 for x in d) / (n - 1) / n)
+
+
 def halve(stats: Mapping[str, Mapping[str, float]], keep: int) -> list[str]:
     """Kill-only successive-halving step. ``stats[cid] = {"mean": .., "z": ..}``.
 
@@ -71,9 +85,11 @@ def confirm_with_control(cand: Mapping[str, Sequence[float]], ctrl: Mapping[str,
     if T == 0:
         return {"pass": False, "mean": 0.0, "se": math.inf, "z": 0.0, "n": 0, "coverage": 0.0,
                 "dmin": dmin, "z_conf": z_conf}
-    mean = sum(sum(cand[t]) / len(cand[t]) - sum(ctrl[t]) / len(ctrl[t]) for t in tasks) / T
+    deltas = [sum(cand[t]) / len(cand[t]) - sum(ctrl[t]) / len(ctrl[t]) for t in tasks]
+    mean = sum(deltas) / T
     v = within_task_variance({**{f"c{t}": cand[t] for t in tasks}, **{f"k{t}": ctrl[t] for t in tasks}})
-    se = math.sqrt(v * sum(1.0 / len(cand[t]) + 1.0 / len(ctrl[t]) for t in tasks)) / T
+    se = max(math.sqrt(v * sum(1.0 / len(cand[t]) + 1.0 / len(ctrl[t]) for t in tasks)) / T,
+             heterogeneity_se(deltas))
     z = mean / se if se > 0 else (math.inf if mean > 0 else 0.0)
     ok = T >= 2 and mean >= dmin and mean > 0 and z >= z_conf and cov >= min_coverage
     return {"pass": bool(ok), "mean": mean, "se": se, "z": z, "n": T, "coverage": cov,

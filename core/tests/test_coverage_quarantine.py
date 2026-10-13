@@ -1,5 +1,5 @@
 """D1 coverage: retry + quarantine the incumbent's holes, coverage on the evaluable set, floor +
-tipping-point check instead of the 0.95 veto. Includes an offline replay of the hill-climb run in which
+tipping-point check instead of the 0.95 veto. Includes an offline replay (anonymised) of a run in which
 11 of 12 screen-passing candidates were vetoed at 92.5% joint coverage."""
 
 import json
@@ -79,7 +79,7 @@ def test_differential_missingness_counts_excess_candidate_errors_as_failures():
     for t in E[:5]:
         cand_rows[t] = (0.0, 0)
     cand = _rows(cand_rows)
-    assert cov.differential_failures(E, cur, cand) == E[:5]          # 5 > max(2, 1)
+    assert cov.differential_failures(E, cur, cand) == E[:5]          # excess 5 > max(2, 1): all 5 penalised
     cand_rows2 = {t: (1.0, 1) for t in E}
     cand_rows2[E[0]] = (0.0, 0)
     assert cov.differential_failures(E, cur, _rows(cand_rows2)) == []   # within the allowance
@@ -173,3 +173,41 @@ def test_policy_validation():
         GateConfig.from_mapping({"coverage_policy": "nope"}, environ={})
     assert GateConfig.from_mapping({}, environ={}).coverage_policy == "veto"
     assert GateConfig.from_mapping({}, environ={"CAPEVOLVE_COVERAGE_POLICY": "tipping"}).coverage_policy == "tipping"
+
+
+def test_only_the_excess_is_penalised():
+    E = [f"t{i}" for i in range(20)]
+    cur = _rows({**{t: (1.0, 1) for t in E[:15] + E[18:]}, **{t: (0.0, 0) for t in E[15:18]}})   # holes: 3
+    cand = _rows({**{t: (1.0, 1) for t in E[:5]}, **{t: (0.0, 0) for t in E[5:15]},     # candidate holes: 10
+                  **{t: (1.0, 1) for t in E[15:18]}, **{t: (1.0, 1) for t in E[18:]}})
+    out = cov.differential_failures(E, cur, cand)
+    assert len(out) == 10 - 3
+
+
+def test_pooled_plus_tipping_never_touches_the_confirm_stratum(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPEVOLVE_COVERAGE_POLICY", "tipping")
+    adapter, run_dir = make_run(tmp_path, n_train=20, n_val=20, default=0.5)
+    harness.ensure_pooled(run_dir)
+    sp = run_dir.read_splits()
+    holes = sp.feedback[:2]
+    seed = run_dir.candidate_dir("seed")
+    (seed / "cfg.json").write_text(json.dumps({"default": 0.5, "p": {}, "err": holes}))
+    base = harness.evaluate_candidate(adapter, seed, run_dir=run_dir, split="feedback", tag="seed")
+    healed = harness.retry_missing(adapter, run_dir, base, candidate_dir=seed, tag="seed", quarantine=True)
+    assert set(run_dir.quarantined_tasks()) == set(holes)
+    assert harness.planned_val_ids(run_dir) and set(harness.planned_val_ids(run_dir)) <= set(sp.feedback)
+    assert not {t for t, _ in adapter.calls} & set(sp.confirm)
+    assert {pt["task_id"] for pt in healed.per_task} <= set(sp.feedback)
+    assert not (run_dir.rollouts / "confirm").exists() or not list((run_dir.rollouts / "confirm").glob("*"))
+    assert not (run_dir.rollouts / "val").exists() or not list((run_dir.rollouts / "val").glob("*"))
+
+
+def test_a_flip_that_the_retry_does_not_settle_is_not_accepted(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPEVOLVE_COVERAGE_POLICY", "tipping")
+    adapter, run_dir = make_run(tmp_path, n_train=0, n_val=40, default=0.5)
+    base = harness.evaluate_candidate(adapter, run_dir.candidate_dir("seed"), run_dir=run_dir,
+                                      split="val", tag="seed")
+    # a small real gain, but the candidate cannot run on 8 tasks (30 percent of the screen would flip)
+    crashes = [f"t{i:03d}" for i in range(8)]
+    step = _step(adapter, run_dir, base, {"default": 0.58, "p": {}, "err": crashes}, min_coverage=0.0)
+    assert step["accepted"] is False

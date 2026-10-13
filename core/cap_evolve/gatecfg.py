@@ -15,6 +15,7 @@ mode, ``gate_check``) read the same config.
   confirm_fraction      0.48   share of the pool held as the hidden confirm stratum C
   ledger_noise_guard    false  below ``ledger_min_trials`` trials per task, no causal broke/fixed lists
   ledger_min_trials     3
+  fault_attribution     false  tag exceptions raised by the candidate's own code (error_kind=candidate)
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ class GateConfig:
     confirm_fraction: float = 0.48
     ledger_noise_guard: bool = False
     ledger_min_trials: int = 3
+    fault_attribution: bool = False
 
     @classmethod
     def from_mapping(cls, spec: dict | None, environ=None) -> "GateConfig":
@@ -61,7 +63,8 @@ class GateConfig:
             split_mode=str(spec.get("split_mode") or d.split_mode),
             confirm_fraction=float(spec.get("confirm_fraction", d.confirm_fraction)),
             ledger_noise_guard=_truthy(spec.get("ledger_noise_guard", d.ledger_noise_guard)),
-            ledger_min_trials=int(spec.get("ledger_min_trials", d.ledger_min_trials)))
+            ledger_min_trials=int(spec.get("ledger_min_trials", d.ledger_min_trials)),
+            fault_attribution=_truthy(spec.get("fault_attribution", d.fault_attribution)))
         if out.coverage_policy not in COVERAGE_POLICIES:
             raise ValueError(f"coverage_policy must be one of {COVERAGE_POLICIES}, got {out.coverage_policy!r}")
         if out.split_mode not in SPLIT_MODES:

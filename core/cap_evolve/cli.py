@@ -759,6 +759,10 @@ def _cmd_run(argv):
         # finalize bookends): the phase scripts read it from the environment they inherit.
         from .harness import ERRORED_POLICY_ENV, resolve_errored_policy
         os.environ[ERRORED_POLICY_ENV] = resolve_errored_policy(str(spec["errored_trial_policy"]))
+    from . import helpers as _helpers
+    if _helpers.enabled(spec):
+        # adapters (a subprocess) read the v2 helper switch from the environment they inherit
+        os.environ["CAPEVOLVE_HELPERS"] = "1"
     from .optimizer_config import enabled as _ablation_enabled
     if not _ablation_enabled("history", spec):
         # the harness (a subprocess) reads the switch from the environment it inherits

@@ -54,8 +54,9 @@ def run_dir(tmp_path):
 class FakeRound:
     champion = None
 
-    def __init__(self, ev, cands):
-        self.ev, self.cands = ev, dict(cands)
+    def __init__(self, ev, cands, round_id):
+        self.ev, self.cands, self.round_id = ev, dict(cands), round_id
+        self.state = {"stage": "open"}
         ev.opened.append(sorted(self.cands))
 
     def run_rung(self, rung, map_fn=None):
@@ -82,6 +83,7 @@ class FakeEvaluator:
 
     def __init__(self, accept=True, k=4):
         self.opened, self.accept, self.k = [], accept, k
+        self.run_dir = None
 
     def final_estimate(self, champion_dir, seed_dir, *, n_trials=4):
         return {"mean": 0.1, "se": 0.05, "n": 3}
@@ -95,8 +97,19 @@ class FakeEvaluator:
     def plan_round(self, k_wanted, incumbent_dir=None):
         return RoundPlan(min(k_wanted, self.k), 100, True)
 
+    def _round_dir(self):
+        d = self.run_dir.root / "private" / "p2"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def open_round(self, candidates, incumbent):
-        return FakeRound(self, candidates)
+        d = self._round_dir()
+        rid = f"r{len(list(d.glob('r*.json'))):03d}"
+        (d / f"{rid}.json").write_text(json.dumps({"round_id": rid, "candidates": {c: str(p) for c, p in candidates.items()}}))
+        return FakeRound(self, candidates, rid)
+
+    def resume_round(self, round_id):
+        raise AssertionError("fake never resumes")
 
 
 def _optimizer(seen):
@@ -112,6 +125,7 @@ def _optimizer(seen):
 
 
 def _loop(run_dir, ev, opt, params=None, rounds=1):
+    ev.run_dir = run_dir
     ctx = harness.OptimizerContext()
     return hc2.hc2_loop(None, run_dir=run_dir, optimizer=opt, evaluator=ev,
                         params=params or hc2.HC2Params(k=3, per_cluster=2), ctx=ctx,
@@ -191,7 +205,7 @@ def test_loop_drops_duplicate_of_rejected_diff_at_no_rollout_cost(run_dir):
     _loop(run_dir, ev, same_edit, rounds=1)      # round 1: siblings duplicate each other -> one live
     assert len(ev.opened[0]) == 1
     n_before = len(ev.opened)
-    _loop(run_dir, ev, same_edit, rounds=1)      # round 2: now a near-duplicate of a rejected diff
+    _loop(run_dir, ev, same_edit, rounds=2)      # round 2: now a near-duplicate of a rejected diff
     assert len(ev.opened) == n_before            # nothing sent to the evaluator
 
 
@@ -300,3 +314,206 @@ def test_final_estimate_skipped_when_unfunded_and_never_over_budget(tmp_path):
     rd.set_best("cand_0001")
     out = hc2.final_estimate(ev, rd)
     assert out["skipped"] == "budget" and rd.spent.metric_calls <= 100
+
+
+# ---- review fixes (PR-4b) -----------------------------------------------------------------------
+
+def _capped_fake(run_dir, **kw):
+    ev = FakeEvaluator(**kw)
+    ev.remaining_at_plan = []
+    orig = ev.plan_round
+
+    def plan(k_wanted, incumbent_dir=None):
+        ev.remaining_at_plan.append(run_dir.remaining_metric_calls())
+        return orig(k_wanted, incumbent_dir)
+    ev.plan_round = plan
+    return ev
+
+
+def test_one_round_is_one_iteration_and_one_stall_step(run_dir):
+    _loop(run_dir, FakeEvaluator(accept=False), _optimizer([]))
+    assert run_dir.spent.iterations == 1 and run_dir.spent.stall == 1       # 3 candidates, one round
+    _loop(run_dir, FakeEvaluator(accept=True), _optimizer([]), rounds=2)
+    assert run_dir.spent.iterations == 2 and run_dir.spent.stall == 0       # an accepted round resets it
+
+
+def test_candidate_ids_do_not_collide_across_rounds(run_dir):
+    ev = FakeEvaluator(accept=False)
+    _loop(run_dir, ev, _optimizer([]), rounds=2)
+    flat = [c for o in ev.opened for c in o]
+    assert len(flat) == len(set(flat)) >= 2
+
+
+def test_final_estimate_cost_is_held_while_planning(run_dir):
+    run_dir.update_budget(max_metric_calls=1000)
+    ev = _capped_fake(run_dir)
+    _loop(run_dir, ev, _optimizer([]))
+    assert ev.remaining_at_plan[0] == 1000 - run_dir.spent.metric_calls - hc2.final_estimate_cost(ev) \
+        or ev.remaining_at_plan[0] == 1000 - hc2.final_estimate_cost(ev)
+    assert run_dir.reserved_metric_calls() == 0                              # released afterwards
+
+
+def test_final_estimate_needs_both_arms_funded(run_dir):
+    run_dir.update_budget(max_metric_calls=1000)
+    run_dir.update_spent(metric_calls=1000 - hc2.final_estimate_cost(FakeEvaluator()) + 1)
+    run_dir.snapshot("cand_0009", run_dir.candidate_dir("seed"))
+    run_dir.set_best("cand_0009")
+    ev = FakeEvaluator()
+    ev.final_estimate = lambda *a, **k: pytest.fail("must not start one arm")
+    out = hc2.final_estimate(ev, run_dir)
+    assert out["skipped"] == "budget"
+
+
+def test_retry_accumulates_every_attempts_cost_and_keeps_full_context(run_dir):
+    seen = []
+    calls = []
+
+    def opt(workdir, instructions):
+        calls.append(instructions)
+        seen.append(Path(workdir))
+        dup = "duplicated an edit" not in instructions
+        (Path(workdir) / "SKILL.md").write_text("base rule one\n" + ("the common edit\n" if dup else "a fresh idea\n"))
+        return {"cost_usd": 0.5, "tokens": 10}
+
+    ref = run_dir.root / "ref"
+    ref.mkdir()
+    (ref / "SKILL.md").write_text("base rule one\nthe common edit\n")
+    hc2.RejectedDiffs(run_dir).add("cand_old", hc2.diff_lines(run_dir.candidate_dir("seed"), ref))
+    before = run_dir.spent.optimizer_tokens
+    _loop(run_dir, FakeEvaluator(), opt, hc2.HC2Params(k=1, consolidate=True))
+    assert len(calls) == 2 and run_dir.spent.optimizer_tokens - before == 20       # both attempts paid
+    assert "Consolidation mode" in calls[1] and (seen[-1] / "cross_trace_summary.md").exists()
+    assert "fresh idea" in (seen[-1] / "SKILL.md").read_text()
+
+
+def test_k1_round(run_dir):
+    ev = FakeEvaluator()
+    out = _loop(run_dir, ev, _optimizer([]), hc2.HC2Params(k=1))
+    assert [len(o) for o in ev.opened] == [1] and out["accepts"] == 1
+
+
+def test_an_unconfirmed_candidate_can_be_reproposed(run_dir):
+    class Pending(FakeRound):
+        def close_confirm(self):
+            self.champion = None
+            return {c: ConfirmVerdict(c, "unconfirmed") for c in self.cands}
+
+    class Ev(FakeEvaluator):
+        def open_round(self, candidates, incumbent):
+            r = super().open_round(candidates, incumbent)
+            r.__class__ = Pending
+            return r
+
+    def same(workdir, instructions):
+        (Path(workdir) / "SKILL.md").write_text("base rule one\nthe edit that could not be confirmed\n")
+
+    ev = Ev()
+    _loop(run_dir, ev, same, hc2.HC2Params(k=1), rounds=2)
+    assert len(ev.opened) == 2                           # round 2 was not blocked by the diversity gate
+
+
+def test_inject_never_lets_a_c_trace_in_from_any_rollout_dir(run_dir):
+    for sd in ("train", "val", "feedback"):
+        for c in C_IDS:
+            _write(run_dir, sd, c, "seed", 0, 0.0, "secret c failure")
+    seen = []
+    _loop(run_dir, FakeEvaluator(), _optimizer(seen))
+    for wd, instr in seen:
+        for f in wd.rglob("*"):
+            if f.is_file():
+                assert not any(f.name.startswith(c + "__") for c in C_IDS), f
+                try:
+                    assert "secret c failure" not in f.read_text()
+                except UnicodeDecodeError:
+                    pass
+
+
+def test_workers_bound_total_concurrency(run_dir):
+    ev = FakeEvaluator()
+    ev.workers = 8
+    _loop(run_dir, ev, _optimizer([]))
+    assert ev.workers == 1                               # jobs fan out once, in the loop's own map
+
+
+def test_shingle_overlap_catches_a_reworded_copy(tmp_path):
+    p = tmp_path / "p"
+    p.mkdir()
+    (p / "S.md").write_text("a\n")
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d, t in ((a, "always validate the country code before shipping any exchange order"),
+                 (b, "always validate the country code before shipping any exchange order today")):
+        d.mkdir()
+        (d / "S.md").write_text("a\n" + t + "\n")
+    da, db = hc2.diff_lines(p, a), hc2.diff_lines(p, b)
+    assert len(da & db) < len(da | db)                   # the lines differ ...
+    assert hc2.diff_overlap(da, db) >= 0.6               # ... the shingles still match
+
+
+def test_cli_forwards_workers_to_baseline_and_algorithm(tmp_path, monkeypatch):
+    """Behavioural: run the real CLI on the toy project with ``workers: 3``; the eval and the
+    algorithm both report 3."""
+    import shutil
+    from cap_evolve import cli
+    ex = REPO / "examples" / "toy_calc"
+    monkeypatch.setenv("CAPEVOLVE_CORE", str(REPO / "core"))
+    monkeypatch.setenv("CAPEVOLVE_SKILLS_DIR", str(REPO / "skills"))
+    monkeypatch.setenv("CAPEVOLVE_TOY_DATA", str(ex))
+    monkeypatch.setenv("CAPEVOLVE_MOCK_SCRIPT", str(ex / "mock_script.json"))
+    monkeypatch.delenv("CAPEVOLVE_WORKERS", raising=False)
+    project = tmp_path / ".capevolve" / "project"
+    (project / "adapters").mkdir(parents=True)
+    shutil.copy(ex / "adapter.py", project / "adapters" / "adapter.py")
+    shutil.copytree(ex / "capability", tmp_path / "seed_capability")
+    spec = project / "capevolve.yaml"
+    spec.write_text((REPO / "templates/project/capevolve.yaml").read_text() + "\nworkers: 3\n")
+    assert cli.main(["run", "--spec", str(spec), "--project", str(project), "--dashboard", "off",
+                     "--run-ts", "w3"]) == 0
+    ev = [json.loads(l) for l in (tmp_path / ".capevolve/run_w3/events.jsonl").read_text().splitlines()]
+    starts = [e for e in ev if e.get("kind") == "eval_start" and (e.get("tag") == "seed" or e.get("split") == "val")]   # baseline + search, not finalize
+    assert starts and {e["workers"] for e in starts} == {3}          # baseline AND candidate evals
+    assert any(e.get("kind") == "parallel" and e.get("workers") == 3 for e in ev)
+
+
+def test_hc2_resumes_an_interrupted_round_without_reproposing(tmp_path, monkeypatch):
+    from p2_fakes import make_run
+    from cap_evolve import evaluator, harness as h, promotion
+
+    class Boom(Exception):
+        pass
+
+    adapter, rd = make_run(tmp_path, n_train=24, n_val=24, default=0.4, max_metric_calls=4000)
+    h.baseline_pooled(adapter, tmp_path / "seed", run_dir=rd, n_trials=2)
+    params = promotion.P2Params.from_spec({"promotion_rule": "P2", "p2_conf_n": 96, "p2_ctrl_m": 4})
+    calls = []
+
+    def opt(workdir, instructions):
+        calls.append(Path(workdir).name)
+        i = len(calls)
+        cfg = json.loads((Path(workdir) / "cfg.json").read_text())
+        cfg.update(default=0.85 if i == 1 else 0.4, salt=i)
+        (Path(workdir) / "cfg.json").write_text(json.dumps(cfg, indent=1))
+
+    state = {"crash": True}
+    orig = evaluator.Round.run_job
+
+    def flaky(self, job):
+        if state["crash"] and job.stage == "confirm":
+            raise Boom("killed mid-confirmation")
+        return orig(self, job)
+
+    monkeypatch.setattr(evaluator.Round, "run_job", flaky)
+    kw = dict(optimizer=opt, params=hc2.HC2Params(k=3, per_cluster=2), ctx=harness.OptimizerContext(),
+              max_iterations=1, workers=2)
+    with pytest.raises(Boom):
+        hc2.hc2_loop(adapter, run_dir=rd, evaluator=evaluator.P2Evaluator(adapter, rd, params), **kw)
+    assert (rd.root / "hc2_pending.json").exists() and rd.best_id == "seed"
+    n_proposed, spent = len(calls), rd.spent.metric_calls
+
+    state["crash"] = False
+    out = hc2.hc2_loop(adapter, run_dir=rd, evaluator=evaluator.P2Evaluator(adapter, rd, params), **kw)
+    assert len(calls) == n_proposed                                   # nothing re-proposed
+    assert len(list(evaluator.P2Evaluator(adapter, rd, params)._round_dir().glob("r*.json"))) == 1   # same round
+    assert not (rd.root / "hc2_pending.json").exists()
+    assert out["accepts"] == 1 and rd.best_id != "seed"
+    assert rd.spent.iterations == 1
+    assert rd.spent.metric_calls >= spent
