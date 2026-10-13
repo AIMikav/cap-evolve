@@ -245,7 +245,8 @@ def test_a_merge_resolve_job_gets_a_copy_of_the_trunk_and_the_donor_path(tmp_pat
         ctx=SimpleNamespace(work=lambda t: work), run_dir=tmp_path, root=tmp_path, project=tmp_path, spec={},
         cfg=SimpleNamespace(cost_eps=None), optimizer="mock",
         _paths=lambda j: (tmp_path / "j.log", tmp_path / "j.rc", tmp_path / "j.prompt.md"),
-        _spawn=lambda j, cmd, env=None: {"pid": 1}, transcript=lambda j: tmp_path / "t.jsonl", job_usd_cap=lambda: 0)
+        _spawn=lambda j, cmd, env=None: {"pid": 1}, transcript=lambda j: tmp_path / "t.jsonl", job_usd_cap=lambda: 0,
+        _inject_context=lambda work, parent: None)
     job = {"id": "j1", "kind": "merge", "tag": "cand_9", "parent": "cand_1", "parents": ["cand_1", "cand_2"],
            "conflicts": [{"where": "policy/policy.md::Rules", "trunk": ["cand_2"], "donor": ["cand_1"]}]}
     with m.patch.object(conductor_backend.act, "sh", sh), \
@@ -314,3 +315,41 @@ def test_an_uppercase_hypothesis_file_is_read(tmp_path):
     (tmp_path / "HYPOTHESIS.json").write_text('{"id": "h1", "claim": "x"}')
     assert proposer.read_hypothesis(tmp_path) == {"id": "h1", "claim": "x"}
     assert proposer.read_hypothesis(tmp_path / "nowhere") is None
+
+
+def test_a_proposer_reads_its_parents_val_traces_and_guidance(tmp_path):
+    """Seen live: conductor proposers had no ./trajectories, so every edit was written blind."""
+    import unittest.mock as m
+    seen = {}
+    fake = SimpleNamespace(project=tmp_path, run_dir=SimpleNamespace(log_event=lambda *a, **k: seen.setdefault("warn", k),
+                                                   read_splits=lambda: SimpleNamespace(pooled=False)),
+                           optimizer="claude-code", spec={"capabilities": ["system-prompt", "tools"],
+                                                          "capability_sources": ["seed/data_model.py"]})
+    with m.patch("cap_evolve.check.load_adapter", lambda p: "ADAPTER"), \
+            m.patch.object(conductor_backend.harness, "_inject_optimizer_context",
+                           lambda adapter, rd, work, **kw: seen.update(adapter=adapter, work=work, **kw)):
+        conductor_backend.RealBackend._inject_context(fake, tmp_path / "work" / "cand_5", "cand_3")
+    assert seen["split"] == "val" and seen["tag"] == "cand_3", "the PARENT's val traces (non-pooled), never test"
+    assert seen["work"] == tmp_path / "work" / "cand_5" and seen["capabilities"] == ["system-prompt", "tools"]
+    assert "warn" not in seen
+
+
+def test_in_pooled_mode_a_proposer_gets_the_parents_f_traces_and_no_c_id(tmp_path):
+    from p2_fakes import make_run
+    from cap_evolve import evaluator, harness, promotion
+    adapter, run_dir = make_run(tmp_path, n_train=24, n_val=24, default=0.4, max_metric_calls=2000)
+    ev = evaluator.P2Evaluator(adapter, run_dir, promotion.P2Params.from_spec({"promotion_rule": "P2"}))
+    F_ids, C_ids = list(ev.feedback_ids()), list(ev.confirm_ids())
+    assert F_ids and C_ids and not set(F_ids) & set(C_ids) and harness.gate_split(run_dir) == "feedback"
+    seed = run_dir.candidate_dir("seed")
+    for split, ids in (("feedback", F_ids), ("confirm", C_ids)):
+        harness.evaluate_candidate(adapter, seed, run_dir=run_dir, split=split, ids=ids, n_trials=1, tag="seed")
+    work = tmp_path / "work" / "cand_1"
+    work.mkdir(parents=True)
+    fake = SimpleNamespace(project=tmp_path, run_dir=run_dir, optimizer="mock", spec={}, _adapter=adapter)
+    conductor_backend.RealBackend._inject_context(fake, work, "seed")
+    names = [f.name for f in (work / "trajectories").glob("*")]
+    assert names, "the proposer must not edit blind in pooled mode"
+    seen = {n for t in F_ids for n in names if t in n}
+    assert seen, "the parent's F traces are there"
+    assert not [n for n in names if any(c in n for c in C_ids)], "and no confirm-stratum id"
