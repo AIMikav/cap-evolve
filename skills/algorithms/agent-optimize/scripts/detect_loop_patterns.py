@@ -61,7 +61,7 @@ def _call_names(rollout: dict) -> list[str]:
 def _load_records(run_dir: RunDir, tag: str, split: str) -> list[dict]:
     """Same glob diagnose.py uses: one file per (task, trial) for this tag/split."""
     out = []
-    d = run_dir.rollout_dir(split)
+    d = run_dir.rollouts / split
     if not d.exists():
         return out
     for f in sorted(d.glob(f"*__{tag}__t*.json")):

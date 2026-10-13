@@ -338,7 +338,7 @@ def _rollouts_present(run_dir, tag: str, split: str, n_trials: int) -> bool:
     Rollouts are ``<task>__<tag>__t<k>.json`` for k in range(n_trials), so the presence of the
     LAST index is what says the measurement went as deep as this round is asking for.
     """
-    d = run_dir.rollout_dir(split)
+    d = run_dir.rollouts / split
     return d.is_dir() and any(d.glob(f"*__{tag}__t{n_trials - 1}.json"))
 
 

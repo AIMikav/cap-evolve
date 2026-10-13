@@ -18,7 +18,7 @@ sys.path.insert(0, str(CORE))
 
 def _write_rollout(run_dir, tag, task_id, k, reward, *, errored=False, split="val"):
     """Persist one synthetic per-trial rollout file in the harness's on-disk format."""
-    vdir = run_dir.rollout_dir(split)
+    vdir = run_dir.rollouts / split
     vdir.mkdir(parents=True, exist_ok=True)
     rec = {
         "input": {},

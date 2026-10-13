@@ -34,7 +34,7 @@ def _rollout(run_dir, tag, task_id, k, reward, *, split="val", text=""):
     ``text`` lands in the trace, which is where footprint detection looks for the names the
     edit touched — the same flat search it runs over a real adapter's rollout.
     """
-    vdir = run_dir.rollout_dir(split)
+    vdir = run_dir.rollouts / split
     vdir.mkdir(parents=True, exist_ok=True)
     rec = {"input": {}, "rollout": {"task_id": task_id, "error": None, "trace": text},
            "score": {"task_id": task_id, "reward": reward, "feedback": "", "raw": {}}}
