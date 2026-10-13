@@ -153,3 +153,25 @@ def test_replay_of_the_suite_b_overshoot_never_exceeds_the_cap(tmp_path, monkeyp
             pass
         spent = run_dir.spent.metric_calls
         assert spent <= 550
+
+
+def test_a_failure_after_the_rollouts_ran_is_charged_not_refunded(tmp_path):
+    adapter, run_dir = make_run(tmp_path, n_train=0, n_val=10, max_metric_calls=100)
+
+    def bad_score(task, rollout):
+        raise RuntimeError("grader crashed")
+
+    adapter.score = bad_score
+    with pytest.raises(RuntimeError):
+        harness.evaluate_candidate(adapter, run_dir.candidate_dir("seed"), run_dir=run_dir,
+                                   split="val", tag="seed", n_trials=2, budget_reserve=True)
+    assert run_dir.spent.metric_calls == 20 and run_dir.reserved_metric_calls() == 0
+
+
+def test_max_usd_is_enforced_once_it_is_reached(tmp_path):
+    adapter, run_dir = make_run(tmp_path, n_train=0, n_val=10)
+    run_dir.update_budget(max_usd=1.0)
+    run_dir.update_spent(usd=1.2)
+    with pytest.raises(BudgetExhausted):
+        run_dir.reserve_metric_calls(1)
+    assert adapter.calls == []

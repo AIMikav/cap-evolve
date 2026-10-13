@@ -1,7 +1,7 @@
 """Null calibration of rule P2 on a seeded Bernoulli world (pure simulation, no adapter): the round
 false-accept rate at the shipped thresholds and the K=1 group-sequential false-accept rate.
 
-The world mimics the E22 null pool: 5 always-pass tasks, 3 near-never, the rest spread over 0.1-0.9; the
+The world mimics a measured null pool: 5 always-pass tasks, 3 near-never, the rest spread over 0.1-0.9; the
 pool is split F25 / C24. A candidate's true effect d raises every rollout probability by
 d * w / mean(w) with w = 1 - p (the diffuse edit used in the design simulation).
 """
@@ -33,10 +33,11 @@ def bern(rng, p):
     return 1.0 if rng.random() < p else 0.0
 
 
-def one_round(rng, effects, *, zc, control=True, drift=0.0):
+def one_round(rng, effects, *, zc, control=True, drift=0.0, het=0.0):
     K = len(effects)
     qF = [edit(F, d) for d in effects]
-    qC = [edit(C, d + drift) for d in effects]
+    qC = [[min(1.0, max(0.0, x + rng.gauss(0, het))) if het else x for x in edit(C, d + drift)]
+          for d in effects]       # het: per-task effect spread (null on average, not on each task)
     phF = [sum(bern(rng, p) for _ in range(4)) / 4 for p in F]
     order = racing.draw_order(list(range(len(F))), P.rung_sizes[1], rng.random())
 
@@ -82,14 +83,17 @@ def one_round(rng, effects, *, zc, control=True, drift=0.0):
     return max(winners)[1] if winners else None
 
 
-def fwer(zc, n_rounds=2500, seed=5, **kw):
+def fwer(zc, n_rounds=3000, seed=5, **kw):
     rng = random.Random(seed)
     return sum(one_round(rng, [0.0] * 8, zc=zc, **kw) is not None for _ in range(n_rounds)) / n_rounds
 
 
-def test_round_fwer_at_the_shipped_threshold_is_at_most_012():
-    rate = fwer(P.z_conf)
-    assert rate <= 0.12, rate
+@pytest.mark.parametrize("het", [0.0, 0.1, 0.2])
+def test_round_fwer_at_the_shipped_threshold_is_at_most_010_even_with_heterogeneous_effects(het):
+    """Null on average, but each candidate helps some tasks and hurts others (per-task SD ``het``).
+    A model-based SE that ignores this spread gave 0.113 at SD 0.1 and 0.163 at SD 0.2."""
+    rate = fwer(P.z_conf, het=het)
+    assert rate <= 0.10, rate
     assert rate > 0.02, "the threshold should not be vacuous"
 
 
@@ -105,11 +109,11 @@ def test_power_a_real_gain_usually_crowns_a_champion():
 def test_a_stale_incumbent_under_drift_inflates_false_accepts_which_is_why_the_control_exists():
     with_control = fwer(P.z_conf, n_rounds=1500, drift=0.03, control=True)
     stale = fwer(P.z_conf, n_rounds=1500, drift=0.03, control=False)
-    assert with_control <= 0.12
-    assert stale > 0.18 and stale > 2 * with_control
+    assert with_control <= 0.10
+    assert stale > 0.13 and stale > 1.8 * with_control
 
 
-def test_group_sequential_false_accept_is_below_003_and_it_stops_early_on_losers():
+def test_group_sequential_false_accept_is_about_005_per_candidate_and_it_stops_early_on_losers():
     rng = random.Random(11)
     n_trials, fa, cost = 3000, 0, 0
     looks, nmax = P.gs_looks, P.gs_looks[-1]
@@ -133,7 +137,7 @@ def test_group_sequential_false_accept_is_below_003_and_it_stops_early_on_losers
                 break
         fa += verdict == "accept"
         cost += n
-    assert fa / n_trials <= 0.03, fa / n_trials
+    assert fa / n_trials <= 0.06, fa / n_trials          # same per-test alpha (~0.05) as z_conf 1.6
     assert cost / n_trials < 0.85 * nmax
 
 

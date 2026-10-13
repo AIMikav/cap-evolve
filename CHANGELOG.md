@@ -17,7 +17,20 @@ All notable changes to cap-evolve are documented here. The format follows
   tags its unusable-template error as `candidate` and provider/sandbox failures as `infra`); one
   rule applies to baseline, candidates, resume, `gate_check` and finalize, and a run logs how many
   trials were reclassified (and warns when it is 0).
+- **Rule P promotion** (opt-in): `--promotion-rule` and `--promotion-{k-se,n-conf,dmin,z-conf,min-coverage}` on
+  hill-climb, skillopt and gepa, set from the spec keys `promotion_rule` and `promotion_*`. Off by default.
+  Under rule P the harness forces `footprint_gate=False` and `mode=paired`.
+- **Screen accounting** (`cap_evolve.screen_accounting`): seeded screen/control construction and
+  Horvitz-Thompson estimates, recorded alongside the screen so a screened gate's decision can be audited.
+- **`optimizer.ablation.history` / `CAPEVOLVE_HISTORY`** (default on): turning it off withholds the
+  LEDGER / JOURNAL / RUNMAP / prior-iteration / insights files and the currently-passing block from the
+  proposer. It changes only what the proposer sees; gate, evaluator and scoring are untouched.
 ### Changed
+- **Intentional default change: SpreadsheetBench runs now use a gold-free agent view**
+  (`SB_AGENT_VIEW=1`, #782). The gold answers were readable by the optimizer through the shared sandbox
+  mount; the agent now sees only a view without them, and scoring reads gold from the data directory. The
+  old behaviour needs `SB_AGENT_VIEW=0` together with `SB_ALLOW_GOLD_IN_MOUNT=1`; `SB_AGENT_VIEW=0` alone
+  is refused.
 - **`cap-evolve run` now forwards `gate_no_regression` and `gate_max_broke`** from the spec to
   hill-climb, skillopt and gepa (`--no-regression`, `--gate-max-broke`). Before, those flags existed
   on the algorithm scripts but the CLI never passed them, so a spec could not enable them. Both are

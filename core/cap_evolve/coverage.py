@@ -1,9 +1,9 @@
 """Coverage of a paired comparison when some cells are missing (pure, stdlib).
 
-v1 vetoes a candidate whose joint coverage is below ``min_coverage`` (0.95 in the E10 specs). On
-SpreadsheetBench hill-climb seed 2 the incumbent itself had three tasks with ``valid_trials=0``, never
-retried, so every candidate sat at 37/40 = 92.5% forever and 11 of 12 screen-passing candidates were
-vetoed. The measurement problem is the incumbent's, not the candidate's.
+v1 vetoes a candidate whose joint coverage is below ``min_coverage`` (often set to 0.95). When the
+incumbent itself has a few tasks with ``valid_trials=0`` that are never retried, every candidate sits
+below the bar forever (3 holes in 40 tasks = 92.5%) and screen-passing candidates are vetoed. The
+measurement problem is the incumbent's, not the candidate's.
 
 Missingness is classified by who it falls on:
   * incumbent-side, persistent: retry, then QUARANTINE the task (drop it from the evaluable set E);
@@ -13,7 +13,6 @@ Missingness is classified by who it falls on:
   * anything still missing between the floor and 1.0: tipping-point check (impute the missing deltas
     at ``impute`` and see whether the screen still passes).
 
-Design: gate_budget_design.md section 4.
 """
 
 from __future__ import annotations
@@ -56,15 +55,19 @@ def joint_coverage_on(evaluable: Iterable[str], cur_per_task, cand_per_task) -> 
 
 def differential_failures(evaluable: Iterable[str], cur_per_task, cand_per_task, *,
                           min_excess: int = 2, frac: float = 0.05) -> list:
-    """Tasks to count as candidate FAILURES (reward 0.0) because the candidate is missing on them
-    in excess of the incumbent: ``cand_only_missing - inc_only_missing > max(min_excess, frac*|E|)``.
-    Returns [] when the excess is within the allowance (the gaps are then treated as exogenous)."""
+    """Tasks to count as candidate FAILURES (reward 0.0) because the candidate is missing on more
+    tasks than the incumbent is: ``excess = cand_only_missing - inc_only_missing``.
+
+    Returns [] unless ``excess > max(min_excess, frac*|E|)``; then only the EXCESS is penalised (the
+    gaps the incumbent also has are exogenous), choosing the missing tasks the incumbent solved best
+    (the worst case for the candidate, deterministic by id)."""
     E = {str(t) for t in evaluable}
     cur, cand = valid_map(cur_per_task), valid_map(cand_per_task)
     cand_only = sorted(t for t in E if t in cur and t not in cand)
     inc_only = [t for t in E if t in cand and t not in cur]
-    if len(cand_only) - len(inc_only) > max(min_excess, frac * len(E)):
-        return cand_only
+    excess = len(cand_only) - len(inc_only)
+    if excess > max(min_excess, frac * len(E)):
+        return sorted(cand_only, key=lambda t: (-cur[t], t))[:excess]
     return []
 
 
