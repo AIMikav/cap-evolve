@@ -20,7 +20,7 @@ RULES = """Rules:
   already attempted needs a different mechanism, not new wording. General rules only: never a task id, an expected
   answer or a copied value.
 - Edit only inside {workdir}. Do NOT run evaluations, sleep, poll or wait: the conductor evaluates your edit.
-- Finish by writing {workdir}/hypothesis.json: {{"id","cluster_ids":[...],"claim","predicted_tasks":[...],"predicted_mechanism","edit_scope"}}, then stop.
+- REQUIRED, the candidate is refused without it: finish by writing {workdir}/hypothesis.json (valid JSON, exactly this name, even when no clusters.json exists): {{"id","cluster_ids":[...],"claim","predicted_tasks":[...],"predicted_mechanism","edit_scope"}}, then stop.
 - Read the parent's failing traces under ./trajectories before editing (feedback tasks only; held-out data is not available);
   ./guidance has the capability guides and data-model sources."""
 
@@ -35,7 +35,7 @@ def pick_cluster(digest_dict: dict, slot: int, taken: set[str]) -> dict | None:
 
 
 def build_prompt(*, workdir, parent: str, cluster: dict | None, digest_text: str = "", strict: bool = False,
-                 kind: str = "propose", conflicts: list | None = None) -> str:
+                 kind: str = "propose", conflicts: list | None = None, refusal: str = "") -> str:
     head = {
         "propose": f"You are proposing one edit to candidate {parent!r} (already copied into {workdir}).",
         "merge": (f"{workdir} is a copy of branch {parent!r}; merging another branch into it conflicts in: "
@@ -49,6 +49,9 @@ def build_prompt(*, workdir, parent: str, cluster: dict | None, digest_text: str
     body = f"{head}{target}\n\n{digest_text.strip()}\n\n{RULES.format(workdir=workdir)}"
     if strict:
         body += STRICT
+    if refusal:
+        body += (f"\nYour previous attempt was refused: {refusal.strip()[:300]}\nFix exactly that, and write "
+                 f"{workdir}/hypothesis.json with the fields above.")
     data = body.encode("utf-8")
     if len(data) > MAX_PROMPT_BYTES:      # shrink the digest, never the rules
         room = MAX_PROMPT_BYTES - len(body.replace(digest_text, "").encode("utf-8")) - 16
@@ -58,6 +61,8 @@ def build_prompt(*, workdir, parent: str, cluster: dict | None, digest_text: str
 
 def read_hypothesis(workdir) -> dict | None:
     p = Path(workdir) / HYPOTHESIS_FILE
+    if not p.is_file():                      # a model may write HYPOTHESIS.json: same file, different case
+        p = next((q for q in sorted(Path(workdir).glob("*")) if q.name.lower() == HYPOTHESIS_FILE and q.is_file()), p)
     try:
         h = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -65,16 +70,28 @@ def read_hypothesis(workdir) -> dict | None:
     return h if isinstance(h, dict) else None
 
 
-def tokens_from_result(stdout: str) -> int:
-    """Billed optimizer tokens from run-optimizer's JSON report (``cost.tokens``); 0 when absent."""
+def usage_from_result(stdout: str) -> dict:
+    """``{tokens, cache_read}`` of a finished job from run-optimizer's JSON report (``cost``).
+
+    ``tokens`` is the campaign's registered basis: input + output + cache creation, i.e. NON-cache-read
+    (the same quantity as the 4M guard). run-optimizer's ``cost.tokens`` also contains the cache reads,
+    which are subtracted here and reported on their own; a job re-reads its context every turn, so
+    cache reads are ~95% of the raw total and would exhaust a cap that was sized on the other basis."""
     for line in reversed((stdout or "").strip().splitlines()):
         try:
             rec = json.loads(line)
         except ValueError:
             continue
         if isinstance(rec, dict):
-            return int(((rec.get("cost") or {}).get("tokens")) or 0)
-    return 0
+            cost = rec.get("cost") or {}
+            total, cache = int(cost.get("tokens") or 0), int(cost.get("cache_read_tokens") or 0)
+            return {"tokens": max(total - cache, 0), "cache_read": cache}
+    return {"tokens": 0, "cache_read": 0}
+
+
+def tokens_from_result(stdout: str) -> int:
+    """Non-cache-read tokens of a finished job (see ``usage_from_result``); 0 when absent."""
+    return usage_from_result(stdout)["tokens"]
 
 
 def _billed(usage: dict) -> int:

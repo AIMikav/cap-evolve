@@ -36,7 +36,7 @@ import act
 import conductor
 import digest
 import proposer
-from cap_evolve import RunDir, eval_index, graph, harness, optimizer_config
+from cap_evolve import RunDir, eval_index, graph, harness, optimizer_config, optimizer_cost
 from cap_evolve.candidate_graph import CandidateGraph
 from cap_evolve.specfile import spec_for_run
 
@@ -295,7 +295,7 @@ class RealBackend(P2Port, conductor.Backend):
         log, rcf, prompt = self._paths(job)
         prompt.write_text(proposer.build_prompt(workdir=work, parent=parent, cluster=cluster, digest_text=text,
                                                 strict=bool(job.get("strict")), kind=kind,
-                                                conflicts=conflicts), encoding="utf-8")
+                                                conflicts=conflicts, refusal=job.get("refusal") or ""), encoding="utf-8")
         cmd = [act.PY, RUN_OPTIMIZER, "--name", self.optimizer, "--workdir", work, "--prompt", prompt, "--json",
                "--transcript", str(self.transcript(job))]
         turns = int(self.spec.get("optimizer_max_turns") or 40)
@@ -324,14 +324,14 @@ class RealBackend(P2Port, conductor.Backend):
         return proposer.transcript_tokens(self.transcript(job))
 
     def _inject_context(self, work, parent) -> None:
-        """What a harness-driven optimizer gets in its work dir: the PARENT's val traces under
+        """What a harness-driven optimizer gets in its work dir: the PARENT's feedback-split traces (F when pooled, else val) under
         ./trajectories, capability guidance and data-model sources under ./guidance (none of it is
         capability: cap_hash ignores both). Without it a proposer edits blind. Never fatal."""
         try:
             from cap_evolve.check import load_adapter
             adapter = getattr(self, "_adapter", None) or load_adapter(self.project)
             harness._inject_optimizer_context(
-                adapter, self.run_dir, work, split="val", capabilities=list(self.spec.get("capabilities") or []),
+                adapter, self.run_dir, work, split=harness.gate_split(self.run_dir), capabilities=list(self.spec.get("capabilities") or []),
                 optimizer_name=self.optimizer, capability_sources=list(self.spec.get("capability_sources") or []),
                 project_dir=self.project, tag=parent)
         except Exception as e:  # noqa: BLE001
@@ -356,7 +356,10 @@ class RealBackend(P2Port, conductor.Backend):
         text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
         res = {"ok": rc == 0, "rc": rc, "tail": text[-400:]}
         if job["kind"] in ("propose", "merge"):
-            res["tokens"] = proposer.tokens_from_result(text)
+            res.update(zip(("tokens", "cache_read_tokens"), proposer.usage_from_result(text).values()))
+            tr = self.transcript(job)
+            if tr.exists():                    # bill THIS job's own transcript to the run (idempotent), nothing else
+                optimizer_cost.register(self.run_dir, str(tr))
         return res
 
     def kill(self, job):

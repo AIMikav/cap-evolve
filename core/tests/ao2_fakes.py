@@ -172,7 +172,8 @@ class FakeBackend(conductor.Backend):
             else:
                 genes = self.w.cands[parent]["genes"] | {gene_for(tag, self.w.cands[parent]["genes"], self.w.quality)}
             self.w.cands[tag] = {"genes": genes, "parents": [parent]}
-            return {"ok": True, "tokens": self.w.tokens_per_propose}
+            return {"ok": True, "tokens": self.w.tokens_per_propose,
+                    "cache_read_tokens": getattr(self.w, "cache_read_per_propose", 0)}
         if job["kind"] == "merge":
             a, b = job["parents"]
             self.w.cands[job["tag"]] = {"genes": self.w.cands[a]["genes"] | self.w.cands[b]["genes"], "parents": [a, b]}
@@ -190,6 +191,9 @@ class FakeBackend(conductor.Backend):
     # ---- graph
     def register(self, job, result):
         tag = job["tag"]
+        refuse = getattr(self.w, "refuse_first", {})            # {tag: detail}: refused on the first attempt only
+        if tag in refuse and not job.get("refusal"):
+            return {"ok": False, "refused": "hypothesis", "detail": refuse[tag]}
         if tag not in self.w.cands:
             return {"ok": False, "refused": "no_candidate"}
         return {"ok": True, "hash": self.w.hash(tag), "parents": self.w.cands[tag]["parents"]}
