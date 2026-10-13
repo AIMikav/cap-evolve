@@ -302,13 +302,23 @@ class Round:
     def _draw_key(self, role: str) -> str:
         return f"{self.ev.splits.pool_seed}:{self.state['no']}:{role}"
 
+    def _existing_jobs(self, cid: str, stage: str, tag_prefix: str) -> list:
+        """Jobs already created for (cid, stage, tag prefix): a restarted caller gets the same jobs back."""
+        mark = f"__{tag_prefix}"
+        return [Job(**{**j, "ids": tuple(j["ids"])}) for j in self.state["jobs"].values()
+                if j["cid"] == cid and j["stage"] == stage and mark in j["tag"]]
+
     def _make_jobs(self, cid: str, stage: str, role: str, draws: list, passes: list, kind: str,
                    tag_prefix: str, seed_shift: int = 0) -> list:
         """Chunk ``draws`` of one candidate into jobs (grouped by pass so a job never repeats a task).
+        Idempotent per (cid, stage, tag_prefix): called again after a restart it returns the jobs it made before.
 
         ``passes`` = ``[(task, pass_idx)]`` parallel to ``draws``; the pass index is part of the seed
         (``trial_offset = SEED_BASE[kind] + round block + seed_shift + pass``)."""
         p = self.ev.params
+        done = self._existing_jobs(cid, stage, tag_prefix)
+        if done:
+            return done
         by_pass: dict = {}
         for t, k in passes:
             by_pass.setdefault(k, []).append(t)
@@ -372,6 +382,9 @@ class Round:
         """Top-up jobs bringing the incumbent's F draws to ``incumbent_trials`` per task (pooled over
         every earlier draw of the same capability hash). Empty when it is already measured."""
         inc_cid, inc_dir = self.state["incumbent"]
+        done = self._existing_jobs(inc_cid, "incumbent", "inc_p")
+        if done:
+            return done
         need = self.ev._incumbent_shortfall(Path(inc_dir))
         jobs, idx = [], 0
         for k in range(max(need.values(), default=0)):

@@ -303,6 +303,9 @@ class P2Backend(conductor_backend.P2Port, conductor.Backend):
     def reserved_rollouts(self): return self.run_dir.reserved_metric_calls()
     def remaining_rollouts(self): return self.run_dir.remaining_metric_calls()
 
+    def _remember_round(self, rnd):
+        self.rounds[rnd.round_id] = rnd
+
     def _round(self, rid):
         if rid not in self.rounds:
             self.rounds[rid] = self.ev.resume_round(rid)

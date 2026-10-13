@@ -117,3 +117,38 @@ def test_spend_for_the_conductor_engine_never_reads_the_prose(tmp_path, capsys, 
     rc = spend.main(["--run-dir", str(rd.root), "--project", str(project)])
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["constraints"]["predicates"] == [] and out["recommendation"] != "stop"
+
+
+# ---- optional PR-3 helper checks -------------------------------------------------------------
+
+def _stub_helpers(monkeypatch, *, lint_ok=True, smoke_ok=True, enabled=True):
+    import types
+    h = types.ModuleType("cap_evolve.helpers")
+    h.enabled = lambda spec: enabled
+    h.resolve = lambda spec: {"lint": True, "smoke": True}
+    h.lint_candidate = lambda cand, cfg, parent=None: {"ok": lint_ok, "findings": ["task id literal"]}
+    s = types.ModuleType("cap_evolve.helper_smoke")
+    s.run_smoke = lambda cand, cfg, parent=None, fixtures=None: {"ok": smoke_ok, "detail": "not deterministic"}
+    import cap_evolve
+    monkeypatch.setitem(sys.modules, "cap_evolve.helpers", h)
+    monkeypatch.setitem(sys.modules, "cap_evolve.helper_smoke", s)
+    monkeypatch.setattr(cap_evolve, "helpers", h, raising=False)
+    monkeypatch.setattr(cap_evolve, "helper_smoke", s, raising=False)
+
+
+def test_helper_checks_are_a_noop_when_pr3_is_absent(monkeypatch, tmp_path):
+    import conductor_backend as cb
+    monkeypatch.setitem(sys.modules, "cap_evolve.helpers", None)       # ImportError on import
+    assert cb.helper_refusal({}, tmp_path, None) is None
+
+
+def test_helper_lint_and_smoke_refuse_a_candidate_before_any_rollout(monkeypatch, tmp_path):
+    import conductor_backend as cb
+    _stub_helpers(monkeypatch, lint_ok=False)
+    assert cb.helper_refusal({}, tmp_path, None)[0] == "helper_lint"
+    _stub_helpers(monkeypatch, smoke_ok=False)
+    assert cb.helper_refusal({}, tmp_path, None)[0] == "helper_smoke"
+    _stub_helpers(monkeypatch)
+    assert cb.helper_refusal({}, tmp_path, None) is None
+    _stub_helpers(monkeypatch, lint_ok=False, enabled=False)
+    assert cb.helper_refusal({}, tmp_path, None) is None

@@ -931,6 +931,15 @@ def _cmd_run(argv):
     # primitives, and sealing by running the finalize phase script. cap-evolve run does
     # setup+baseline, then hands off here — no algorithm subprocess, no auto-finalize.
     if orchestration_mode == "agent":
+        if str(spec.get("ao_engine") or "") == "conductor":
+            # AO-2 (opt-in, ``ao_engine: conductor``): code runs the loop and the LLM only does bounded
+            # one-shot jobs; the supervisor relaunches the conductor until it exits 0.
+            cond = skills_dir / "algorithms" / "agent-optimize" / "scripts" / "conductor.py"
+            cond_cmd = [py, str(cond), "supervise", "--run-dir", str(workdir / run_dir),
+                        "--project", str(proj_abs)]
+            if args.agent_driver:
+                cond_cmd += ["--optimizer", args.agent_driver]
+            return done(subprocess.run(cond_cmd, cwd=str(workdir)).returncode)
         if args.agent_driver:
             # Opt-in only: without --agent-driver this branch is unreachable and behavior
             # is byte-identical to before. host.py is the existing headless driver for

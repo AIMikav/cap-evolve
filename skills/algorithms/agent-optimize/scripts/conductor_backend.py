@@ -63,6 +63,29 @@ def _pid_alive(pid) -> bool:
     return True
 
 
+def helper_refusal(spec: dict, cand: Path, parent: Path | None):
+    """PR-3 helper checks (static lint, then the smoke run) on a proposed candidate, or None.
+
+    Optional: ``cap_evolve.helpers`` / ``helper_smoke`` are imported only if they exist and
+    ``helpers.enabled`` is set, so without PR-3 this is a no-op. A failure costs 0 rollouts."""
+    try:
+        from cap_evolve import helper_smoke, helpers
+    except ImportError:
+        return None
+    if not helpers.enabled(spec):
+        return None
+    cfg = helpers.resolve(spec)
+    if cfg.get("lint", True):
+        r = helpers.lint_candidate(cand, cfg, parent)
+        if not r.get("ok", True):
+            return "helper_lint", "; ".join(map(str, r.get("findings") or []))[:300]
+    if cfg.get("smoke", True):
+        r = helper_smoke.run_smoke(cand, cfg, parent=parent)
+        if not r.get("ok", True):
+            return "helper_smoke", str(r.get("detail"))[:300]
+    return None
+
+
 class P2Port:
     """The conductor's P2 methods over ``cap_evolve.evaluator``. A backend supplies ``ev`` (a P2Evaluator),
     ``_round(rid)``, ``_job(dict)``, ``_dir(tag)`` (a candidate's directory) and ``_workdir(tag)``."""
@@ -73,8 +96,11 @@ class P2Port:
 
     def p2_open(self, tags, incumbent):
         rnd = self.ev.open_round({t: self._workdir(t) for t in tags}, (incumbent, self._dir(incumbent)))
-        self._rounds[rnd.round_id] = rnd
+        self._remember_round(rnd)
         return rnd.round_id
+
+    def _remember_round(self, rnd):
+        self._rounds[rnd.round_id] = rnd
 
     def p2_stage_jobs(self, rid, stage):
         rnd = self._round(rid)
@@ -290,6 +316,9 @@ class RealBackend(P2Port, conductor.Backend):
         work = self.ctx.work(tag)
         if not work.is_dir():
             return {"ok": False, "refused": "no_candidate"}
+        bad = helper_refusal(self.spec, work, digest.cand_dir(self.run_dir, parent))
+        if bad:
+            return {"ok": False, "refused": bad[0], "detail": bad[1]}
         h = proposer.read_hypothesis(work)
         hyp = work / proposer.HYPOTHESIS_FILE
         a = argparse.Namespace(**vars(self.ns), tag=tag, parent=parent, hypothesis_file=str(hyp) if h else None,
