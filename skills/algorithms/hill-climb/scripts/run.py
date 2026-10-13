@@ -139,7 +139,8 @@ def main(argv=None) -> int:
             print(json.dumps({"error": f"--hc2: {exc}"}))
             return 2
         from cap_evolve.evaluator import P2Evaluator
-        evaluator = P2Evaluator(adapter, run_dir, p2, workers=harness.DEFAULT_WORKERS,
+        # workers=1: concurrency lives in hc2_loop's job map, not inside each job
+        evaluator = P2Evaluator(adapter, run_dir, p2, workers=1,
                                 errored_policy=gate_kwargs.get("errored_trial_policy"))
         result = hc2.hc2_loop(adapter, run_dir=run_dir, optimizer=optimizer, evaluator=evaluator,
                               params=hc2_params, ctx=ctx, max_iterations=args.max_iterations,

@@ -339,15 +339,28 @@ def diff_lines(parent_dir: Path, cand_dir: Path) -> frozenset:
     for rel in sorted(set(a) | set(b)):
         for ln in difflib.unified_diff(a.get(rel, []), b.get(rel, []), lineterm="", n=0):
             if ln[:1] in "+-" and not ln.startswith(("+++", "---")) and ln[1:].strip():
-                changed.add(rel + ln[0] + " ".join(ln[1:].split()))
+                changed.add(f"{rel}\t{ln[0]}" + " ".join(ln[1:].split()))
     return frozenset(changed)
 
 
+def _shingles(lines: frozenset, n: int = 3) -> frozenset:
+    """Word n-grams within each changed line (a short line is one shingle), tagged by file and +/-."""
+    out = set()
+    for ln in lines:
+        head, _, body = ln.partition("\t")
+        w = body[1:].split()
+        out.update((head, body[:1], " ".join(w[i:i + n])) for i in range(max(1, len(w) - n + 1)))
+    return frozenset(out)
+
+
 def diff_overlap(x: frozenset, y: frozenset) -> float:
-    """Jaccard similarity of two changed-line sets; 0.0 when either is empty."""
+    """Similarity of two diffs, 0.0 when either is empty: the larger of the Jaccard of the changed lines
+    and the Jaccard of their word 3-grams, so a lightly reworded copy of an edit still counts."""
     if not x or not y:
         return 0.0
-    return len(x & y) / len(x | y)
+    lines = len(x & y) / len(x | y)
+    sx, sy = _shingles(x), _shingles(y)
+    return max(lines, len(sx & sy) / len(sx | sy))
 
 
 def near_duplicate(diff: frozenset, others, threshold: float):
@@ -408,134 +421,327 @@ def _propose(optimizer, workdir: Path, instructions: str):
         return getattr(e, "cost", None), str(e)
 
 
+FINAL_TRIALS = 4            # ``P2Evaluator.final_estimate`` default n_trials (champion and seed each)
+
+
+def final_estimate_cost(evaluator, n_trials: int = FINAL_TRIALS) -> int:
+    """Rollouts the final estimate needs: champion and seed, ``n_trials`` each, on every C task."""
+    return 2 * int(n_trials) * len(evaluator.confirm_ids())
+
+
+def _pending_path(run_dir) -> Path:
+    return Path(run_dir.root) / "hc2_pending.json"
+
+
+def _save_pending(run_dir, pend: dict) -> None:
+    from .rundir import _atomic_write
+    _atomic_write(_pending_path(run_dir), json.dumps(pend))
+
+
+def _next_cid_base(run_dir) -> int:
+    """Highest ``cand_NNNN`` number on disk. Ids cannot come from ``spent.iterations``: a round is one
+    iteration but K candidates."""
+    best = 0
+    for root in (Path(run_dir.root) / "candidates", Path(run_dir.root) / "work"):
+        for p in root.glob("cand_*") if root.is_dir() else []:
+            m = re.fullmatch(r"cand_(\d+)", p.name.split(".")[0])
+            if m:
+                best = max(best, int(m.group(1)))
+    return best
+
+
+def _rounds_done(run_dir) -> int:
+    """One iteration is recorded per round (``count_iteration``), dropped-only rounds included."""
+    return run_dir.spent.iterations
+
+
 def hc2_loop(adapter, *, run_dir, optimizer, evaluator, params: HC2Params, ctx, max_iterations: int,
              store=None, algorithm: str = "hill-climb:hc2", workers: int = 1) -> dict:
-    """Rounds of K parallel proposals judged by ``evaluator`` (a ``P2Evaluator``)."""
+    """Rounds of K parallel proposals judged by ``evaluator`` (a ``P2Evaluator``).
+
+    Concurrency is bounded by ``workers`` in total: jobs fan out over ``thread_map(workers)`` and each
+    job runs its rollouts serially (the evaluator's own ``workers`` is forced to 1), so nesting cannot
+    multiply the two. An interrupted round (``hc2_pending.json`` + its ``p2/r*.json``) is resumed on
+    entry, not re-proposed. One round counts as one iteration and one stall step.
+    """
     from . import harness
     rejected, history, store = harness._init_memory_store(run_dir, store)
     rdiffs = RejectedDiffs(run_dir)
     n_rounds = params.max_rounds or max_iterations
     window = params.diversity_window or params.k
+    if hasattr(evaluator, "workers"):
+        evaluator.workers = 1
+    env = dict(adapter=adapter, run_dir=run_dir, evaluator=evaluator, ctx=ctx, rejected=rejected,
+               history=history, store=store, rdiffs=rdiffs, workers=workers, algorithm=algorithm)
     steps, stop = [], ""
-    for r in range(n_rounds):
+
+    pend = _load_pending(run_dir)
+    if pend:
+        steps += _finish_round(pend, **env)
+
+    while _rounds_done(run_dir) < n_rounds:
         exhausted, _ = run_dir.budget_exhausted()
         if exhausted:
             break
-        plan = evaluator.plan_round(params.k, incumbent_dir=run_dir.candidate_dir(run_dir.best_id))
+        # The final estimate is paid for up front, so a budget-bound search cannot spend it: hold
+        # its cost while planning, release it before the estimate itself reserves.
+        hold = None
+        if _internal_estimate_pending(run_dir):
+            try:
+                hold = run_dir.reserve_metric_calls(final_estimate_cost(evaluator), label="hc2_final_estimate")
+            except Exception:  # noqa: BLE001 - cannot be held: the estimate will be skipped and recorded
+                hold = None
+        try:
+            plan = evaluator.plan_round(params.k, incumbent_dir=run_dir.candidate_dir(run_dir.best_id))
+        finally:
+            run_dir.release_metric_calls(hold)
         if not plan.funded:
             stop = "budget_unfunded"
             break
-        incumbent_id = run_dir.best_id
-        incumbent_dir = run_dir.candidate_dir(incumbent_id)
-        f_ids = [str(i) for i in evaluator.feedback_ids()]
-        c_ids = [str(i) for i in evaluator.confirm_ids()]
-        traces = read_traces(run_dir, (evaluator.proposer_split, "train", "val"), f_ids,
-                             incumbent_tag_ok(incumbent_id))
-        failed = failing_tasks(traces)
-        batch = rotating_minibatch(failed, params.minibatch, r)
-        clusters = split_to_k(cluster_failures(failed, batch, params.cluster_sim), plan.k)
-        if not clusters:
+        pend = _propose_round(plan.k, params, window, _rounds_done(run_dir), **env, optimizer=optimizer)
+        if pend is None:
             stop = "no_failures"
             break
-        base = run_dir.spent.iterations
-        cids = [f"cand_{base + j + 1:04d}" for j in range(len(clusters))]
-        view = _pooled_split_result(traces, None)
-        notes = _rejected_notes(run_dir, window)
-        workdirs, shown = {}, {}
-        for cid, cl in zip(cids, clusters):
-            wd = run_dir.root / "work" / cid
-            if wd.exists():
-                shutil.rmtree(wd)
-            wd.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(incumbent_dir, wd)
-            ctx.inject(adapter, run_dir, wd, split=evaluator.proposer_split)
-            shown[cid] = write_cluster_context(wd, cluster=cl, failed=failed, traces=traces,
-                                               params=params, confirm_ids=c_ids)
-            if params.consolidate:
-                (wd / "cross_trace_summary.md").write_text(cross_trace_summary(cl, failed),
-                                                           encoding="utf-8")
-            workdirs[cid] = wd
-        instr = {cid: ctx.augment_instructions(
-            build_instructions(ctx, view, cl, parent_dir=incumbent_dir, algorithm=algorithm,
-                               params=params, shown=shown[cid], rejected_notes=notes),
-            workdirs[cid], run_dir) for cid, cl in zip(cids, clusters)}
-
-        reports, errors = {}, {}
-        with ThreadPoolExecutor(max_workers=max(1, min(len(cids), workers))) as pool:
-            for cid, (rep, err) in zip(cids, pool.map(
-                    lambda c: _propose(optimizer, workdirs[c], instr[c]), cids)):
-                reports[cid], errors[cid] = rep, err
-
-        # diversity gate: against the last K rejected diffs and against earlier proposals this round
-        recent = rdiffs.last(window)
-        diffs, dropped = {}, {}
-        for cid in cids:
-            d = diff_lines(incumbent_dir, workdirs[cid])
-            for attempt in range(params.retries + 1):
-                if not d:
-                    break
-                hit = near_duplicate(d, recent + list(diffs.values()), params.diversity_threshold)
-                if hit is None:
-                    break
-                if attempt == params.retries:
-                    dropped[cid] = "near-duplicate of a recent or sibling diff"
-                    break
-                shutil.rmtree(workdirs[cid])
-                shutil.copytree(incumbent_dir, workdirs[cid])
-                ctx.inject(adapter, run_dir, workdirs[cid], split=evaluator.proposer_split)
-                cl = clusters[cids.index(cid)]
-                write_cluster_context(workdirs[cid], cluster=cl, failed=failed, traces=traces,
-                                      params=params, confirm_ids=c_ids)
-                note = ("Your previous attempt duplicated an edit that was already tried. Make a "
-                        "different kind of edit, aimed at a different root cause in this cluster.")
-                rep, err = _propose(optimizer, workdirs[cid], build_instructions(
-                    ctx, view, cl, parent_dir=incumbent_dir, algorithm=algorithm, params=params,
-                    shown=shown[cid], rejected_notes=notes, retry_note=note))
-                reports[cid], errors[cid] = rep, err
-                d = diff_lines(incumbent_dir, workdirs[cid])
-            if cid in dropped:
-                continue
-            if not d:
-                dropped[cid] = "empty diff" + (f" (optimizer error: {errors[cid][:200]})" if errors[cid] else "")
-                continue
-            diffs[cid] = d
-
-        for cid in cids:
-            rep = reports.get(cid)
-            if isinstance(rep, dict):
-                run_dir.update_spent(optimizer_usd=float(rep.get("cost_usd") or 0.0),
-                                     optimizer_tokens=int(rep.get("tokens") or 0))
-
-        live = {cid: workdirs[cid] for cid in cids if cid in diffs}
-        rung1 = rung2 = confirm = {}
-        champion = None
-        if live:
-            rnd = evaluator.open_round(live, (incumbent_id, incumbent_dir))
-            map_fn = thread_map(workers)
-            rung1 = rnd.run_rung(1, map_fn=map_fn)
-            if any(v.status == "advance" for v in rung1.values()):
-                rung2 = rnd.run_rung(2, map_fn=map_fn)
-            if any(v.status == "advance" for v in (rung2 or rung1).values()):
-                confirm = rnd.confirm(map_fn=map_fn)
-            champion = rnd.champion
-
-        for cid in cids:
-            step = _record(run_dir, harness, cid, incumbent_id, workdirs[cid], dropped.get(cid),
-                           rung1.get(cid), rung2.get(cid), confirm.get(cid), champion, ctx,
-                           rejected, history, store, shown[cid], diffs.get(cid), rdiffs)
-            steps.append(step)
-        if champion:
-            run_dir.set_best(champion)
-        run_dir.log_event("hc2_round", round=r, incumbent=incumbent_id, candidates=cids,
-                          dropped=sorted(dropped), champion=champion, k=len(cids))
+        steps += _finish_round(pend, **env)
     _, why = run_dir.budget_exhausted()
     internal = final_estimate(evaluator, run_dir)
-    result = {"algorithm": algorithm, "best_id": run_dir.best_id, "iterations": len(steps), "accepts": sum(1 for s in steps if s["accepted"]),
-            **({"internal_estimate": internal} if internal is not None else {}),
-            "stop_reason": why or stop or "max_iterations", "steps": steps}
+    result = {"algorithm": algorithm, "best_id": run_dir.best_id, "iterations": len(steps),
+              "accepts": sum(1 for s in steps if s["accepted"]),
+              **({"internal_estimate": internal} if internal is not None else {}),
+              "stop_reason": why or stop or "max_iterations", "steps": steps}
     (Path(run_dir.root) / "summary.json").write_text(
         json.dumps({k: v for k, v in result.items() if k != "steps"}, indent=2), encoding="utf-8")
     return result
+
+
+def _load_pending(run_dir):
+    try:
+        return json.loads(_pending_path(run_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _internal_estimate_pending(run_dir) -> bool:
+    return not (Path(run_dir.root) / "internal_estimate.json").exists()
+
+
+def _prepare(adapter, run_dir, evaluator, ctx, params, view, cid, cl, *, incumbent_dir, traces, failed,
+             c_ids, algorithm, notes, retry_note=""):
+    """Build the workdir and the full prompt for one proposal (used for the first try AND retries, so a
+    retry never loses the memory/consolidation parts)."""
+    wd = Path(run_dir.root) / "work" / cid
+    if wd.exists():
+        shutil.rmtree(wd)
+    wd.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(incumbent_dir, wd)
+    ctx.inject(adapter, run_dir, wd, split=evaluator.proposer_split)
+    shown = write_cluster_context(wd, cluster=cl, failed=failed, traces=traces, params=params,
+                                  confirm_ids=c_ids)
+    if params.consolidate:
+        (wd / "cross_trace_summary.md").write_text(cross_trace_summary(cl, failed), encoding="utf-8")
+    instr = ctx.augment_instructions(
+        build_instructions(ctx, view, cl, parent_dir=incumbent_dir, algorithm=algorithm, params=params,
+                           shown=shown, rejected_notes=notes, retry_note=retry_note), wd, run_dir)
+    return wd, instr, shown
+
+
+def _add_cost(costs: dict, cid: str, rep) -> None:
+    if isinstance(rep, dict):
+        c = costs.setdefault(cid, {"usd": 0.0, "tokens": 0})
+        c["usd"] += float(rep.get("cost_usd") or 0.0)
+        c["tokens"] += int(rep.get("tokens") or 0)
+
+
+def _propose_round(k, params, window, round_index, *, adapter, run_dir, evaluator, ctx, rejected, history,
+                   store, rdiffs, workers, algorithm, optimizer):
+    """Cluster, propose in parallel, apply the diversity gate; persist ``hc2_pending.json``."""
+    incumbent_id = run_dir.best_id
+    incumbent_dir = run_dir.candidate_dir(incumbent_id)
+    f_ids = [str(i) for i in evaluator.feedback_ids()]
+    c_ids = [str(i) for i in evaluator.confirm_ids()]
+    traces = read_traces(run_dir, (evaluator.proposer_split, "train", "val"), f_ids,
+                         incumbent_tag_ok(incumbent_id))
+    failed = failing_tasks(traces)
+    batch = rotating_minibatch(failed, params.minibatch, round_index)
+    clusters = split_to_k(cluster_failures(failed, batch, params.cluster_sim), k)
+    if not clusters:
+        return None
+    base = _next_cid_base(run_dir)
+    cids = [f"cand_{base + j + 1:04d}" for j in range(len(clusters))]
+    view = _pooled_split_result(traces, None)
+    notes = _rejected_notes(run_dir, window)
+    kw = dict(incumbent_dir=incumbent_dir, traces=traces, failed=failed, c_ids=c_ids,
+              algorithm=algorithm, notes=notes)
+    workdirs, instr, shown = {}, {}, {}
+    for cid, cl in zip(cids, clusters):
+        workdirs[cid], instr[cid], shown[cid] = _prepare(adapter, run_dir, evaluator, ctx, params, view,
+                                                         cid, cl, **kw)
+    costs, errors = {}, {}
+    with ThreadPoolExecutor(max_workers=max(1, min(len(cids), workers))) as pool:
+        for cid, (rep, err) in zip(cids, pool.map(lambda c: _propose(optimizer, workdirs[c], instr[c]), cids)):
+            _add_cost(costs, cid, rep)
+            errors[cid] = err
+
+    # diversity gate: against the last K rejected diffs and against earlier proposals this round
+    recent = rdiffs.last(window)
+    diffs, dropped = {}, {}
+    for cid, cl in zip(cids, clusters):
+        d = diff_lines(incumbent_dir, workdirs[cid])
+        for attempt in range(params.retries + 1):
+            if not d:
+                break
+            if near_duplicate(d, recent + list(diffs.values()), params.diversity_threshold) is None:
+                break
+            if attempt == params.retries:
+                dropped[cid] = "near-duplicate of a recent or sibling diff"
+                break
+            note = ("Your previous attempt duplicated an edit that was already tried. Make a "
+                    "different kind of edit, aimed at a different root cause in this cluster.")
+            workdirs[cid], i2, shown[cid] = _prepare(adapter, run_dir, evaluator, ctx, params, view, cid,
+                                                     cl, retry_note=note, **kw)
+            rep, err = _propose(optimizer, workdirs[cid], i2)
+            _add_cost(costs, cid, rep)            # every attempt is paid for
+            errors[cid] = err
+            d = diff_lines(incumbent_dir, workdirs[cid])
+        if cid in dropped:
+            continue
+        if not d:
+            dropped[cid] = "empty diff" + (f" (optimizer error: {errors[cid][:200]})" if errors[cid] else "")
+            continue
+        diffs[cid] = d
+    for c in costs.values():
+        run_dir.update_spent(optimizer_usd=c["usd"], optimizer_tokens=c["tokens"])
+    pend = {"incumbent": incumbent_id, "cids": cids, "round_id": None, "dropped": dropped, "shown": shown,
+            "diffs": {c: sorted(d) for c, d in diffs.items()}, "recorded": []}
+    _save_pending(run_dir, pend)
+    return pend
+
+
+def _verdicts(d, cls) -> dict:
+    return {c: cls(**v) for c, v in (d or {}).items()}
+
+
+def _open_or_resume(evaluator, run_dir, pend, live, incumbent):
+    """The round of this pending set: the one already on disk if there is one, else a new one."""
+    if pend.get("round_id"):
+        return evaluator.resume_round(pend["round_id"])
+    pdir = Path(run_dir.root) / "p2"
+    for f in sorted(pdir.glob("r*.json"), reverse=True) if pdir.is_dir() else []:
+        try:
+            st = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if set(st.get("candidates", {})) == set(live):
+            return evaluator.resume_round(st["round_id"])
+    return evaluator.open_round(live, (pend["incumbent"], run_dir.candidate_dir(pend["incumbent"])))
+
+
+def _drive(rnd, map_fn):
+    """Run (or finish) a round. Idempotent: finished jobs are skipped, a closed round is only read."""
+    from .evaluator import ConfirmVerdict, RungVerdict
+    st = rnd.state
+    if st.get("stage") == "closed":
+        return (_verdicts(st["rungs"].get("1"), RungVerdict), _verdicts(st["rungs"].get("2"), RungVerdict),
+                _verdicts(st.get("confirms"), ConfirmVerdict))
+    rung1 = rnd.run_rung(1, map_fn=map_fn)
+    rung2, confirm = {}, {}
+    if any(v.status == "advance" for v in rung1.values()):
+        rung2 = rnd.run_rung(2, map_fn=map_fn)
+        if any(v.status == "advance" for v in rung2.values()):
+            confirm = rnd.confirm(map_fn=map_fn)
+    return rung1, rung2, confirm
+
+
+def _finish_round(pend, *, adapter, run_dir, evaluator, ctx, rejected, history, store, rdiffs, workers,
+                  algorithm):
+    """Evaluate (or resume) a proposed round, apply its champion, record every candidate once."""
+    from . import harness
+    from .evaluator import thread_map
+    cids = pend["cids"]
+    workdirs = {c: Path(run_dir.root) / "work" / c for c in cids}
+    live = {c: workdirs[c] for c in cids if c in pend["diffs"]}
+    rung1 = rung2 = confirm = {}
+    champion = None
+    if live:
+        rnd = _open_or_resume(evaluator, run_dir, pend, live, None)
+        if pend.get("round_id") != rnd.round_id:
+            pend["round_id"] = rnd.round_id
+            _save_pending(run_dir, pend)
+        rung1, rung2, confirm = _drive(rnd, thread_map(workers))
+        champion = rnd.champion
+    if champion and run_dir.best_id != champion:
+        run_dir.snapshot(champion, workdirs[champion], ignore=_snap_ignore(harness))
+        run_dir.set_best(champion)
+    statuses = {c: _status(pend, c, rung1.get(c), rung2.get(c), confirm.get(c)) for c in cids}
+    round_indecisive = champion is None and all(s[2] for s in statuses.values())
+    lead = champion or next((c for c in cids if c in live), cids[0])
+    steps = []
+    for cid in cids:
+        if cid in pend["recorded"]:
+            continue
+        status, reason, indecisive = statuses[cid]
+        steps.append(_record(
+            run_dir, harness, cid, pend["incumbent"], workdirs[cid], status, reason,
+            indecisive=(round_indecisive if cid == lead and champion is None else indecisive),
+            accepted=cid == champion, counts=cid == lead, rv=rung2.get(cid) or rung1.get(cid),
+            ctx=ctx, rejected=rejected, history=history, store=store, shown=pend["shown"][cid],
+            diff=frozenset(pend["diffs"][cid]) if cid in pend["diffs"] else None, rdiffs=rdiffs))
+        pend["recorded"].append(cid)
+        _save_pending(run_dir, pend)
+    run_dir.log_event("hc2_round", incumbent=pend["incumbent"], candidates=cids,
+                      dropped=sorted(pend["dropped"]), champion=champion, k=len(cids))
+    _pending_path(run_dir).unlink(missing_ok=True)
+    return steps
+
+
+def _snap_ignore(harness):
+    return tuple(harness._SNAPSHOT_IGNORE) + ("contrast", "notes", "cross_trace_summary.md")
+
+
+def _status(pend, cid, v1, v2, cv):
+    """(status, reason, indecisive) for one candidate. Only the C verdict BIT is ever written."""
+    if cid in pend["dropped"]:
+        return "dropped", f"hc2 diversity gate: {pend['dropped'][cid]}", True
+    if cv is not None:
+        return cv.status, f"P2 confirmation {cv.bit()}", cv.status == "unconfirmed"
+    rv = v2 or v1
+    if rv is not None:
+        return rv.status, f"P2 rung {'2' if v2 else '1'}: {rv.status}", rv.status == "unfunded"
+    return "unevaluated", "not evaluated", True
+
+
+def _rejected_notes(run_dir, n: int) -> list:
+    p = Path(run_dir.rejected_path)
+    try:
+        recs = [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+    except (OSError, ValueError):
+        return []
+    return [f"{r.get('candidate_id')}: {r.get('summary', '')[:160]} ({r.get('reason', '')[:120]})"
+            for r in recs[-n:]]
+
+
+def _record(run_dir, harness, cid, parent_id, workdir, status, reason, *, indecisive, accepted, counts, rv,
+            ctx, rejected, history, store, shown, diff, rdiffs) -> dict:
+    """Write one candidate's record. Only the round's lead candidate counts as an iteration / stall step."""
+    run_dir.snapshot(cid, workdir, ignore=_snap_ignore(harness))
+    harness.record_iteration(run_dir, workdir, cid, parent_id=parent_id, accepted=accepted,
+                             reason=reason, val=None, parent_val=None, indecisive=indecisive,
+                             memory_skill=ctx.memory_skill, count_iteration=counts,
+                             hc2={"status": status, "tasks": shown["tasks"], "pairs": shown["pairs"],
+                                  "feedback_mean": getattr(rv, "mean", None)}, round_status=status)
+    summary = f"candidate {cid} ({status})"
+    if accepted:
+        if history is not None:
+            history.add(cid, summary, getattr(rv, "mean", 0.0) or 0.0)
+    elif not indecisive and rejected is not None:
+        rejected.add(cid, summary, reason, getattr(rv, "mean", None))
+    if not indecisive and not accepted and diff is not None:
+        rdiffs.add(cid, diff)
+    if store is not None and not indecisive:
+        store.commit(f"hc2 {'ACCEPT' if accepted else 'reject'} {summary}",
+                     tag=("best" if accepted else None), accepted=accepted)
+    return {"candidate_id": cid, "accepted": accepted, "status": status, "reason": reason,
+            "workdir": str(workdir)}
 
 
 def final_estimate(evaluator, run_dir):
@@ -552,7 +758,12 @@ def final_estimate(evaluator, run_dir):
         return json.loads(path.read_text(encoding="utf-8"))
     if not best or best == "seed":
         return None
+    left = run_dir.remaining_metric_calls()
+    need = final_estimate_cost(evaluator)
     try:
+        if left is not None and need > left:
+            # Both arms or neither: running the champion arm alone would spend and then fail.
+            raise BudgetExhausted(f"the final estimate needs {need} rollouts, {left} remain")
         out = evaluator.final_estimate(run_dir.candidate_dir(best), run_dir.candidate_dir("seed"))
     except BudgetExhausted as e:
         out = {"skipped": "budget", "reason": str(e)[:200]}
@@ -561,51 +772,3 @@ def final_estimate(evaluator, run_dir):
            for k, v in out.items()}
     path.write_text(json.dumps(out, indent=2), encoding="utf-8")
     return out
-
-
-def _rejected_notes(run_dir, n: int) -> list:
-    p = Path(run_dir.rejected_path)
-    try:
-        recs = [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
-    except (OSError, ValueError):
-        return []
-    return [f"{r.get('candidate_id')}: {r.get('summary', '')[:160]} ({r.get('reason', '')[:120]})"
-            for r in recs[-n:]]
-
-
-def _record(run_dir, harness, cid, parent_id, workdir, dropped, v1, v2, cv, champion, ctx,
-            rejected, history, store, shown, diff, rdiffs) -> dict:
-    """Write one candidate's iteration record; the C verdict reaches the log only as its bit."""
-    if dropped:
-        status, reason, indecisive = "dropped", f"hc2 diversity gate: {dropped}", True
-    elif cv is not None:
-        status = cv.status
-        reason = f"P2 confirmation {cv.bit()}"
-        indecisive = cv.status == "unconfirmed"
-    elif (v2 or v1) is not None:
-        status = (v2 or v1).status
-        reason = f"P2 rung {'2' if v2 else '1'}: {status}"
-        indecisive = status == "unfunded"
-    else:
-        status, reason, indecisive = "unevaluated", "not evaluated", True
-    accepted = cid == champion
-    run_dir.snapshot(cid, workdir, ignore=tuple(harness._SNAPSHOT_IGNORE) + ("contrast", "notes", "cross_trace_summary.md"))
-    rv = v2 or v1
-    harness.record_iteration(run_dir, workdir, cid, parent_id=parent_id, accepted=accepted,
-                             reason=reason, val=None, parent_val=None, indecisive=indecisive,
-                             memory_skill=ctx.memory_skill,
-                             hc2={"status": status, "tasks": shown["tasks"], "pairs": shown["pairs"],
-                                  "feedback_mean": getattr(rv, "mean", None)}, round_status=status)
-    summary = f"candidate {cid} ({status})"
-    if accepted:
-        if history is not None:
-            history.add(cid, summary, getattr(rv, "mean", 0.0) or 0.0)
-    elif not indecisive and rejected is not None:
-        rejected.add(cid, summary, reason, getattr(rv, "mean", None))
-    if not indecisive and not accepted and diff is not None:
-        rdiffs.add(cid, diff)
-    if store is not None and not indecisive:
-        store.commit(f"hc2 {'ACCEPT' if accepted else 'reject'} {summary}",
-                     tag=("best" if accepted else None), accepted=accepted)
-    return {"candidate_id": cid, "accepted": accepted, "status": status, "reason": reason,
-            "workdir": str(workdir)}
