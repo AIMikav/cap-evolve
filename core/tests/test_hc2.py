@@ -517,3 +517,45 @@ def test_hc2_resumes_an_interrupted_round_without_reproposing(tmp_path, monkeypa
     assert out["accepts"] == 1 and rd.best_id != "seed"
     assert rd.spent.iterations == 1
     assert rd.spent.metric_calls >= spent
+
+
+# ---- configurable final-estimate reserve --------------------------------------------------------
+
+def test_final_estimate_trials_default_and_spec():
+    base = {"hc2": True, "promotion_rule": "P2", "split_mode": "pooled"}
+    assert hc2.HC2Params.from_spec(base).final_estimate_trials == 4
+    assert hc2.HC2Params.from_spec({**base, "hc2_final_estimate_trials": 0}).final_estimate_trials == 0
+    with pytest.raises(ValueError):
+        hc2.HC2Params.from_spec({**base, "hc2_final_estimate_trials": -1})
+
+
+def test_default_still_holds_the_reserve_while_planning(run_dir):
+    run_dir.update_budget(max_metric_calls=1000)
+    ev = _capped_fake(run_dir)
+    _loop(run_dir, ev, _optimizer([]))
+    assert ev.remaining_at_plan[0] == 1000 - hc2.final_estimate_cost(ev)
+
+
+def test_zero_trials_reserves_nothing_and_skips_the_estimate(run_dir):
+    run_dir.update_budget(max_metric_calls=1000)
+    ev = _capped_fake(run_dir)
+    ev.final_estimate = lambda *a, **k: pytest.fail("final_estimate must not be called")
+    out = _loop(run_dir, ev, _optimizer([]), hc2.HC2Params(k=3, per_cluster=2, final_estimate_trials=0))
+    assert ev.remaining_at_plan[0] == 1000                       # plan_round sees the full budget
+    assert out["internal_estimate"] == {"skipped": "disabled"}
+    assert not (run_dir.root / "internal_estimate.json").exists()
+    events = [json.loads(l) for l in run_dir.events_path.read_text().splitlines()]
+    assert any(e["kind"] == "p2_final_estimate" and e.get("skipped") == "disabled" for e in events)
+
+
+def test_non_default_trials_are_passed_through(run_dir):
+    seen = []
+    ev = FakeEvaluator()
+    ev.final_estimate = lambda c, s, *, n_trials=4: seen.append(n_trials) or {"mean": 0.1, "se": 0.0, "n": 1}
+    _loop(run_dir, ev, _optimizer([]), hc2.HC2Params(k=2, final_estimate_trials=2))
+    assert seen == [2]
+
+
+def test_cli_forwards_the_key_in_the_hc2_json():
+    src = (REPO / "core/cap_evolve/cli.py").read_text()
+    assert 'k.startswith(("hc2_", "p2_"))' in src             # every hc2_* key travels in --hc2
