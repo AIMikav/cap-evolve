@@ -66,6 +66,26 @@ _STOP_LEAK_RE = re.compile(
 )
 
 
+#: Markers that tie an error to something the CANDIDATE owns (its edited ``tools.py`` / tool schema /
+#: ``policy.md`` template), as opposed to the serving path. Matched against the error text tau2 records.
+_CANDIDATE_FAULT_RE = re.compile(
+    r"tools\.py|tool[_ ]definition|tool[_ ]schema|invalid\s+tool|unknown\s+tool|"
+    r"ValidationError|policy\.md|failed to render|template", re.IGNORECASE)
+
+
+def classify_error_kind(termination: str, evidence: str = "") -> str:
+    """``"candidate"`` | ``"infra"`` for an errored tau2 simulation (the ``error_kind`` hook).
+
+    The harness scores a ``candidate`` error as a measured failure (0.0) under ``errored_trial_policy:
+    fail`` and keeps ``infra`` errors as missing data, so an edit that breaks its own tools cannot hide
+    behind dropped trials. Only ``UNEXPECTED_ERROR`` whose recorded text points at candidate-owned
+    files is attributed to the candidate; timeouts, ``INFRASTRUCTURE_ERROR`` and the user-simulator
+    leak stay infra."""
+    if "UNEXPECTED_ERROR" in str(termination) and _CANDIDATE_FAULT_RE.search(evidence or ""):
+        return "candidate"
+    return "infra"
+
+
 def _leaked_stop_continuation(messages) -> bool:
     """True iff a USER-simulator turn emits ``###STOP###`` next to leaked reasoning that
     plans to continue. Only ``user`` turns are inspected — the simulator's own voice."""
@@ -146,6 +166,9 @@ def _build_candidate_tools(candidate_dir: Path):
 
 
 class Adapter(CapabilityAdapter):
+    #: Tags errored rollouts with metadata["error_kind"] ("candidate" | "infra").
+    supports_error_kind = True
+
 
     # Snapshot of tau2's pristine airline env constructor (process-global, set on 1st apply).
     _original_env_ctor = None
@@ -395,6 +418,13 @@ class Adapter(CapabilityAdapter):
                      "explicitly planned to continue the conversation (documented artifact, "
                      "docs/TAU2_SUMMARY.md row 7) — uncontrollable noise, not a tool failure.")
 
+        kind_meta: dict = {}
+        if error is not None:
+            evidence = " ".join(str(x) for x in (
+                getattr(sim, "error", None), getattr(sim, "termination_error", None),
+                getattr(reward_info, "info", None) if reward_info is not None else None) if x)
+            kind_meta["error_kind"] = classify_error_kind(str(term), evidence)
+
         return Rollout(
             task_id=str(sim.task_id),
             output=messages,
@@ -408,6 +438,7 @@ class Adapter(CapabilityAdapter):
                 "tau2_reward_info": (reward_info.model_dump(mode="json")
                                      if reward_info is not None else None),
                 "termination_reason": str(term),
+                **kind_meta,
             },
         )
 
