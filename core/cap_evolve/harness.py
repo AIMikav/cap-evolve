@@ -246,6 +246,7 @@ def ensure_pooled(run_dir: RunDir, *, confirm_fraction: float | None = None,
     splits = run_dir.read_splits()
     if splits.pooled:
         return splits
+    run_dir.seal()          # C ids, C rollouts, C ledger rows and the round state go outside the run tree
     cfg = gatecfg.GateConfig.for_run(run_dir)
     frac = cfg.confirm_fraction if confirm_fraction is None else float(confirm_fraction)
     pool = list(dict.fromkeys([*splits.train, *splits.val]))
@@ -539,7 +540,7 @@ def _evaluate_candidate(
     # existing tag at offset 0 still replaces t0.. with the same seeds, as before.
     seed_off = trial_offset
     if split != "test" and not fixed_seeds and eval_index.enabled() and (
-            trial_offset or not list((run_dir.rollouts / split).glob(f"*__{tag}__t*.json"))):
+            trial_offset or not list((run_dir.rollout_dir(split)).glob(f"*__{tag}__t*.json"))):
         seed_off = max(trial_offset, eval_index.next_trial_idx(
             run_dir, eval_index.cap_hash(candidate_dir), split=split))
 
@@ -547,7 +548,7 @@ def _evaluate_candidate(
     if ids is not None:
         want = {str(i) for i in ids}
         tasks = [t for t in tasks if t.id in want]
-    out_dir = run_dir.rollouts / split
+    out_dir = run_dir.rollout_dir(split)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Trials are written as ``<task>__<tag>__t{k}.json`` for ``k in range(n_trials)``, so
@@ -871,7 +872,7 @@ def split_result_from_rollouts(run_dir: RunDir, tag, split: str = "val", ks=(1, 
     from .stats import mean, stderr
     errored_policy = resolve_errored_policy(errored_policy, run_dir)
     tags = [tag] if isinstance(tag, str) else [str(t) for t in tag]
-    vdir = run_dir.rollouts / split
+    vdir = run_dir.rollout_dir(split)
     by_task: dict[str, list[float]] = {}
     feedback: dict[str, str] = {}
     raw: dict[str, dict] = {}
@@ -1131,7 +1132,7 @@ def reuse_baseline(prior_run_dir: Path, *, run_dir: RunDir) -> SplitResult:
         src = prior / "rollouts" / split
         if not src.is_dir():
             continue
-        dst = run_dir.rollouts / split
+        dst = run_dir.rollout_dir(split)
         if dst.exists():
             shutil.rmtree(dst)
         dst.mkdir(parents=True)
@@ -1919,7 +1920,7 @@ def _evaluator_tags(run_dir: RunDir, tag, split: str):
     (``r000__<cid>__rung1_0`` ...), so per-task views of a pooled run are not empty."""
     if split != "feedback" or not isinstance(tag, str):
         return tag
-    d = run_dir.rollouts / split
+    d = run_dir.rollout_dir(split)
     pat = re.compile(r"^r\d{3}__" + re.escape(tag) + r"__")
     tags = {tag}
     for f in d.glob("*.json") if d.is_dir() else []:
@@ -3003,7 +3004,7 @@ def _copy_step_trajectories(adapter, run_dir: RunDir, workdir: Path, split: str,
     dst = workdir / "trajectories"
 
     def _copy_tag(tag: str) -> bool:
-        vdir = run_dir.rollouts / split
+        vdir = run_dir.rollout_dir(split)
         if not vdir.is_dir():
             return False
         files = sorted(vdir.glob(f"*__{tag}__t*.json"))
@@ -3044,7 +3045,7 @@ def _copy_step_trajectories(adapter, run_dir: RunDir, workdir: Path, split: str,
     except Exception:  # noqa: BLE001 — never let optional context break a step
         traj_src = None
     if not traj_src:
-        traj_src = run_dir.rollouts / split
+        traj_src = run_dir.rollout_dir(split)
     try:
         traj_src = Path(traj_src)
         if traj_src.is_dir() and any(traj_src.iterdir()):
