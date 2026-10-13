@@ -51,6 +51,8 @@ class HC2Params:
     retries: int = 1                 # re-proposals for a near-duplicate before it is dropped
     consolidate: bool = False        # cross-trace consolidation mode
     max_rounds: int = 0              # 0 = the run's max_iterations
+    final_estimate_trials: int = 4   # trials per arm of the closing champion-vs-seed estimate on C;
+                                     # 0 = no reservation and no estimate (for budgets that cannot afford it)
 
     @classmethod
     def from_spec(cls, spec: dict | None):
@@ -72,10 +74,12 @@ class HC2Params:
             diversity_window=int(spec.get("hc2_diversity_window", d.diversity_window)),
             retries=int(spec.get("hc2_retries", d.retries)),
             consolidate=bool(spec.get("hc2_consolidate", d.consolidate)),
-            max_rounds=int(spec.get("hc2_max_rounds", d.max_rounds)))
-        if min(out.k, out.minibatch, out.per_cluster) < 1 or out.pairs < 0 or out.retries < 0:
+            max_rounds=int(spec.get("hc2_max_rounds", d.max_rounds)),
+            final_estimate_trials=int(spec.get("hc2_final_estimate_trials", d.final_estimate_trials)))
+        if min(out.k, out.minibatch, out.per_cluster) < 1 or out.pairs < 0 or out.retries < 0 \
+            or out.final_estimate_trials < 0:
             raise ValueError("hc2_k, hc2_minibatch and hc2_per_cluster must be >= 1; "
-                             "hc2_pairs and hc2_retries >= 0")
+                             "hc2_pairs, hc2_retries and hc2_final_estimate_trials >= 0")
         if not 0.0 < out.diversity_threshold <= 1.0:
             raise ValueError("hc2_diversity_threshold must be in (0, 1]")
         return out
@@ -486,9 +490,10 @@ def hc2_loop(adapter, *, run_dir, optimizer, evaluator, params: HC2Params, ctx, 
         # The final estimate is paid for up front, so a budget-bound search cannot spend it: hold
         # its cost while planning, release it before the estimate itself reserves.
         hold = None
-        if _internal_estimate_pending(run_dir):
+        if params.final_estimate_trials > 0 and _internal_estimate_pending(run_dir):
             try:
-                hold = run_dir.reserve_metric_calls(final_estimate_cost(evaluator), label="hc2_final_estimate")
+                hold = run_dir.reserve_metric_calls(
+                    final_estimate_cost(evaluator, params.final_estimate_trials), label="hc2_final_estimate")
             except Exception:  # noqa: BLE001 - cannot be held: the estimate will be skipped and recorded
                 hold = None
         try:
@@ -504,7 +509,7 @@ def hc2_loop(adapter, *, run_dir, optimizer, evaluator, params: HC2Params, ctx, 
             break
         steps += _finish_round(pend, **env)
     _, why = run_dir.budget_exhausted()
-    internal = final_estimate(evaluator, run_dir)
+    internal = final_estimate(evaluator, run_dir, params.final_estimate_trials)
     result = {"algorithm": algorithm, "best_id": run_dir.best_id, "iterations": len(steps),
               "accepts": sum(1 for s in steps if s["accepted"]),
               **({"internal_estimate": internal} if internal is not None else {}),
@@ -744,14 +749,18 @@ def _record(run_dir, harness, cid, parent_id, workdir, status, reason, *, indeci
             "workdir": str(workdir)}
 
 
-def final_estimate(evaluator, run_dir):
+def final_estimate(evaluator, run_dir, n_trials: int = FINAL_TRIALS):
     """Champion vs seed on C with fresh trials, once, as a FINAL phase after the search.
 
     Same file and schema as ``harness._internal_estimate`` (which ``hill_climb_loop`` uses), so whichever
     runs first wins and the estimate is never paid for twice. It is charged against ``max_metric_calls``
     through the evaluator's reservation (``budget_reserve``); when the remaining budget cannot fund it the
-    estimate is skipped and recorded, never run over budget. ``None`` when the champion is the seed."""
+    estimate is skipped and recorded, never run over budget. ``None`` when the champion is the seed.
+    ``n_trials == 0`` disables it: nothing is reserved or run, and ``skipped="disabled"`` is logged."""
     from .rundir import BudgetExhausted
+    if n_trials <= 0:
+        run_dir.log_event("p2_final_estimate", skipped="disabled")
+        return {"skipped": "disabled"}
     best = run_dir.best_id
     path = Path(run_dir.root) / "internal_estimate.json"
     if path.exists():
@@ -759,12 +768,13 @@ def final_estimate(evaluator, run_dir):
     if not best or best == "seed":
         return None
     left = run_dir.remaining_metric_calls()
-    need = final_estimate_cost(evaluator)
+    need = final_estimate_cost(evaluator, n_trials)
     try:
         if left is not None and need > left:
             # Both arms or neither: running the champion arm alone would spend and then fail.
             raise BudgetExhausted(f"the final estimate needs {need} rollouts, {left} remain")
-        out = evaluator.final_estimate(run_dir.candidate_dir(best), run_dir.candidate_dir("seed"))
+        out = evaluator.final_estimate(run_dir.candidate_dir(best), run_dir.candidate_dir("seed"),
+                                       n_trials=n_trials)
     except BudgetExhausted as e:
         out = {"skipped": "budget", "reason": str(e)[:200]}
         run_dir.log_event("p2_final_estimate", skipped="budget")
