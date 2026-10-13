@@ -625,7 +625,7 @@ def _open_or_resume(evaluator, run_dir, pend, live, incumbent):
     """The round of this pending set: the one already on disk if there is one, else a new one."""
     if pend.get("round_id"):
         return evaluator.resume_round(pend["round_id"])
-    pdir = Path(run_dir.root) / "p2"
+    pdir = evaluator._round_dir()   # moved under private/ by the gate; ask it, do not hard-code
     for f in sorted(pdir.glob("r*.json"), reverse=True) if pdir.is_dir() else []:
         try:
             st = json.loads(f.read_text(encoding="utf-8"))

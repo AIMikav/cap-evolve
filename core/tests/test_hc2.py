@@ -97,9 +97,13 @@ class FakeEvaluator:
     def plan_round(self, k_wanted, incumbent_dir=None):
         return RoundPlan(min(k_wanted, self.k), 100, True)
 
+    def _round_dir(self):
+        d = self.run_dir.root / "private" / "p2"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def open_round(self, candidates, incumbent):
-        d = self.run_dir.root / "p2"
-        d.mkdir(exist_ok=True)
+        d = self._round_dir()
         rid = f"r{len(list(d.glob('r*.json'))):03d}"
         (d / f"{rid}.json").write_text(json.dumps({"round_id": rid, "candidates": {c: str(p) for c, p in candidates.items()}}))
         return FakeRound(self, candidates, rid)
@@ -508,7 +512,7 @@ def test_hc2_resumes_an_interrupted_round_without_reproposing(tmp_path, monkeypa
     state["crash"] = False
     out = hc2.hc2_loop(adapter, run_dir=rd, evaluator=evaluator.P2Evaluator(adapter, rd, params), **kw)
     assert len(calls) == n_proposed                                   # nothing re-proposed
-    assert len(list((rd.root / "p2").glob("r*.json"))) == 1           # the same round was resumed
+    assert len(list(evaluator.P2Evaluator(adapter, rd, params)._round_dir().glob("r*.json"))) == 1   # same round
     assert not (rd.root / "hc2_pending.json").exists()
     assert out["accepts"] == 1 and rd.best_id != "seed"
     assert rd.spent.iterations == 1
