@@ -39,8 +39,23 @@ def env_fp() -> str:
     return os.environ.get("CAPEVOLVE_ENV_FP", "")
 
 
-def rows(run_dir) -> list[dict]:
-    path = Path(run_dir.root) / LEDGER
+def _ledger_paths(run_dir) -> list:
+    """The run's ledger, plus the sealed one (rows of the hidden confirm stratum) when pooled."""
+    paths = [Path(run_dir.root) / LEDGER]
+    sealed = getattr(run_dir, "sealed_dir", None)
+    if sealed is not None:
+        paths.append(Path(sealed) / LEDGER)
+    return paths
+
+
+def _path_for(run_dir, split: str) -> Path:
+    sealed = getattr(run_dir, "sealed_dir", None)
+    if split == "confirm" and sealed is not None:
+        return Path(sealed) / LEDGER
+    return Path(run_dir.root) / LEDGER
+
+
+def _rows_of(path: Path) -> list[dict]:
     if not path.exists():
         return []
     out = []
@@ -50,6 +65,10 @@ def rows(run_dir) -> list[dict]:
         except ValueError:
             continue  # a torn trailing line must not poison the ledger
     return out
+
+
+def rows(run_dir) -> list[dict]:
+    return [r for p in _ledger_paths(run_dir) for r in _rows_of(p)]
 
 
 def counts(run_dir, hash_: str, split: str = "val", fp: str | None = None) -> dict[str, tuple[float, int]]:
@@ -95,14 +114,14 @@ def record(run_dir, candidate_dir, split: str, tag: str, task_ids, ks, *, seed_b
     if not enabled() or split == "test":
         return 0
     h, fp = cap_hash(candidate_dir), env_fp()
-    path = Path(run_dir.root) / LEDGER
+    path = _path_for(run_dir, split)
     with _file_lock(path.with_suffix(".lock")):
-        have = rows(run_dir)
+        have = _rows_of(path)
         old = {(r["tag"], r["split"], r["task"], r["k"]): r for r in have}
         new = []
         for tid in task_ids:
             for j, k in enumerate(ks):
-                f = Path(run_dir.rollouts) / split / f"{tid}__{tag}__t{k}.json"
+                f = run_dir.rollout_dir(split) / f"{tid}__{tag}__t{k}.json"
                 try:
                     d = json.loads(f.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
@@ -129,16 +148,18 @@ def record(run_dir, candidate_dir, split: str, tag: str, task_ids, ks, *, seed_b
 
 def forget_tags(run_dir, tags) -> int:
     """Drop the ledger rows of scratch ``tags`` (e.g. delta-debugging probes that are not candidates)."""
-    path = Path(run_dir.root) / LEDGER
     gone = set(tags)
-    with _file_lock(path.with_suffix(".lock")):
-        have = rows(run_dir)
-        keep = [r for r in have if r["tag"] not in gone]
-        if len(keep) != len(have):
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text("".join(json.dumps(r) + "\n" for r in keep), encoding="utf-8")
-            os.replace(tmp, path)
-        return len(have) - len(keep)
+    dropped = 0
+    for path in _ledger_paths(run_dir):
+        with _file_lock(path.with_suffix(".lock")):
+            have = _rows_of(path)
+            keep = [r for r in have if r["tag"] not in gone]
+            if len(keep) != len(have):
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text("".join(json.dumps(r) + "\n" for r in keep), encoding="utf-8")
+                os.replace(tmp, path)
+            dropped += len(have) - len(keep)
+    return dropped
 
 
 def backfill(run_dir) -> int:

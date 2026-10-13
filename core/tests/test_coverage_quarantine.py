@@ -198,7 +198,7 @@ def test_pooled_plus_tipping_never_touches_the_confirm_stratum(tmp_path, monkeyp
     assert harness.planned_val_ids(run_dir) and set(harness.planned_val_ids(run_dir)) <= set(sp.feedback)
     assert not {t for t, _ in adapter.calls} & set(sp.confirm)
     assert {pt["task_id"] for pt in healed.per_task} <= set(sp.feedback)
-    assert not (run_dir.rollouts / "confirm").exists() or not list((run_dir.rollouts / "confirm").glob("*"))
+    assert not list(run_dir.rollout_dir("confirm").glob("*")) if run_dir.rollout_dir("confirm").exists() else True
     assert not (run_dir.rollouts / "val").exists() or not list((run_dir.rollouts / "val").glob("*"))
 
 
