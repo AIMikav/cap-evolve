@@ -95,6 +95,20 @@ python "$A/act.py" merge cand_1 cand_2 --run-dir "$R" --project "$P" --tag cand_
    then probe and promote `cand_m` like any node. [`references/merge.md`](references/merge.md).
 7. **Repeat** from the digest until it says stop (budget, goal met, or `stop_condition`). Then finalize.
 
+## Conductor engine (opt-in: `ao_engine: conductor`)
+
+With `ao_engine: conductor` in `orchestration_mode: agent`, `cap-evolve run` starts
+`scripts/conductor.py supervise` instead of handing the loop to a conversational agent. Code runs a tick
+loop (reap, promote, merge or rebase, rungs, propose, stop); the LLM only runs bounded one-shot jobs
+(propose, merge-resolve) with a per-job token cap, and never polls or waits. Evaluations are chunked
+(`ao_chunk`, default 20 rollouts) in a shared slot pool, with `promotion_rule: P2` going through the shared
+P2 evaluator. State is `graph.jsonl` plus `conductor.json`; a killed run resumes and `finalize` is
+idempotent. Stopping is structured only (rollouts, tokens, wall `deadline_utc`, `stop_at_reward`, plateau
+with a floor); prose in `stop_condition` is never parsed into a cap. Multi-objective specs are refused
+(exit 2). With K=1, rungs off and merge off it makes the same decisions as hill-climb. When PR-3 helper
+checks are importable and `helpers.enabled`, each proposal gets `lint_candidate` and `run_smoke` before any
+rollout. Without the flag, nothing here runs and the loop below is unchanged.
+
 ## If the digest says X, do Y
 
 | digest says | do |

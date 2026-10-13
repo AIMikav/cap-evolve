@@ -29,6 +29,13 @@ class Splits:
     test: list = field(default_factory=list)
     seed: int = 0
     test_used: bool = False
+    # ``split_mode: pooled`` (see ``make_pooled_partition``): pool = train + val, partitioned ONCE into
+    # a feedback stratum F (proposer and rungs) and a hidden confirm stratum C (confirmation only).
+    # Persisted with the splits and never re-drawn. ``pooled`` False = the legacy three-way split.
+    pooled: bool = False
+    feedback: list = field(default_factory=list)
+    confirm: list = field(default_factory=list)
+    pool_seed: int = 0
 
     def ids(self, split: str) -> list:
         split = split.lower()
@@ -38,7 +45,15 @@ class Splits:
             return list(self.val)
         if split == "test":
             return list(self.test)
-        raise ValueError(f"unknown split: {split!r} (use train|val|test)")
+        if split in ("feedback", "confirm", "pool"):
+            if not self.pooled:
+                raise ValueError(f"split {split!r} needs split_mode: pooled (this run has the legacy split)")
+            if split == "feedback":
+                return list(self.feedback)
+            if split == "confirm":
+                return list(self.confirm)
+            return list(self.train) + list(self.val)
+        raise ValueError(f"unknown split: {split!r} (use train|val|test|feedback|confirm|pool)")
 
     def mark_test_used(self) -> None:
         if self.test_used:
@@ -65,13 +80,17 @@ class Splits:
             )
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "train": list(self.train),
             "val": list(self.val),
             "test": list(self.test),
             "seed": self.seed,
             "test_used": self.test_used,
         }
+        if self.pooled:         # legacy files stay byte-identical
+            d.update(pooled=True, feedback=list(self.feedback), confirm=list(self.confirm),
+                     pool_seed=self.pool_seed)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Splits":
@@ -81,6 +100,10 @@ class Splits:
             test=list(d.get("test") or []),
             seed=int(d.get("seed") or 0),
             test_used=bool(d.get("test_used") or False),
+            pooled=bool(d.get("pooled") or False),
+            feedback=list(d.get("feedback") or []),
+            confirm=list(d.get("confirm") or []),
+            pool_seed=int(d.get("pool_seed") or 0),
         )
 
 
@@ -118,3 +141,44 @@ def make_splits(
     val = ids[n_tr:n_tr + n_va]
     test = ids[n_tr + n_va:n_tr + n_va + n_te]
     return Splits(train=train, val=val, test=test, seed=seed)
+
+
+def make_pooled_partition(pool_ids: Sequence[str], seed: int = 0, confirm_fraction: float = 0.48,
+                          pass_rates: dict | None = None, n_strata: int = 3) -> tuple[list, list]:
+    """Partition the pool into ``(feedback, confirm)``: seeded, deterministic, stratified.
+
+    Stratified by the seed's pass rate (tertiles of ``pass_rates[task]``; tasks without a rate form
+    their own stratum) so F and C see the same difficulty mix, then C takes ``confirm_fraction`` of
+    each stratum (largest-remainder rounding so |C| = round(fraction * |pool|)). Without
+    ``pass_rates`` the draw is a plain seeded split. The two parts are disjoint and cover the pool.
+    """
+    ids = list(dict.fromkeys(str(t) for t in pool_ids))
+    if not ids:
+        return [], []
+    rng = random.Random(f"pool:{seed}")
+    rates = {str(k): float(v) for k, v in (pass_rates or {}).items()}
+    known = sorted((t for t in ids if t in rates), key=lambda t: (rates[t], t))
+    strata: list[list] = []
+    if known:
+        n_strata = max(1, min(int(n_strata), len(known)))
+        for i in range(n_strata):
+            strata.append(known[i * len(known) // n_strata:(i + 1) * len(known) // n_strata])
+    rest = [t for t in ids if t not in rates]
+    if rest:
+        strata.append(rest)
+    target = int(round(confirm_fraction * len(ids)))
+    quotas, rems = [], []
+    for st in strata:
+        q = confirm_fraction * len(st)
+        quotas.append(int(q))
+        rems.append(q - int(q))
+    short = max(0, min(target, len(ids)) - sum(quotas))
+    for i in sorted(range(len(strata)), key=lambda i: (-rems[i], i))[:short]:
+        quotas[i] += 1
+    confirm: set = set()
+    for st, q in zip(strata, quotas):
+        st = sorted(st)
+        rng.shuffle(st)
+        confirm.update(st[:q])
+    feedback = [t for t in ids if t not in confirm]
+    return feedback, [t for t in ids if t in confirm]
