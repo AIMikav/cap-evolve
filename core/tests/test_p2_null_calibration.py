@@ -88,7 +88,7 @@ def fwer(zc, n_rounds=3000, seed=5, **kw):
     return sum(one_round(rng, [0.0] * 8, zc=zc, **kw) is not None for _ in range(n_rounds)) / n_rounds
 
 
-@pytest.mark.parametrize("het", [0.0, 0.1, 0.2])
+@pytest.mark.parametrize("het", [0.0, 0.1, 0.2, 0.3])
 def test_round_fwer_at_the_shipped_threshold_is_at_most_010_even_with_heterogeneous_effects(het):
     """Null on average, but each candidate helps some tasks and hurts others (per-task SD ``het``).
     A model-based SE that ignores this spread gave 0.113 at SD 0.1 and 0.163 at SD 0.2."""
@@ -157,3 +157,22 @@ def test_pooled_se_matches_monte_carlo_within_5_percent():
         sd = math.sqrt(sum((x - mu) ** 2 for x in sims) / (len(sims) - 1))
         v = sum(x * (1 - x) for x in p) / n_tasks
         assert racing.pooled_se(n, counts, v, m) == pytest.approx(sd, rel=0.06)
+
+
+@pytest.mark.parametrize("het", [0.0, 0.1, 0.2, 0.3])
+def test_worst_case_two_survivors_sharing_one_control_stay_under_010(het):
+    """Every round sends 2 null survivors to confirmation, both compared with the SAME control draw."""
+    rng = random.Random(21)
+    hits, n = 0, 3000
+    for _ in range(n):
+        ctrl_p = list(C)
+        ctrl = {str(t): [bern(rng, ctrl_p[t]) for _ in range(P.ctrl_m)] for t in range(len(C))}
+        for _j in range(2):
+            q = [min(1.0, max(0.0, x + rng.gauss(0, het))) for x in C]
+            cand = {}
+            for t in racing.draw_order(list(range(len(C))), P.conf_n, rng.random()):
+                cand.setdefault(str(t), []).append(bern(rng, q[int(t)]))
+            if racing.confirm_with_control(cand, ctrl, z_conf=P.z_conf, dmin=P.dmin, n_planned=len(C))["pass"]:
+                hits += 1
+                break
+    assert hits / n <= 0.10, hits / n

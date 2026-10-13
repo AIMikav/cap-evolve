@@ -108,7 +108,7 @@ gate_k_se: 1.0
 # promotion_rule: P2            # rule P2 (SH-C): K-candidate rounds, kill-only rungs on the feedback stratum F, one fresh
 #                               #   confirmation on the hidden stratum C against a concurrently re-measured incumbent.
 #                               #   Needs split_mode: pooled. Keys: p2_k (8), p2_rung_sizes ([12, 36]), p2_conf_n (147),
-#                               #   p2_ctrl_m (4), p2_z_conf (1.6), p2_dmin (0.02), p2_max_survivors (2), p2_chunk (20)
+#                               #   p2_ctrl_m (4), p2_z_conf (1.7), p2_dmin (0.02), p2_max_survivors (2), p2_chunk (20)
 # ao_engine: conductor          # agent-optimize (orchestration_mode: agent): a code-driven conductor runs the loop; the LLM only does bounded
 #                               #   one-shot jobs (propose, merge-resolve). Single objective only (multi-objective specs are refused).
 #                               #   Keys: ao_slots, ao_k_prop (parallel proposers), ao_chunk (20), ao_rungs, ao_merge, ao_job_token_cap,

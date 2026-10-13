@@ -180,3 +180,38 @@ def test_a_project_root_or_adapter_dir_is_never_attributed(tmp_path):
         exc = e
     with trials.candidate_scope(d):
         assert trials.raised_in_candidate_code(exc) is False
+
+
+def _raise_in_candidate(tmp_path, body_lines):
+    d = tmp_path / "cx"
+    d.mkdir(exist_ok=True)
+    (d / "m.py").write_text("\n".join(["import socket"] + body_lines + [""]))
+    spec = importlib.util.spec_from_file_location("mmx", d / "m.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    try:
+        mod.f()
+    except Exception as e:      # noqa: BLE001
+        return d, e
+
+
+@pytest.mark.parametrize("name,body", [
+    ("connection", ["def f():", "    raise ConnectionError('proxy reset')"]),
+    ("timeout", ["def f():", "    raise TimeoutError('read')"]),
+    ("socket_timeout", ["def f():", "    raise socket.timeout('timed out')"]),
+    ("oserror", ["def f():", "    raise OSError('Network is unreachable')"]),
+    ("http_503", ["class HTTPError(Exception):", "    status_code = 503",
+                  "def f():", "    raise HTTPError('503 Service Unavailable')"]),
+    ("wrapped", ["def f():", "    try:", "        raise ConnectionError('reset')",
+                 "    except ConnectionError as e:", "        raise RuntimeError('tool failed') from e"]),
+])
+def test_infrastructure_errors_are_never_blamed_on_the_candidate(tmp_path, name, body):
+    d, exc = _raise_in_candidate(tmp_path, body)
+    with trials.candidate_scope(d):
+        assert trials.raised_in_candidate_code(exc) is False, name
+
+
+def test_a_plain_candidate_bug_is_still_attributed(tmp_path):
+    d, exc = _raise_in_candidate(tmp_path, ["def f():", "    return {}['missing']"])
+    with trials.candidate_scope(d):
+        assert trials.raised_in_candidate_code(exc) is True
