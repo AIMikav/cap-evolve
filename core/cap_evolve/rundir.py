@@ -584,11 +584,11 @@ class RunDir:
             return have
         env = os.environ.get("CAPEVOLVE_SEALED_DIR")
         if path:
-            target = Path(path)
+            target = Path(path).resolve()
         elif env:
-            target = Path(env) / self.root.name
+            target = Path(env).resolve() / self.root.name
         else:
-            proj = self.root.parent.parent
+            proj = self.root.resolve().parent.parent       # absolute: a relative run root has no usable parents
             target = proj.with_name(proj.name + ".sealed") / self.root.name
         target.mkdir(parents=True, exist_ok=True)
         with _file_lock(self._state_lock):
