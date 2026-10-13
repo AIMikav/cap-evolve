@@ -42,6 +42,7 @@ def test_second_propose_call_keeps_the_first_calls_parent(tmp_path, capsys, monk
     rd, _, _, _ = _run(tmp_path)
     monkeypatch.setenv("CAPEVOLVE_FAILURE_CLUSTERING", "0")
     _act(monkeypatch, capsys, ["propose", "cand_p", "--parent", "cur", *_args(rd)])
+    (rd.root / "work" / "cand_p" / "edit.txt").write_text("an edit")   # identical bytes are refused (#811)
     sh = Sh(**{"pregate.py": (0, json.dumps({"ok": True, "checks": [], "warnings": []}), "")})
     rc, out = _act(monkeypatch, capsys, ["propose", "cand_p", *_args(rd)], sh)   # no --parent
     assert rc == 0 and out["result"]["parent"] == "cur"

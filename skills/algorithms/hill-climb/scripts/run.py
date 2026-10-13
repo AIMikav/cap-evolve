@@ -75,6 +75,10 @@ def main(argv=None) -> int:
                    help="comma-separated globs sealing the eval surface (scorer/gold/tasks/"
                         "tests). 'default' expands to the built-in set. Empty = off. A "
                         "candidate that edits one is INDECISIVE, not scored 0.0.")
+    p.add_argument("--hc2", default=None,
+                   help="OPT-IN HC-2 (cap_evolve.hc2): JSON of the spec keys hc2, hc2_*, p2_*, "
+                        "promotion_rule, split_mode. K parallel proposals per round on the shared "
+                        "P2 evaluator. Unset = the v1 loop, unchanged.")
     p.add_argument("--convergence", action="store_true",
                    help="graded plateau signal (warn -> paradigm shift -> stop) injected "
                         "into the optimizer prompt; off by default")
@@ -124,6 +128,25 @@ def main(argv=None) -> int:
         except json.JSONDecodeError as exc:
             print(json.dumps({"error": f"--objectives is not valid JSON: {exc}"}))
             return 2
+
+    if args.hc2:
+        from cap_evolve import hc2, promotion
+        hc2_spec = json.loads(args.hc2)
+        try:
+            hc2_params = hc2.HC2Params.from_spec(hc2_spec)
+            p2 = promotion.P2Params.from_spec(hc2_spec)
+        except ValueError as exc:
+            print(json.dumps({"error": f"--hc2: {exc}"}))
+            return 2
+        from cap_evolve.evaluator import P2Evaluator
+        evaluator = P2Evaluator(adapter, run_dir, p2, workers=harness.DEFAULT_WORKERS,
+                                errored_policy=gate_kwargs.get("errored_trial_policy"))
+        result = hc2.hc2_loop(adapter, run_dir=run_dir, optimizer=optimizer, evaluator=evaluator,
+                              params=hc2_params, ctx=ctx, max_iterations=args.max_iterations,
+                              store=store, workers=harness.DEFAULT_WORKERS)
+        run_dir.close_observers()
+        print(json.dumps(result, indent=2))
+        return 0
 
     result = harness.hill_climb_loop(
         adapter, run_dir=run_dir, optimizer=optimizer, current_val=current_val,
