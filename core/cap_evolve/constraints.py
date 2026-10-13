@@ -70,6 +70,21 @@ def _f(num: str) -> float:
     return float(str(num).replace(",", ""))
 
 
+#: A sentence that DEFINES a unit ("one full-val evaluation is 40 rollouts", "a screen costs 12 rollouts") states
+#: what something costs, not how much to spend. Read as a ceiling it silently capped a 600-rollout run at 40.
+_DEFINES = re.compile(
+    r"\b(?:evaluations?|evals?|full[\s-]*val\w*|screens?|probes?|rungs?|chunks?|rollouts?|trials?|"
+    r"confirmations?|one|each|a|an)\b[^.;\n]*\b(?:is|are|=|costs?|takes?|means|equals?|has|consists? of)\s*"
+    r"(?:about|around|roughly|approximately|up to|~)?\s*$"
+    r"|\breserv\w*\b[^.;\n]*$")        # "reserve 120 rollouts for the final confirmation" is a hold-back, not a cap
+
+
+def _definitional(t: str, start: int) -> bool:
+    """True when the number at ``start`` completes a definitional clause (same sentence, before it)."""
+    sentence = re.split(r"[.;\n]", t[:start])[-1]
+    return bool(_DEFINES.search(sentence))
+
+
 def _add(preds: list, kind: str, target: float, op: str, span: str) -> None:
     preds.append({"kind": kind, "op": op, "target": float(target), "source": span.strip()})
 
@@ -184,11 +199,15 @@ def parse_constraints(text: str | None) -> dict:
 
     # --- counters -----------------------------------------------------------
     for m in re.finditer(_NUM + r"\s*(?:iterations?|iters?|rounds?)\b", t):
+        if _definitional(t, m.start()):
+            continue
         _add(preds, "max_iterations", float(m.group(1)), "<=", m.group(0))
     for m in re.finditer(_NUM + r"\s*(?:consecutive\s*)?(?:rejects?|rejections?|stall(?:s|ed)?|"
                          r"no-?improvements?)(?:\s*in\s*a\s*row)?\b", t):
         _add(preds, "max_stall", float(m.group(1)), "<=", m.group(0))
     for m in re.finditer(_NUM + r"\s*(?:rollouts?|metric\s*calls?|evals?|evaluations?)\b", t):
+        if _definitional(t, m.start()):
+            continue
         _add(preds, "max_metric_calls", float(m.group(1)), "<=", m.group(0))
 
     # --- protected tasks ----------------------------------------------------

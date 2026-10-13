@@ -170,7 +170,14 @@ def main(argv=None) -> int:
             for k, v in json.loads(Path(args.ceiling_file).read_text(encoding="utf-8")).items()
         }
 
-    parsed = parse_constraints(str(spec.get("stop_condition") or ""))
+    if str(spec.get("ao_engine") or "") == "conductor":
+        # AO-2: caps come ONLY from structured numeric keys (max_metric_calls, max_optimizer_tokens,
+        # deadline_utc, stop_at_reward, max_candidates). A prose stop_condition is informational: it
+        # is never parsed into a ceiling, so "after 10 candidates" or "an evaluation is 40 rollouts" cannot stop the run.
+        text = str(spec.get("stop_condition") or "")
+        parsed = {"text": text, "predicates": [], "ambiguous": [], "unenforceable": [text] if text.strip() else []}
+    else:
+        parsed = parse_constraints(str(spec.get("stop_condition") or ""))
     checked = check_constraints(
         parsed,
         best_val=(best.reward if best else None),

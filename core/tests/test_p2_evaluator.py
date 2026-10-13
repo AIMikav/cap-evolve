@@ -222,3 +222,15 @@ def test_final_estimate_compares_champion_and_seed_on_C(tmp_path):
     res = ev.final_estimate(cands["c0"], run_dir.candidate_dir("seed"))
     assert 0.2 < res["mean"] < 0.6 and res["n"] == len(ev.confirm_ids()) and set(res) >= {"mean", "se", "z", "n"}
     assert all(t in set(ev.confirm_ids()) for t, _ in adapter.calls)
+
+
+def test_job_creation_is_idempotent_so_a_resumed_caller_gets_the_same_jobs(tmp_path):
+    adapter, run_dir, ev, cands = _world(tmp_path, [0.3, 0.0], max_metric_calls=4000)
+    rnd = ev.open_round(cands, ("seed", run_dir.candidate_dir("seed")))
+    first = {"inc": rnd.incumbent_jobs(), "r1": rnd.rung_jobs(1)}
+    assert first["inc"] and first["r1"]
+    rnd.run_job(first["r1"][0])                                     # partial progress, then a "restart"
+    again = ev.resume_round(rnd.round_id)
+    assert again.incumbent_jobs() == first["inc"] and again.rung_jobs(1) == first["r1"]
+    assert len(again.state["jobs"]) == len(first["inc"]) + len(first["r1"])
+    assert len({j.job_id for j in again.rung_jobs(1)}) == len(first["r1"])
