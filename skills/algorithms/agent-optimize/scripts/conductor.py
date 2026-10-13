@@ -110,6 +110,7 @@ class Cfg:
             deadline=deadline, stop_at_reward=num("stop_at_reward", cast=float),
             max_candidates=num("max_candidates"), plateau_n=num("ao_plateau_n"),
             plateau_floor=num("ao_plateau_floor", cast=float, default=0.4),
+            max_idle=num("ao_max_idle_proposals", default=policy.MAX_IDLE),
             chunk=num("ao_chunk", default=policy.CHUNK), proposer_cap=job_cap,
             finalize_rollouts=num("ao_finalize_reserve", default=0),
             finalize_tokens=num("ao_finalize_tokens", default=0))
@@ -279,7 +280,7 @@ class Conductor:
         self.promote()
         reason = self.stop_check()
         if reason and not self.st.get("stopped"):
-            self.st["stopped"] = reason
+            self.st["stopped"] = self.st["stop_reason"] = reason
             self.b.log("conductor_stop", reason=reason)
         if not self.st.get("stopped"):
             self.merge()
@@ -381,6 +382,7 @@ class Conductor:
             att = self.st.setdefault("attempts", {})
             att[tag] = att.get(tag, 0) + 1
             self.b.log("proposal_failed", tag=tag, why=out.get("refused"), attempt=att[tag])
+            self.st["idle_proposals"] = int(self.st.get("idle_proposals", 0)) + 1      # refused / duplicate / failed
             if out.get("refused") == "duplicate":
                 self.st["dup_refused"] = int(self.st.get("dup_refused", 0)) + 1
             if att[tag] > self.cfg.propose_retries or out.get("refused") == "duplicate":
@@ -407,8 +409,10 @@ class Conductor:
                 self.b.discard(tag)
                 self.st["dup_refused"] = int(self.st.get("dup_refused", 0)) + 1
                 self.b.log("duplicate_refused", tag=tag, same_as=t)
+                self.st["idle_proposals"] = int(self.st.get("idle_proposals", 0)) + 1
                 self.st["proposals_since_improve"] += 1
                 return
+        self.st["idle_proposals"] = 0                                # a new evaluable candidate ends the idle streak
         parents = out.get("parents") or [j.get("parent") or self.champion]
         self.st["nodes"][tag] = {
             "tag": tag, "parents": parents, "parent": parents[0], "edit_kind": j.get("edit_kind", "edit"),
@@ -893,7 +897,7 @@ class Conductor:
             reserved=cs.reserved(self.st) + self.b.reserved_rollouts(),
             tokens=self.tokens_used(), tokens_reserved=cs.reserved(self.st, "reserved_tokens"), now=self.clock(),
             best_reward=champ_reward, n_proposals=self.st["n_proposals"], since_improve=self.st["proposals_since_improve"],
-            alive_p=alive_p, in_flight=self.in_flight_nodes() + len(cs.live(self.st, "propose")) + len(cs.live(self.st, "merge")))
+            alive_p=alive_p, idle=int(self.st.get("idle_proposals", 0)), in_flight=self.in_flight_nodes() + len(cs.live(self.st, "propose")) + len(cs.live(self.st, "merge")))
 
     def drain(self) -> bool:
         """After a stop: cancel proposer/merge jobs and evals that do not serve a running
@@ -1002,4 +1006,7 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # run the importable module, not __main__: conductor_backend does `import conductor`, and its Refused must
+    # be the very class main() catches (two copies of this file would make the exit-2 path a crash the supervisor retries)
+    import conductor as _conductor
+    sys.exit(_conductor.main())

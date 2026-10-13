@@ -178,3 +178,29 @@ def test_run_lock_is_a_context_manager_that_holds_the_lock_inside_it(tmp_path):
     fake = SimpleNamespace(run_dir=rd)
     with conductor_backend.RealBackend.run_lock(fake):
         assert held == ["conductor"]
+
+
+# gap (c): a proposer that cannot produce anything new must not spin -------------------------------
+def test_a_duplicate_only_proposer_stops_the_run_as_proposer_exhausted(tmp_path):
+    w, be, cfg = F.make(tmp_path, spec={"max_metric_calls": 100_000, "max_optimizer_tokens": 10_000_000,
+                                        "ao_plateau_n": 10_000, "ao_max_idle_proposals": 4},
+                        world_kw={"dup_every": 1})
+    c = F.run_to_done(w, be, cfg)
+    assert c.st["stop_reason"] == "proposer_exhausted" and c.st["stopped"] == "proposer_exhausted"
+    assert c.st["idle_proposals"] == 4 and c.st["n_proposals"] <= 6, "stopped at the cap, not after dozens"
+    assert c.st["tokens_committed"] > 0, "the idle proposals' tokens are booked against the token cap"
+    assert w.finalize_calls == 1 and c.st["finalized"], "and the run was finalized"
+
+
+def test_an_idle_streak_resets_when_a_real_candidate_arrives(tmp_path):
+    w, be, cfg = F.make(tmp_path, spec={"max_metric_calls": 3000, "ao_plateau_n": 10_000, "ao_max_idle_proposals": 3},
+                        world_kw={"dup_every": 3, "salt": 2})
+    c = F.run_to_done(w, be, cfg)
+    assert c.st["n_proposals"] > 3, "a duplicate now and then does not stop the run"
+    assert c.st["stop_reason"] != "proposer_exhausted"
+
+
+def test_the_idle_cap_is_configurable_and_defaults_to_six():
+    from conductor import Cfg
+    assert Cfg.from_spec({"ao_max_idle_proposals": 0}).caps.max_idle == 6, "0 means unset: the default holds"
+    assert Cfg.from_spec({"ao_max_idle_proposals": 9}).caps.max_idle == 9

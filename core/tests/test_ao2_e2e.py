@@ -44,7 +44,7 @@ def _project(tmp_path: Path, extra: str = "") -> Path:
         assert a in text
         text = text.replace(a, b)
     spec = project / "capevolve.yaml"
-    spec.write_text(text + "\nao_engine: conductor\nmax_metric_calls: 400\nao_plateau_n: 3\nmax_candidates: 3\nao_slots: 2\n"
+    spec.write_text(text + "\nao_engine: conductor\nmax_metric_calls: 400\nao_plateau_n: 3\nao_max_idle_proposals: 3\nao_slots: 2\n"
                     "ao_k_prop: 1\nao_chunk: 4\nao_tick_s: 0.1\npromotion_n_conf: 3\n" + extra, encoding="utf-8")
     return spec
 
@@ -66,6 +66,7 @@ def test_cli_dispatch_runs_the_real_conductor_to_a_finalized_run(tmp_path):
     assert rc == 0
     state = json.loads((rd / "conductor.json").read_text())
     assert state["finalized"] and state["stopped"], state.get("stopped")
+    assert state["stop_reason"] == "proposer_exhausted", "the mock proposer repeats one edit: the run must stop by itself"
     assert (rd / "final.json").exists(), "finalize sealed the run"
     assert state["n_proposals"] >= 1 and any(j["kind"] == "propose" and j["state"] == "done" for j in state["jobs"].values())
     assert any(j["kind"] == "eval" and j["state"] == "done" for j in state["jobs"].values()), "chunked evals ran"
