@@ -32,6 +32,14 @@ def _truthy(v) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
+def finalize_enabled(spec: dict | None, environ=None) -> bool:
+    """Spec key ``finalize`` (default true). False: the run ends after the search loop with its champion
+    recorded (no test FINAL, no train/val bookend, no final estimate, no report)."""
+    env = (os.environ if environ is None else environ).get(ENV_PREFIX + "FINALIZE")
+    v = env if env not in (None, "") else (spec or {}).get("finalize", True)
+    return str(v).strip().lower() not in ("0", "false", "no", "off")
+
+
 @dataclass(frozen=True)
 class GateConfig:
     coverage_policy: str = "veto"

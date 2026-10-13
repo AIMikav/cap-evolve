@@ -45,7 +45,7 @@ import _bootstrap  # noqa: F401  # side-effect import: seeds sys.path for cap_ev
 
 import policy
 from cap_evolve import conductor_state as cs
-from cap_evolve import promotion
+from cap_evolve import gatecfg, promotion
 
 FRESH_BASE = 1000          # first fresh-trial index (hill-climb: ``1000 + iterations * n_conf``)
 TERMINAL = ("champion", "rejected", "pruned", "superseded", "refused")
@@ -80,6 +80,7 @@ class Cfg:
     params: promotion.PromotionParams = dataclasses.field(default_factory=promotion.PromotionParams)
     p2: object | None = None            # promotion.P2Params when promotion_rule is P2 (round mode)
     cost_eps: float | None = None       # second objective (a ``cost`` objective in the spec): cost per success
+    finalize: bool = True               # spec ``finalize: false``: record the champion, score nothing
     pipeline: int = 1                   # P2: proposals may run this many rounds ahead of the evaluating round
     caps: policy.Caps = dataclasses.field(default_factory=policy.Caps)
 
@@ -125,7 +126,7 @@ class Cfg:
                    screen_n=num("ao_screen_n", default=1), max_confirm=num("ao_max_confirm", default=1),
                    target_alive=num("ao_target_alive"), merge=bool(spec.get("ao_merge")),
                    job_token_cap=job_cap, chunk_timeout=num("ao_chunk_timeout", cast=float, default=cls.chunk_timeout),
-                   seed=num("ao_seed", default=0), tick_s=num("ao_tick_s", cast=float, default=cls.tick_s), ref_pooled=spec.get("split_mode") == "pooled",
+                   seed=num("ao_seed", default=0), tick_s=num("ao_tick_s", cast=float, default=cls.tick_s), ref_pooled=spec.get("split_mode") == "pooled", finalize=gatecfg.finalize_enabled(spec),
                    params=params, caps=caps, p2=p2, pipeline=num("ao_pipeline", default=2 if p2 and k > 1 else 1),
                    cost_eps=cost_eps, merge_bar=num("ao_merge_bar", cast=float, default=policy.COMPLEMENTARY))
 
@@ -186,6 +187,10 @@ class Backend:
     def recover(self) -> None: pass
     def finalize(self, champion: str) -> dict: raise NotImplementedError
     def finalized(self) -> bool: raise NotImplementedError
+    def skip_finalize(self, champion: str) -> dict:
+        """``finalize: false``: record the champion, score nothing."""
+        self.log("finalize_skipped", reason="spec", champion=champion)
+        return {"champion": champion, "finalized": False, "reason": "spec"}
     def log(self, event: str, **kw) -> None: pass
     def initial_champion(self) -> str: return "seed"
     def remaining_rollouts(self) -> int | None: return None      # P2: what the run dir has left after reservations
@@ -984,7 +989,10 @@ class Conductor:
         for t, n in self.st["nodes"].items():
             if n["status"] in PRE_CONFIRM and not self._is_base(t):
                 self.b.node_event(t, "gated" if n["status"] == "screened" else "proposed", stage="pending_at_stop")
-        if not self.b.finalized():
+        if not self.cfg.finalize:
+            if not self.st.get("final_skipped"):
+                self.st["final_skipped"] = self.b.skip_finalize(self.champion)
+        elif not self.b.finalized():
             try:
                 self.st["final"] = self.b.finalize(self.champion)
             except Refused as e:                 # retrying cannot help: stop the supervisor instead of looping it

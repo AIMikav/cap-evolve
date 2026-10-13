@@ -1119,6 +1119,13 @@ def _cmd_run(argv):
 
     # 3) finalize  4) report
     last = proc.stdout
+    from . import gatecfg as _gatecfg
+    if not _gatecfg.finalize_enabled(spec):
+        # ``finalize: false``: the run ends after the search with its champion recorded, nothing scored.
+        from . import harness as _harness
+        rec = _harness.skip_finalize(_RunDir.open(workdir / run_dir), reason="spec")
+        print(json.dumps({"step": "finalize", "skipped": True, **rec}))
+        return done(0)
     report_extra = ["--dashboard-mode", dash_mode, "--dashboard-port", str(dash_port)]
     # The server this run ALREADY started. Without this the report phase calls
     # maybe_launch() again, _free_port() steps past the port our own server holds, and

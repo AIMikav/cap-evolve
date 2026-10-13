@@ -421,13 +421,14 @@ def _smoke_and_replay(cand, parent, factory_spec, fixtures, traces, tool_dirs, s
     return out
 
 
-def helper_checks(cand: Path, parent: Path | None, cfg: dict, traces=(), strict=False) -> list[dict]:
+def helper_checks(cand: Path, parent: Path | None, cfg: dict, traces=(), strict=False,
+                  seed: Path | None = None) -> list[dict]:
     """The three v2 helper checks for a resolved ``cap_evolve.helpers`` config (empty when off)."""
     from cap_evolve import helper_smoke, helpers
     if not cfg or not cfg.get("enabled"):
         return []
     out = [_guard("helper_surface", lambda: (lambda p: _check("helper_surface", not p, "; ".join(p)))(
-        helpers.surface_problems(cand, cfg)), strict)]
+        helpers.surface_problems(cand, cfg, seed)), strict)]
     if cfg.get("lint", True):
         def lint():
             r = helpers.lint_candidate(cand, cfg, parent)
@@ -444,14 +445,14 @@ def helper_checks(cand: Path, parent: Path | None, cfg: dict, traces=(), strict=
 
 def run(cand: Path, parent: Path | None = None, *, fixtures: Path | None = None,
         toolkit: str | None = None, traces: list[Path] = (), max_growth: float | None = None,
-        strict: bool = False, write_tools=None, tool_dirs=("tools",), helpers: dict | None = None) -> dict:
+        strict: bool = False, write_tools=None, tool_dirs=("tools",), helpers: dict | None = None, seed: Path | None = None) -> dict:
     explicit = set(write_tools) if write_tools else None
     checks = [_guard("static", lambda: static_check(cand, parent, max_growth, tool_dirs), strict)]
     if checks[0]["ok"] or checks[0].get("error"):  # nothing below is meaningful on code that does not compile
         checks.append(_guard("hidden_writes",
                              lambda: hidden_writes_dirs(cand, parent, tool_dirs, explicit), strict))
         checks += _smoke_and_replay(cand, parent, toolkit, fixtures, traces, tool_dirs, strict)
-        checks += helper_checks(cand, parent, helpers or {}, traces, strict)
+        checks += helper_checks(cand, parent, helpers or {}, traces, strict, seed)
     failed = [c for c in checks if not c["ok"]]
     return {"ok": not failed, "checks": checks,
             "warnings": [w for c in checks for w in c.get("warnings") or []],
@@ -462,6 +463,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="pregate")
     p.add_argument("--candidate", required=True)
     p.add_argument("--parent")
+    p.add_argument("--seed", help="seed capability dir: executable files identical to it are not checked")
     p.add_argument("--fixtures", help="tool_fixtures.jsonl (default: <run>/tool_fixtures.jsonl via --run-dir)")
     p.add_argument("--run-dir")
     p.add_argument("--toolkit", help="module_or_file.py:callable(candidate_dir) -> toolkit")
@@ -478,7 +480,8 @@ def main(argv=None) -> int:
     res = run(Path(a.candidate), Path(a.parent) if a.parent else None, fixtures=fx,
               toolkit=a.toolkit, traces=[Path(t) for t in a.trace], max_growth=a.max_policy_growth,
               strict=a.strict, write_tools=a.write_tool,
-              helpers=json.loads(a.helpers_config) if a.helpers_config else None)
+              helpers=json.loads(a.helpers_config) if a.helpers_config else None,
+              seed=Path(a.seed) if a.seed else (Path(a.run_dir) / "candidates" / "seed" if a.run_dir else None))
     print(json.dumps(res, indent=2))
     return 0 if res["ok"] else 1
 
