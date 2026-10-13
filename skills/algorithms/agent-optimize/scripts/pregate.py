@@ -20,7 +20,7 @@ Checks (each ``{name, ok, detail, skipped, warnings?, error?}``):
   for undecorated names), else the parent's decorated-WRITE names and the public-name prefixes
   in ``WRITE_PREFIXES``. Plain helpers (``format_reservation``) are never writes.
 * ``tool_smoke``    — changed tools re-run on ``tool_fixtures.jsonl`` rows; a NEW exception fails.
-* ``helper_surface`` / ``helper_lint`` / ``helper_smoke`` — only when ``helpers.enabled`` (v2, D6):
+* ``helper_surface`` / ``helper_lint`` / ``helper_smoke`` — only when ``helpers.enabled`` (v2):
   executable files only in the surface's declared dirs; a lint refusing task ids, copied answers,
   task-identity branches, evaluator paths, network and subprocess use; and the smoke run (import,
   two deterministic runs on recorded-trace fixtures, writes only to declared outputs, no network, no

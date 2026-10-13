@@ -52,6 +52,7 @@ import pregate
 from cap_evolve import RunDir, eval_index, graph, harness, lineage, mdblocks, optimizer_config, posterior
 from cap_evolve.gate import ParetoObjectiveError, _DEFAULT_PARETO_OBJECTIVES
 from cap_evolve.pareto_archive import ArchivePoint, ParetoArchive
+from cap_evolve import helper_smoke as helper_smoke_mod
 from cap_evolve import helpers as helpers_mod
 from cap_evolve.specfile import spec_for_run
 
@@ -526,16 +527,22 @@ def pregate_failure(run_dir, project, parent_tag: str, cand_dir: Path, cmd: str 
             tk = str(Path(project) / tk)
         cfg = {**cfg, "toolkit": tk}
         parent = run_dir.candidate_dir(parent_tag)
+        # Config errors (an unknown helpers key, a bad CAPEVOLVE_HELPERS) propagate: they are not a pre-gate
+        # crash, and failing open would run the experiment with the check silently off.
+        hcfg = helpers_mod.resolve(spec)
+        traces = [Path(t) for t in cfg.get("traces") or []]
+        if hcfg["enabled"] and hcfg["smoke"]:  # recorded helper calls of the parent's FEEDBACK rollouts only
+            traces += helper_smoke_mod.fixture_traces(run_dir.rollouts, parent_tag, hcfg["fixture_splits"])
         try:  # a broken pre-gate must never crash the round (fail-open, loudly)
             res = pregate.run(
                 cand_dir, parent if parent.is_dir() else None,
                 fixtures=run_dir.root / "tool_fixtures.jsonl", toolkit=cfg.get("toolkit"),
-                traces=[Path(t) for t in cfg.get("traces") or []],
+                traces=traces,
                 max_growth=None if cfg.get("max_policy_growth") is None
                 else float(cfg["max_policy_growth"]),
                 strict=bool(cfg.get("strict")), write_tools=cfg.get("write_tools"),
                 tool_dirs=tuple(cfg.get("tool_paths") or ("tools",)),
-                helpers=helpers_mod.resolve(spec))
+                helpers=hcfg)
         except Exception as e:  # noqa: BLE001
             res = {"ok": True, "failure": "", "warnings": [f"built-in pre-gate crashed: {type(e).__name__}: {e}"]}
         if res["warnings"]:  # surfaced in events.jsonl for the digest; never a refusal

@@ -1579,10 +1579,15 @@ class Adapter(CapabilityAdapter):
                     return Rollout(task_id=task.id, error=f"sandbox exec failed: {e}",
                                    metadata={"run_tag": run_tag, "error_kind": "infra"})
                 if not _helpers.bootstrap_ok(boot):
-                    why = (_helpers.helper_crash_in([boot], _helpers.KERNEL_ROOT)
-                           or (boot.strip().splitlines() or ["no output"])[-1][:300])
-                    return Rollout(task_id=task.id, error=f"candidate helpers failed to load: {why}",
-                                   metadata={"run_tag": run_tag, **_helpers.candidate_fault_metadata(why)})
+                    # The candidate's fault only when its own code is named (the fault marker, or a helper
+                    # frame); a busy / timed-out / dead kernel is infrastructure and must not be scored.
+                    crash = _helpers.helper_crash_in([boot], _helpers.KERNEL_ROOT)
+                    if crash:
+                        return Rollout(task_id=task.id, error=f"candidate helpers failed to load: {crash}",
+                                       metadata={"run_tag": run_tag, **_helpers.candidate_fault_metadata(crash)})
+                    why = (boot.strip().splitlines() or ["no output"])[-1][:300]
+                    return Rollout(task_id=task.id, error=f"sandbox could not load the helpers: {why}",
+                                   metadata={"run_tag": run_tag, "error_kind": "infra"})
 
             system_prompt = _read_system_prompt(ctx)
             if _helpers.enabled():
@@ -1672,7 +1677,12 @@ class Adapter(CapabilityAdapter):
                         break
 
             if not case1_path.exists():
-                crash = _helpers.helper_crash_in(exec_results, _helpers.KERNEL_ROOT) if use_skills else None
+                # A sandbox denial is checked first: it is infrastructure whatever else was printed. Only the
+                # LAST result is looked at for a helper crash (an early crash the agent then worked around
+                # says nothing about why no answer exists now).
+                blocked = _sandbox_access_denied(exec_results, container_out_dir)
+                crash = (None if blocked or not use_skills
+                         else _helpers.helper_crash_in(exec_results[-1:], _helpers.KERNEL_ROOT))
                 if crash:
                     # The candidate's own helper raised and no answer was written: a measured failure
                     # (error_kind=candidate), not missing data, so crashing out of a task cannot help.
@@ -1682,7 +1692,6 @@ class Adapter(CapabilityAdapter):
                         metadata={"run_tag": run_tag, "id": sid, "model": model_config.MODEL, "seed": seed,
                                   **_helpers.candidate_fault_metadata(crash)},
                     )
-                blocked = _sandbox_access_denied(exec_results, container_out_dir)
                 if blocked:
                     # Name the fault precisely: a denial on the OUTPUT dir is the uid
                     # mismatch on a dir we created, while a denial anywhere else under the
@@ -1723,13 +1732,22 @@ class Adapter(CapabilityAdapter):
                     except Exception:  # noqa: BLE001
                         pass  # that test case's output simply won't exist; scored as a miss
 
+            meta = {"run_tag": run_tag, "id": sid, "model": model_config.MODEL, "seed": seed}
+            if use_skills and case1_path.exists():
+                # Inputs of the helper calls that returned, from the same kernel (one extra exec). Kept raw in
+                # the rollout; only feedback-split rollouts are ever turned into smoke fixtures.
+                try:
+                    meta["helper_calls"] = _helpers.parse_harvest(
+                        vendor["exec_code"](client, _helpers.harvest_snippet()))
+                except Exception:  # noqa: BLE001
+                    pass
             return Rollout(
                 task_id=task.id,
                 output=solution_code or last_code,
                 trace=messages,
                 cost_usd=cost,
                 tokens=tokens,
-                metadata={"run_tag": run_tag, "id": sid, "model": model_config.MODEL, "seed": seed},
+                metadata=meta,
             )
         except Exception as e:  # noqa: BLE001
             return Rollout(task_id=task.id, error=f"run_target failed: {e}")

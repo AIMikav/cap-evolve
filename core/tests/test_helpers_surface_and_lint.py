@@ -1,4 +1,4 @@
-"""v2 D6: the helper config, the surface manifest, the lint, skills staging, the fault tag, the metric."""
+"""v2: the helper config, the surface manifest, the lint, skills staging, the fault tag, the metric."""
 from __future__ import annotations
 
 import os
@@ -153,17 +153,18 @@ def test_bootstrap_carries_only_this_candidates_text_and_crashes_are_attributabl
     import traceback
     ns = {}
     _exec(sb, ns)
-    with pytest.raises(ValueError) as e:
+    with pytest.raises(RuntimeError) as e:
         sys.modules["skills.s.two"].boom()
     tb = "".join(traceback.format_exception(e.type, e.value, e.tb))
-    assert helpers.helper_crash_in([tb], helpers.KERNEL_ROOT) == "ValueError: bad cell"
+    assert helpers.helper_crash_in([tb], helpers.KERNEL_ROOT) == \
+        "CANDIDATE_HELPER_FAULT: skills.s.two.boom: ValueError: bad cell"
     for k in [k for k in sys.modules if k == "skills" or k.startswith("skills.")]:
         sys.modules.pop(k)
 
 
 def test_bootstrap_failure_is_not_ready_and_oversize_is_refused(tmp_path):
     c = _cand(tmp_path, {"s/scripts/bad.py": "import not_a_real_module_xyz\n"})
-    with pytest.raises(ModuleNotFoundError):
+    with pytest.raises(RuntimeError, match=helpers.HELPER_FAULT_MARKER):   # import-time crash carries the marker
         _exec(helpers.kernel_bootstrap(c))
     assert not helpers.bootstrap_ok("Traceback ...")
     for k in [k for k in sys.modules if k == "skills" or k.startswith("skills.")]:
@@ -250,3 +251,209 @@ def test_skill_package_makes_risky_imports_errors_only_when_helpers_are_on(tmp_p
     assert not on["ok"] and any("socket" in p for p in on["problems"])
     (tmp_path / "skills/a/scripts/f.py").write_text("def f():\n    return 1\n")
     assert not any("socket" in p for p in sp.validate(tmp_path)["problems"])
+
+
+# ---- review round: the marker, the lint bypasses, per-message counts, name collisions, harvest ----
+def _reset_skills_modules():
+    for k in [k for k in sys.modules if k == "skills" or k.startswith("skills.")]:
+        sys.modules.pop(k)
+
+
+def test_wrapped_helpers_reraise_with_the_marker_and_nested_calls_are_not_double_wrapped(tmp_path):
+    c = _cand(tmp_path, {"s/scripts/m.py": (
+        "def inner(x):\n    return 1 / x\n\ndef outer(x):\n    return inner(x)\n\n"
+        "class K:\n    def go(self, x):\n        return inner(x)\n")})
+    try:
+        _exec(helpers.kernel_bootstrap(c))
+        m = sys.modules["skills.s.m"]
+        assert m.outer(2) == 0.5
+        for call in (lambda: m.outer(0), lambda: m.K().go(0)):
+            with pytest.raises(RuntimeError) as e:
+                call()
+            msg = str(e.value)
+            assert msg.startswith(helpers.HELPER_FAULT_MARKER) and msg.count(helpers.HELPER_FAULT_MARKER) == 1
+            assert "ZeroDivisionError" in msg
+    finally:
+        _reset_skills_modules()
+
+
+#: What the Jupyter server hands the vendored ``exec_code``: IPython's structured traceback joined by 4 newlines.
+#: IPython >= 8.16 prints frames as ``File path:line, in fn(args)`` (no quotes), which no CPython-format regex sees.
+_IPY_8_16 = [
+    "\x1b[0;31m---------------------------------------------------------------------------\x1b[0m",
+    "\x1b[0;31mHelperFault\x1b[0m                              Traceback (most recent call last)",
+    "Cell \x1b[0;32mIn[3], line 1\x1b[0m\n\x1b[0;32m----> 1\x1b[0m skills\x1b[38;5;241m.\x1b[39ma\x1b[38;5;241m.\x1b[39mb\x1b[38;5;241m.\x1b[39mf(\x1b[38;5;241m0\x1b[39m)\n",
+    "File \x1b[0;32mcapevolve_skills/a/b.py:2\x1b[0m, in \x1b[0;36mf\x1b[0;34m(x)\x1b[0m\n\x1b[1;32m      1\x1b[0m def f(x):\n----> 2\x1b[0m     return 1/x\n",
+    "\x1b[0;31mHelperFault\x1b[0m: CANDIDATE_HELPER_FAULT: skills.a.b.f: ZeroDivisionError: division by zero",
+]
+
+
+def _vendored_exec_code(monkeypatch):
+    """The vendored inference/code_exec.py (its HTTP client import is stubbed: not needed to format output)."""
+    import importlib.util, types
+    stub = types.ModuleType("jupyter_kernel_cli")
+    stub.ClientJupyterKernel = object
+    monkeypatch.setitem(sys.modules, "jupyter_kernel_cli", stub)
+    path = Path(__file__).resolve().parents[2] / "third_party/spreadsheetbench/inference/code_exec.py"
+    spec = importlib.util.spec_from_file_location("_vendored_code_exec", path)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m.exec_code
+
+
+class _Client:
+    def __init__(self, out):
+        self.out = out
+
+    def execute(self, code):
+        return self.out
+
+
+def test_ipython_structured_traceback_through_exec_code_is_still_attributed(monkeypatch):
+    exec_code = _vendored_exec_code(monkeypatch)
+    out = exec_code(_Client("\n\n\n\n".join(_IPY_8_16)), "skills.a.b.f(0)")
+    assert "capevolve_skills/a/b.py" not in out                       # exec_code dropped the frame chunk
+    assert helpers.helper_crash_in([out], helpers.KERNEL_ROOT) == \
+        "CANDIDATE_HELPER_FAULT: skills.a.b.f: ZeroDivisionError: division by zero"
+    foreign = "\n\n\n\n".join(_IPY_8_16[:3] + ["\x1b[0;31mKeyError\x1b[0m: 'x'"])
+    assert helpers.helper_crash_in([exec_code(_Client(foreign), "x")], helpers.KERNEL_ROOT) is None
+
+
+def test_real_ipython_shell_traceback_from_the_real_bootstrap_is_attributed(monkeypatch, tmp_path):
+    ipy = pytest.importorskip("IPython.core.interactiveshell")
+    exec_code = _vendored_exec_code(monkeypatch)
+    c = _cand(tmp_path, {"a/scripts/b.py": "def f(x):\n    return 1 / x\n"})
+    sh = ipy.InteractiveShell.instance()
+    got = []
+    sh.showtraceback = lambda *a, **k: got.append(sh.InteractiveTB.structured_traceback(*sys.exc_info()))
+    try:
+        sh.run_cell(helpers.kernel_bootstrap(c))
+        sh.run_cell("from skills.a import b\nb.f(0)")
+    finally:
+        _reset_skills_modules()
+        ipy.InteractiveShell.clear_instance()
+    assert got, "the helper should have raised"
+    out = exec_code(_Client("\n\n\n\n".join(got[0])), "skills.a.b.f(0)")
+    assert helpers.helper_crash_in([out], helpers.KERNEL_ROOT).startswith(helpers.HELPER_FAULT_MARKER)
+
+
+@pytest.mark.parametrize("src,needle", [
+    ("import importlib\nm = importlib.import_module('soc' + 'ket')\n", "importlib"),
+    ("from importlib import import_module\nimport_module('x')\n", "importlib"),
+    ("def f(i):\n    return i.import_module('x')\n", "import_module"),
+    ("m = __import__('soc' + 'ket')\n", "__import__"),
+    ("m = __import__('json')\n", "__import__"),
+    ("import builtins\nx = getattr(builtins, 'ev' + 'al')\n", "builtins"),
+    ("g = getattr(__builtins__, 'open')\n", "__builtins__"),
+    ("import os as o\no.system('x')\n", "os.system"),
+    ("import os\np = os\np.popen('x')\n", "os.popen"),
+    ("import posix\nposix.system('x')\n", "os.system"),
+    ("import os\ngetattr(os, 'sys' + 'tem')('x')\n", "getattr(os"),
+    ("from os import *\n", "import *"),
+])
+def test_lint_flags_the_dynamic_import_and_os_alias_bypasses(src, needle):
+    findings = helpers.lint_source(src, "f.py", helpers.resolve({"helpers": {"enabled": True}}))
+    assert any(needle in f for f in findings), findings
+
+
+def test_lint_still_accepts_plain_helpers():
+    ok = "import os, json\n\ndef f(p):\n    return os.path.join(p, 'x'), json.dumps({})\n"
+    assert helpers.lint_source(ok, "f.py", helpers.resolve({"helpers": {"enabled": True}})) == []
+
+
+def test_lint_counts_findings_per_message_not_by_set_membership(tmp_path):
+    cfg = helpers.resolve({"helpers": {"enabled": True}})
+    one = "import subprocess\n"
+    parent = _cand(tmp_path / "p", {"skills/s/scripts/f.py": one})
+    same = _cand(tmp_path / "c1", {"skills/s/scripts/f.py": one + "x = 1\n"})
+    assert helpers.lint_candidate(same, cfg, parent)["ok"]
+    twice = _cand(tmp_path / "c2", {"skills/s/scripts/f.py": one + "import subprocess\n"})
+    r = helpers.lint_candidate(twice, cfg, parent)
+    assert not r["ok"] and len(r["findings"]) == 1
+
+
+def test_skill_and_script_names_that_import_alike_are_refused(tmp_path):
+    src = tmp_path / "skills"
+    _cand(src, {"a-b/scripts/f.py": "x=1\n", "a_b/scripts/f.py": "x=2\n"})
+    assert any("imports as skills.a_b.f" in p for p in helpers.skills_tree_problems(src))
+    with pytest.raises(ValueError, match="both import as"):
+        helpers.kernel_bootstrap(src)
+    src2 = tmp_path / "skills2"
+    _cand(src2, {"s/scripts/x-y.py": "x=1\n", "s/scripts/x_y.py": "x=2\n"})
+    assert any("imports as skills.s.x_y" in p for p in helpers.skills_tree_problems(src2))
+
+
+def test_bootstrap_records_json_inputs_of_top_level_calls_that_returned(tmp_path):
+    c = _cand(tmp_path, {"s/scripts/m.py": (
+        "def inner(x):\n    return x\n\ndef outer(x, k=1):\n    return inner(x)\n\n"
+        "def paths(p):\n    return p\n\ndef bad(x):\n    raise ValueError(x)\n")})
+    try:
+        _exec(helpers.kernel_bootstrap(c))
+        m = sys.modules["skills.s.m"]
+        m.outer([1, 2], k=3)
+        m.paths("/mnt/data/in.xlsx")                   # a path is not a portable input: not recorded
+        m.paths(object())                              # not JSON: not recorded
+        with pytest.raises(RuntimeError):
+            m.bad(1)                                   # raised: not recorded
+        out = _exec(helpers.harvest_snippet())
+    finally:
+        _reset_skills_modules()
+    calls = helpers.parse_harvest(out)
+    assert calls == [{"helper": "skills/s/scripts/m.py", "call": "outer", "args": [[1, 2]], "kwargs": {"k": 3}}]
+    assert helpers.parse_harvest("no tag here") == []
+
+
+def test_parse_harvest_drops_protected_strings():
+    import json as _j
+    row = {"helper": "skills/s/scripts/m.py", "call": "f", "args_kwargs": _j.dumps([["golden_answer"], {}])}
+    assert helpers.parse_harvest(f"{helpers.CALLS_TAG} {_j.dumps([row])}") == []
+
+
+def test_fixture_splits_are_feedback_only():
+    assert helpers.resolve({})["fixture_splits"] == ["feedback", "train"]
+    for bad in ("confirm", "test", "val", "pool"):
+        with pytest.raises(ValueError, match="held-out"):
+            helpers.resolve({"helpers": {"fixture_splits": ["feedback", bad]}})
+
+
+def _round_module(monkeypatch):
+    import importlib.util
+    scripts = Path(__file__).resolve().parents[2] / "skills/algorithms/agent-optimize/scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    spec = importlib.util.spec_from_file_location("_round_under_test", scripts / "round.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_a_helpers_config_error_propagates_out_of_the_round_pregate_not_fail_open(monkeypatch, tmp_path):
+    import types
+    rnd = _round_module(monkeypatch)
+    rd = types.SimpleNamespace(candidate_dir=lambda t: tmp_path / t, rollouts=tmp_path / "rollouts", root=tmp_path,
+                               log_event=lambda *a, **k: None)
+    cand = tmp_path / "cand"
+    cand.mkdir()
+    monkeypatch.setattr(rnd, "spec_for_run", lambda run_dir, project: {"helpers": {"enabled": True, "bogus": 1}})
+    with pytest.raises(ValueError, match="unknown helpers key"):
+        rnd.pregate_failure(rd, tmp_path, "parent", cand, None)
+    # a genuine pre-gate crash is still fail-open (warning only)
+    monkeypatch.setattr(rnd, "spec_for_run", lambda run_dir, project: {"helpers": {"enabled": True}})
+    monkeypatch.setattr(rnd.pregate, "run", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert rnd.pregate_failure(rd, tmp_path, "parent", cand, None) is None
+
+
+def test_round_pregate_hands_the_smoke_only_feedback_rollouts_of_the_parent(monkeypatch, tmp_path):
+    import types
+    rnd = _round_module(monkeypatch)
+    for sp in ("feedback", "confirm", "test"):
+        (tmp_path / "rollouts" / sp).mkdir(parents=True)
+        (tmp_path / "rollouts" / sp / "t__parent__t0.json").write_text("{}")
+    rd = types.SimpleNamespace(candidate_dir=lambda t: tmp_path / t, rollouts=tmp_path / "rollouts", root=tmp_path,
+                               log_event=lambda *a, **k: None)
+    seen = {}
+    monkeypatch.setattr(rnd, "spec_for_run", lambda run_dir, project: {"helpers": {"enabled": True}})
+    monkeypatch.setattr(rnd.pregate, "run", lambda *a, **k: (seen.update(k), {"ok": True, "warnings": []})[1])
+    cand = tmp_path / "cand"
+    cand.mkdir()
+    assert rnd.pregate_failure(rd, tmp_path, "parent", cand, None) is None
+    assert [p.parent.name for p in seen["traces"]] == ["feedback"]

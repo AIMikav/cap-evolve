@@ -1,4 +1,4 @@
-"""Deterministic helper code in the editable surface (v2, D6).
+"""Deterministic helper code in the editable surface (v2).
 
 A procedure the target regenerates on every rollout is stochastic; the same procedure as a script in
 the candidate's own surface is the same bytes every trial. This module is the framework half: the
@@ -26,6 +26,8 @@ so v1 runs are unchanged. Spec::
       protected_patterns: [...] # regexes for evaluator/gold paths a helper must never name or open
       deny_roots: [...]         # absolute dirs the smoke subprocess may not read
       fixtures: path.jsonl      # recorded-trace fixtures for the smoke (rows: see ``helper_smoke``)
+      fixture_splits: [feedback, train]  # rollout splits helper calls are harvested from (never
+                                         # confirm / test / val / pool: refused at resolve time)
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ import json
 import os
 import re
 import statistics
+from collections import Counter
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -42,7 +45,7 @@ DEFAULTS: dict = {
     "enabled": False, "lint": True, "smoke": True,
     "suffixes": [".py"], "max_file_bytes": 65536, "max_total_bytes": 262144, "smoke_timeout": 20.0,
     "task_ids": [], "ids_file": None, "forbidden_literals": [], "protected_patterns": None,
-    "deny_roots": [], "fixtures": None,
+    "deny_roots": [], "fixtures": None, "fixture_splits": ["feedback", "train"],
 }
 #: Where helpers may live when ``helpers.enabled`` and the surface declares nothing.
 DEFAULT_EXECUTABLE_DIRS = ["skills/*/scripts", "tools"]
@@ -54,6 +57,8 @@ SKILL_SUFFIXES = {".py", ".md", ".json", ".txt", ".yaml", ".yml"}
 DEFAULT_PROTECTED = [r"(?i)golden", r"(?i)ground[_-]?truth", r"(?i)(^|[/\\._-])answer(s)?([._/\\-]|$)",
                      r"(?i)evaluat(or|ion)\.py", r"(?i)dataset\.json", r"(?i)(^|[/\\])splits?([/\\._]|$)",
                      r"(?i)(^|[/\\])gold([/\\._-]|$)"]
+#: Rollout splits no fixture may be harvested from (the hidden confirm stratum, test, and the legacy val/pool).
+FIXTURE_SPLITS_FORBIDDEN = {"confirm", "test", "val", "pool"}
 _TRUE, _FALSE = {"1", "true", "yes", "on"}, {"0", "false", "no", "off"}
 
 
@@ -78,6 +83,10 @@ def resolve(spec: dict | None = None) -> dict:
     if bad:
         raise ValueError(f"unknown helpers key(s) {bad}; valid keys: {sorted(DEFAULTS)}")
     cfg = {**DEFAULTS, **tbl}
+    cfg["fixture_splits"] = list(cfg["fixture_splits"])
+    forbidden = sorted(set(cfg["fixture_splits"]) & FIXTURE_SPLITS_FORBIDDEN)
+    if forbidden:
+        raise ValueError(f"helpers.fixture_splits {forbidden}: fixtures never come from held-out splits")
     env = _env_enabled()
     if env is not None:
         cfg["enabled"] = env
@@ -172,6 +181,9 @@ _NET_MODULES = {"socket", "ssl", "urllib", "urllib3", "http", "httpx", "requests
                 "smtplib", "telnetlib", "xmlrpc", "websocket", "websockets", "paramiko", "poplib",
                 "imaplib", "socketserver"}
 _PROC_MODULES = {"subprocess", "multiprocessing", "pty", "ctypes", "cffi"}
+#: Modules whose only use here is reaching a refused module by a computed name.
+_DYN_MODULES = {"importlib", "imp", "runpy", "builtins", "code", "codeop"}
+_OS_MODULES = {"os", "posix", "nt"}
 _PROC_ATTRS = {"system", "popen", "execv", "execve", "execl", "execlp", "execvp", "spawnl", "spawnv",
                "spawnlp", "spawnvp", "posix_spawn", "fork", "forkpty", "startfile"}
 _ID_NAME = re.compile(r"(?i)(^|_)(task|sample|instance|problem|example|case|row|sheet)_?(id|name|idx|index)$"
@@ -200,6 +212,24 @@ def _name_of(node) -> str:
     return ""
 
 
+def _os_aliases(tree) -> set[str]:
+    """Every name bound to the os module (``import os``, ``import os as o``, ``import posix``, ``x = os``)."""
+    names = {"os"}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            names |= {a.asname or a.name.split(".")[0] for a in n.names if a.name.split(".")[0] in _OS_MODULES}
+    grew = True
+    while grew:
+        grew = False
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Assign) and isinstance(n.value, ast.Name) and n.value.id in names:
+                for t in n.targets:
+                    if isinstance(t, ast.Name) and t.id not in names:
+                        names.add(t.id)
+                        grew = True
+    return names
+
+
 def lint_source(src: str, rel: str, cfg: dict) -> list[str]:
     """Findings for one helper file (empty = clean). Deterministic and conservative: a necessary
     filter, not proof of generality (held-out behaviour is what the promotion rule measures)."""
@@ -210,6 +240,7 @@ def lint_source(src: str, rel: str, cfg: dict) -> list[str]:
     ids, lits = _id_matchers(cfg)
     prot = [re.compile(p) for p in (cfg.get("protected_patterns") or DEFAULT_PROTECTED)]
     out: list[str] = []
+    os_names = _os_aliases(tree)
 
     def add(node, msg):
         out.append(f"{rel}:{getattr(node, 'lineno', 0)}: {msg}")
@@ -223,18 +254,27 @@ def lint_source(src: str, rel: str, cfg: dict) -> list[str]:
                     add(node, f"network module '{m}' (helpers run offline)")
                 elif top in _PROC_MODULES:
                     add(node, f"process/foreign-code module '{m}' (no subprocess in a helper)")
-            if isinstance(node, ast.ImportFrom) and node.module == "os":
+                elif top in _DYN_MODULES:
+                    add(node, f"module '{m}' reaches other modules by computed name (import them plainly)")
+            if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in _OS_MODULES:
                 for a in node.names:
-                    if a.name in _PROC_ATTRS:
+                    if a.name == "*":
+                        add(node, f"from {node.module} import * hides which os functions are used")
+                    elif a.name in _PROC_ATTRS:
                         add(node, f"os.{a.name} (no subprocess in a helper)")
+        elif isinstance(node, ast.Name) and node.id == "__builtins__":
+            add(node, "__builtins__ reaches import/eval/exec by name")
         elif isinstance(node, ast.Call):
             f = node.func
-            if isinstance(f, ast.Attribute) and f.attr in _PROC_ATTRS and _name_of(f.value) == "os":
+            if isinstance(f, ast.Attribute) and f.attr in _PROC_ATTRS and _name_of(f.value) in os_names:
                 add(node, f"os.{f.attr}() (no subprocess in a helper)")
-            if isinstance(f, ast.Name) and f.id in {"eval", "exec", "__import__", "compile"} and node.args:
-                if f.id == "__import__" and isinstance(node.args[0], ast.Constant) \
-                        and str(node.args[0].value).split(".")[0] not in _NET_MODULES | _PROC_MODULES:
-                    continue
+            if isinstance(f, ast.Attribute) and f.attr in {"import_module", "__import__"}:
+                add(node, f"{f.attr}() imports by computed name")
+            if isinstance(f, ast.Name) and f.id in {"getattr", "setattr", "delattr", "vars"} and node.args:
+                tgt = _name_of(node.args[0])
+                if tgt in os_names | {"builtins", "__builtins__", "importlib"}:
+                    add(node, f"{f.id}({tgt}, ...) reaches refused functions by name")
+            if isinstance(f, ast.Name) and f.id in {"eval", "exec", "__import__", "compile", "import_module"}:
                 add(node, f"{f.id}() hides what the helper does from this lint")
         elif isinstance(node, ast.Compare):
             names = [_name_of(n) for n in [node.left, *node.comparators]]
@@ -291,8 +331,17 @@ def lint_candidate(cand: Path, cfg: dict, parent: Path | None = None) -> dict:
         pf = Path(parent) / rel if parent is not None else None
         if got and pf is not None and pf.is_file():
             # a changed file keeps the findings the parent already had (a seed tools.py is not this edit's fault)
-            old = {_strip_line(x) for x in lint_source(pf.read_text(encoding="utf-8", errors="replace"), rel, cfg)}
-            got = [x for x in got if _strip_line(x) not in old]
+            # (counted per message: a second copy of an old violation is a new violation)
+            old = Counter(_strip_line(x) for x in
+                          lint_source(pf.read_text(encoding="utf-8", errors="replace"), rel, cfg))
+            kept = []
+            for x in got:
+                k = _strip_line(x)
+                if old[k] > 0:
+                    old[k] -= 1
+                else:
+                    kept.append(x)
+            got = kept
         findings += got
     return {"ok": not findings, "findings": findings,
             "files": [f.relative_to(cand).as_posix() for f in files]}
@@ -323,6 +372,14 @@ def skills_tree_problems(root: Path) -> list[str]:
                 bad.append(f"{rel}: gold-named file")
             elif p.suffix.lower() not in SKILL_SUFFIXES:
                 bad.append(f"{rel}: file type {p.suffix or '(none)'} is not allowed in a skills tree")
+    # two names that import as the same module (a-b and a_b) would silently overwrite each other
+    names: dict[tuple, str] = {}
+    for f in sorted(root.glob("*/scripts/*.py")) if root.is_dir() else []:
+        rel = f.relative_to(root).as_posix()
+        key = (_ident(f.parent.parent.name), _ident(f.stem))
+        if key in names:
+            bad.append(f"{rel}: imports as skills.{key[0]}.{key[1]}, the same as {names[key]}")
+        names.setdefault(key, rel)
     return bad
 
 
@@ -334,30 +391,130 @@ def kernel_bootstrap(skills_dir: Path, max_bytes: int = 262144) -> str:
     """Python source that, run ONCE in the target's kernel, defines every ``skills/<skill>/scripts/*.py`` as
     ``skills.<skill>.<script>`` (``-`` becomes ``_``) and prints ``BOOTSTRAP_OK``. The target only ever receives
     TEXT of the current candidate's own files: nothing is mounted, nothing sits under the data view, and the
-    kernel (one per rollout) keeps the modules through the case-2/3 replay. Frames carry the filename
-    ``capevolve_skills/<skill>/<script>.py`` (see ``helper_crash_in``). Raises ValueError on an oversize tree."""
+    kernel (one per rollout) keeps the modules through the case-2/3 replay.
+
+    Every public function (and class method) a helper defines is wrapped: an exception leaves it re-raised as
+    ``HelperFault('CANDIDATE_HELPER_FAULT: skills.<skill>.<script>.<fn>: <Type>: <msg>')``, and an exception at
+    import time leaves the bootstrap the same way. The marker sits in the LAST line of the traceback, the one
+    chunk every renderer keeps (IPython's structured frames are dropped by the vendored ``exec_code``), so
+    ``helper_crash_in`` can attribute the crash without parsing frames. The wrapper also records the JSON-able
+    inputs of each top-level call that returned (``skills._calls``) for ``harvest_snippet``.
+    Raises ValueError on an oversize tree or two files that map to one module name."""
     skills_dir = Path(skills_dir)
-    mods, total = [], 0
+    mods, total, seen = [], 0, {}
     for f in sorted(skills_dir.glob("*/scripts/*.py")):
         src = f.read_text(encoding="utf-8")
         total += len(src.encode())
-        mods.append((_ident(f.parent.parent.name), _ident(f.stem), f"{KERNEL_ROOT}/{f.parent.parent.name}/{f.name}", src))
+        key = (_ident(f.parent.parent.name), _ident(f.stem))
+        if key in seen:
+            raise ValueError(f"skills/{f.parent.parent.name}/scripts/{f.name} and {seen[key]} both import as "
+                             f"skills.{key[0]}.{key[1]}")
+        seen[key] = f"skills/{f.parent.parent.name}/scripts/{f.name}"
+        mods.append((*key, f"{KERNEL_ROOT}/{f.parent.parent.name}/{f.name}", src,
+                     f"skills/{f.parent.parent.name}/scripts/{f.name}"))
     if total > max_bytes:
         raise ValueError(f"helper scripts total {total} bytes > {max_bytes}")
-    lines = ["import sys as _s, types as _t",
+    lines = ["import sys as _s, types as _t, functools as _f, json as _j",
              "_p = _s.modules.get('skills')",
-             "if _p is None:\n    _p = _s.modules['skills'] = _t.ModuleType('skills'); _p.__path__ = []"]
-    lines.append("def _load(skill, stem, fname, src):\n"
+             "if _p is None:\n    _p = _s.modules['skills'] = _t.ModuleType('skills'); _p.__path__ = []",
+             "_p._calls = []; _p._depth = [0]",
+             "class HelperFault(RuntimeError): pass"]
+    lines.append("def _wrap(fn, qual, rel):\n"
+                 "    @_f.wraps(fn)\n"
+                 "    def w(*a, **k):\n"
+                 "        top = _p._depth[0] == 0\n"
+                 "        try:\n"
+                 "            snap = _j.dumps([a, k]) if top and len(_p._calls) < %d else None\n"
+                 "            if snap is not None and (len(snap) > 4096 or '\"/' in snap):\n"
+                 "                snap = None\n"
+                 "        except Exception:\n"
+                 "            snap = None\n"
+                 "        _p._depth[0] += 1\n"
+                 "        try:\n"
+                 "            r = fn(*a, **k)\n"
+                 "        except HelperFault:\n"
+                 "            raise\n"
+                 "        except Exception as e:\n"
+                 "            raise HelperFault('%s: %%s: %%s: %%s' %% (qual, type(e).__name__, e)) from e\n"
+                 "        finally:\n"
+                 "            _p._depth[0] -= 1\n"
+                 "        if snap is not None:\n"
+                 "            _p._calls.append({'helper': rel, 'call': fn.__qualname__, 'args_kwargs': snap})\n"
+                 "        return r\n"
+                 "    return w" % (_MAX_CALLS_RECORDED, HELPER_FAULT_MARKER))
+    lines.append("def _load(skill, stem, fname, src, rel):\n"
                  "    pk = _s.modules.get('skills.' + skill)\n"
                  "    if pk is None:\n"
                  "        pk = _s.modules['skills.' + skill] = _t.ModuleType('skills.' + skill); pk.__path__ = []\n"
                  "        setattr(_p, skill, pk)\n"
-                 "    m = _s.modules['skills.%s.%s' % (skill, stem)] = _t.ModuleType('skills.%s.%s' % (skill, stem))\n"
+                 "    name = 'skills.%s.%s' % (skill, stem)\n"
+                 "    m = _s.modules[name] = _t.ModuleType(name)\n"
                  "    m.__file__ = fname; setattr(pk, stem, m)\n"
-                 "    exec(compile(src, fname, 'exec'), m.__dict__)")
-    lines += [f"_load({sk!r}, {st!r}, {fn!r}, {src!r})" for sk, st, fn, src in mods]
+                 "    try:\n"
+                 "        exec(compile(src, fname, 'exec'), m.__dict__)\n"
+                 "    except Exception as e:\n"
+                 "        raise HelperFault('" + HELPER_FAULT_MARKER + ": %s: %s (import): %s: %s' % (name, rel, type(e).__name__, e)) from e\n"
+                 "    for k, v in list(m.__dict__.items()):\n"
+                 "        if k.startswith('_'):\n"
+                 "            continue\n"
+                 "        if isinstance(v, _t.FunctionType) and v.__module__ == name:\n"
+                 "            m.__dict__[k] = _wrap(v, name + '.' + k, rel)\n"
+                 "        elif isinstance(v, type) and v.__module__ == name:\n"
+                 "            for ak, av in list(v.__dict__.items()):\n"
+                 "                if isinstance(av, _t.FunctionType) and (not ak.startswith('_') or ak in ('__init__', '__call__')):\n"
+                 "                    setattr(v, ak, _wrap(av, name + '.' + k + '.' + ak, rel))")
+    lines += [f"_load({sk!r}, {st!r}, {fn!r}, {src!r}, {rel!r})" for sk, st, fn, src, rel in mods]
     lines.append(f"print({BOOTSTRAP_OK!r}, {len(mods)})")
     return "\n".join(lines) + "\n"
+
+
+#: The kernel keeps at most this many recorded helper calls per rollout.
+_MAX_CALLS_RECORDED = 40
+#: Print by the harvest snippet, one JSON line after this tag.
+CALLS_TAG = "CAPEVOLVE_HELPER_CALLS"
+
+
+def harvest_snippet() -> str:
+    """Source for one extra exec at the end of a rollout: prints the recorded helper calls (see
+    ``kernel_bootstrap``) as one tagged JSON line. Harmless when the bootstrap did not run."""
+    return ("import sys as _s, json as _j\n"
+            "_p = _s.modules.get('skills')\n"
+            f"print({CALLS_TAG!r}, _j.dumps(getattr(_p, '_calls', [])))\n")
+
+
+def parse_harvest(exec_result: str) -> list[dict]:
+    """The ``helper_calls`` rows from the output of ``harvest_snippet`` (``[]`` if absent or garbled).
+    Each row: ``{helper, call, args, kwargs}``; protected (gold/evaluator) strings are dropped."""
+    prot = [re.compile(p) for p in DEFAULT_PROTECTED]
+    for ln in reversed((exec_result or "").splitlines()):
+        if ln.startswith(CALLS_TAG + " "):
+            try:
+                raw = json.loads(ln[len(CALLS_TAG) + 1:])
+            except ValueError:
+                return []
+            out = []
+            for r in raw if isinstance(raw, list) else []:
+                try:
+                    args, kwargs = json.loads(r["args_kwargs"])
+                except (KeyError, ValueError, TypeError):
+                    continue
+                if any(p.search(x) for x in _str_leaves([args, kwargs]) for p in prot):
+                    continue
+                out.append({"helper": r["helper"], "call": r["call"], "args": args, "kwargs": kwargs})
+            return out
+    return []
+
+
+def _str_leaves(v):
+    if isinstance(v, str):
+        yield v
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            yield str(k)
+            yield from _str_leaves(x)
+    elif isinstance(v, (list, tuple)):
+        for x in v:
+            yield from _str_leaves(x)
 
 
 def bootstrap_ok(exec_result: str) -> bool:
@@ -447,16 +604,22 @@ def candidate_fault_metadata(detail: str, **extra) -> dict:
 
 
 _TB_FILE = re.compile(r'File "([^"]+)", line (\d+)')
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def helper_crash_in(exec_results, skills_root: str) -> str | None:
-    """A traceback in executor output whose frames include a file under ``skills_root`` (``KERNEL_ROOT``: the
-    target ran the candidate's helper and it raised). Returns the last line of that traceback, else None."""
+    """Did the candidate's own helper raise in this executor output? Looks at the LAST result only when the
+    caller passes one, newest first otherwise. The primary signal is ``HELPER_FAULT_MARKER`` (put there by
+    ``kernel_bootstrap``'s wrappers; it survives IPython's structured frames and ``exec_code``'s chunk
+    dropping); a CPython-format traceback with a frame under ``skills_root`` also counts. Returns the fault
+    line, else None."""
     root = skills_root.rstrip("/") + "/"
     for text in reversed(list(exec_results or [])):
-        if "Traceback" not in text:
-            continue
-        if any(m.group(1).startswith(root) for m in _TB_FILE.finditer(text)):
+        text = _ANSI.sub("", text or "")
+        hit = fault_in_text(text)
+        if hit:
+            return hit
+        if "Traceback" in text and any(m.group(1).startswith(root) for m in _TB_FILE.finditer(text)):
             tail = [ln for ln in text.strip().splitlines() if ln.strip()]
             return tail[-1][:300] if tail else "helper raised"
     return None

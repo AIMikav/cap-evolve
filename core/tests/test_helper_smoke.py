@@ -1,4 +1,4 @@
-"""v2 D6: the pregate ``helper_smoke`` stage. It runs real subprocesses (no model, no network)."""
+"""v2: the pregate ``helper_smoke`` stage. It runs real subprocesses (no model, no network)."""
 from __future__ import annotations
 
 import json
@@ -178,3 +178,50 @@ def test_pregate_cli_takes_the_resolved_config(tmp_path, capsys):
     rc = pregate.main(["--candidate", str(c), "--helpers-config", json.dumps(CFG)])
     assert rc == 1 and "helper_lint" in capsys.readouterr().out
     assert pregate.main(["--candidate", str(c)]) == 0
+
+
+# ---- review round: socket creation, more mutating calls, harvested fixtures ------------------------
+def test_a_socket_is_never_created_so_sendmsg_cannot_send_without_connect(tmp_path):
+    src = ("import socket\ntry:\n    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+           "    s.sendmsg([b'x'], [], 0, ('127.0.0.1', 9))\nexcept Exception:\n    pass\n")
+    r = _smoke(_cand(tmp_path, src), [])
+    assert not r["ok"] and "network" in r["detail"] and "socket.__new__" in r["detail"]
+
+
+def test_a_computed_import_of_socket_is_stopped_at_run_time_too(tmp_path):
+    src = ("import importlib\ntry:\n    m = importlib.import_module('soc' + 'ket')\n"
+           "    m.socket(m.AF_INET, m.SOCK_DGRAM)\nexcept Exception:\n    pass\n")
+    r = _smoke(_cand(tmp_path, src), [])
+    assert not r["ok"] and "network" in r["detail"]
+
+
+@pytest.mark.parametrize("call", ["os.utime(T, (0, 0))", "os.chown(T, -1, -1)", "os.mkfifo(T + '.fifo')",
+                                  "os.mknod(T + '.node')"])
+def test_utime_chown_mkfifo_mknod_outside_the_outputs_are_refused(tmp_path, call):
+    target = tmp_path / "victim.txt"
+    target.write_text("x")
+    src = f"import os\nT = {str(target)!r}\ntry:\n    {call}\nexcept PermissionError:\n    pass\nexcept OSError:\n    pass\n"
+    r = _smoke(_cand(tmp_path, src), [])
+    assert not r["ok"] and "outside the declared outputs" in r["detail"]
+    assert not (tmp_path / "victim.txt.fifo").exists() and not (tmp_path / "victim.txt.node").exists()
+
+
+def test_recorded_helper_calls_become_deduplicated_call_fixtures(tmp_path):
+    call = {"helper": REL, "call": "normalise", "args": [[3, 1, 1]], "kwargs": {}}
+    t = tmp_path / "r.json"
+    t.write_text(json.dumps({"task_id": "t1", "metadata": {"helper_calls": [call, call, {**call, "args": [[2]]}]}}))
+    rows = helper_smoke.fixtures_from_traces([t])
+    assert [r["args"] for r in rows] == [[[3, 1, 1]], [[2]]] and all(r["kind"] == "call" for r in rows)
+    r = _smoke(_cand(tmp_path, GOOD), rows)
+    assert r["ok"], r["detail"]
+
+
+def test_fixture_traces_come_from_feedback_splits_only(tmp_path):
+    for sp in ("feedback", "train", "confirm", "test", "val"):
+        (tmp_path / sp).mkdir()
+        (tmp_path / sp / f"t__cand_1__t0.json").write_text("{}")
+    got = helper_smoke.fixture_traces(tmp_path, "cand_1")
+    assert sorted(p.parent.name for p in got) == ["feedback", "train"]
+    with pytest.raises(ValueError, match="never come from"):
+        helper_smoke.fixture_traces(tmp_path, "cand_1", ("feedback", "confirm"))
+    assert helper_smoke.fixture_traces(tmp_path, "other") == []

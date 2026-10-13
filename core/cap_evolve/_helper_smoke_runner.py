@@ -50,11 +50,14 @@ _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
 # event -> indexes of the path arguments that get modified (a copy's source is only read)
 _MUTATING = {"os.remove": (0,), "os.rmdir": (0,), "os.mkdir": (0,), "os.truncate": (0,), "os.chmod": (0,),
              "os.rename": (0, 1), "os.replace": (0, 1), "shutil.move": (0, 1), "os.link": (1,),
-             "os.symlink": (1,), "shutil.copyfile": (1,), "shutil.copymode": (1,), "shutil.rmtree": (0,)}
+             "os.symlink": (1,), "shutil.copyfile": (1,), "shutil.copymode": (1,), "shutil.rmtree": (0,),
+             "os.utime": (0,), "os.chown": (0,), "os.mkfifo": (0,), "os.mknod": (0,),
+             "os.setxattr": (0,), "os.removexattr": (0,)}
 
 
 def hook(event, args):
-    if event in ("socket.connect", "socket.bind", "socket.sendto", "socket.getaddrinfo",
+    # a socket is never created: sendmsg/sendto on an unconnected one would send without connect or bind
+    if event in ("socket.__new__", "socket.connect", "socket.bind", "socket.sendto", "socket.getaddrinfo",
                  "socket.gethostbyname", "socket.gethostbyaddr", "socket.getnameinfo"):
         _bad(f"network access ({event})")
     elif event in ("subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.fork",
@@ -83,6 +86,23 @@ def hook(event, args):
                     _bad(f"{event} outside the declared outputs: {p}")
 
 
+def _guard_special_file_creation():
+    """``os.mkfifo`` / ``os.mknod`` raise no audit event, so they are wrapped (os and posix) instead."""
+    import posix
+
+    def guarded(name, real):
+        def inner(path, *a, **k):
+            p = os.path.realpath(os.fsdecode(path))
+            if not _write_ok(p):
+                _bad(f"os.{name} outside the declared outputs: {p}")
+            return real(path, *a, **k)
+        return inner
+    for name in ("mkfifo", "mknod"):
+        g = guarded(name, getattr(os, name))
+        setattr(os, name, g)
+        setattr(posix, name, g)
+
+
 def digest(path):
     return hashlib.sha256(open(path, "rb").read()).hexdigest()
 
@@ -100,6 +120,7 @@ def collect():
 before = collect()
 res = {"ok": True, "exception": None, "stdout": "", "value": None, "violations": violations}
 sys.addaudithook(hook)
+_guard_special_file_creation()
 captured = io.StringIO()
 sys.stdout = captured
 try:

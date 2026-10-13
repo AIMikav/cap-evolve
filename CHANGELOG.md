@@ -16,7 +16,9 @@ All notable changes to cap-evolve are documented here. The format follows
   recorded-trace fixtures, writes only to declared outputs, no network, no gold; a failure costs 0
   rollouts). The SpreadsheetBench adapter runs only the current candidate's `skills/*/scripts` once, as text,
   in the rollout's own kernel (modules `skills.<skill>.<script>`; nothing mounted), appends each SKILL.md to
-  the system prompt and resolves a `{skills_root}` token; a helper's own crash is tagged `error_kind=candidate`.
+  the system prompt and resolves a `{skills_root}` token; a helper's own crash is tagged `error_kind=candidate` (every helper function re-raises with a
+  `CANDIDATE_HELPER_FAULT` marker that survives IPython's traceback formatting). The kernel records the inputs of
+  helper calls that returned; only `feedback`/`train` rollouts of the parent become smoke fixtures, never confirm or test.
   The tau2 airline adapter tags `@candidate_helper` faults the same way, and `skill-package` validation treats
   risky imports as errors and validates a nested `skills/` root while helpers are on. Off by default: v1 runs are
   unchanged. See `skills/algorithms/agent-optimize/references/helpers.md` and

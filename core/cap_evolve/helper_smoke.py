@@ -48,18 +48,50 @@ def load_fixtures(path: Path | None = None, traces=()) -> list[dict]:
     return rows
 
 
+#: At most this many distinct recorded calls become fixtures for one helper function.
+MAX_ROWS_PER_CALL = 3
+
+
+def fixture_traces(rollouts_dir: Path, tag: str, splits=("feedback", "train")) -> list[Path]:
+    """Rollout JSON files of candidate ``tag`` in the feedback splits ONLY. The hidden confirm stratum, test,
+    val and pool are refused here as well as in ``helpers.resolve``: a fixture is the proposer's own evidence."""
+    bad = set(splits) & helpers.FIXTURE_SPLITS_FORBIDDEN
+    if bad:
+        raise ValueError(f"fixtures never come from {sorted(bad)}")
+    out: list[Path] = []
+    for sp in splits:
+        out += sorted((Path(rollouts_dir) / sp).glob(f"*__{tag}__t*.json"))
+    return out
+
+
 def fixtures_from_traces(traces) -> list[dict]:
-    """Rows recorded by an adapter in ``helper_fixtures`` (top level or under ``metadata``)."""
+    """Rows from rollout JSON: explicit ``helper_fixtures`` (top level or under ``metadata``), and the
+    ``metadata.helper_calls`` the SpreadsheetBench kernel records (inputs of top-level helper calls that
+    returned; converted to ``call`` rows, deduplicated, ``MAX_ROWS_PER_CALL`` per function)."""
     rows: list[dict] = []
+    seen: dict[tuple, int] = {}
     for t in traces or []:
         try:
             d = json.loads(Path(t).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         d = d if isinstance(d, dict) else {}
-        for r in (d.get("helper_fixtures") or (d.get("metadata") or {}).get("helper_fixtures") or []):
+        md = d.get("metadata") or {}
+        for r in (d.get("helper_fixtures") or md.get("helper_fixtures") or []):
             if isinstance(r, dict) and r.get("helper"):
                 rows.append(r)
+        for c in md.get("helper_calls") or []:
+            if not (isinstance(c, dict) and c.get("helper") and c.get("call")):
+                continue
+            fn = str(c["call"]).split(".<locals>.")[-1]
+            key = (c["helper"], fn)
+            body = json.dumps([c.get("args"), c.get("kwargs")], sort_keys=True)
+            if seen.get((*key, body)) or sum(1 for k in seen if k[:2] == key) >= MAX_ROWS_PER_CALL:
+                continue
+            seen[(*key, body)] = 1
+            rows.append({"helper": c["helper"], "kind": "call", "call": fn, "args": c.get("args") or [],
+                         "kwargs": c.get("kwargs") or {}, "outputs": [],
+                         "id": f"{d.get('task_id', 'rollout')}:{fn}"})
     return rows
 
 
