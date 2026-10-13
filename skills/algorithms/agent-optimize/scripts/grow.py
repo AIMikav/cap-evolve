@@ -47,7 +47,7 @@ DEFAULT_MAX_GROWTH_ROUNDS = 2
 def _existing_trial_count(run_dir: RunDir, tag: str, split: str) -> int:
     """How many trial files the candidate's OWN tag already has (any task; every task
     gets the same count, errored or not — see harness.evaluate_candidate)."""
-    vdir = run_dir.rollouts / split
+    vdir = run_dir.rollout_dir(split)
     if not vdir.exists():
         return 0
     # Track the HIGHEST trial index per task, then convert to a count once. Comparing a
@@ -67,7 +67,7 @@ def _merge_grow_trials(run_dir: RunDir, candidate: str, grow_tag: str, split: st
     indices starting from ``offset`` — so the candidate's tag alone now carries the full
     pooled history and every downstream reader (gate_check.py, dashboard, LEDGER.md)
     needs no special-casing for a grown candidate."""
-    vdir = run_dir.rollouts / split
+    vdir = run_dir.rollout_dir(split)
     for f in sorted(vdir.glob(f"*__{grow_tag}__t*.json")):
         tid = f.name.split(f"__{grow_tag}__t")[0]
         idx = int(f.name.rsplit("__t", 1)[1].removesuffix(".json"))

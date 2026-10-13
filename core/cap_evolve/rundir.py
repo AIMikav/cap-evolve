@@ -540,10 +540,73 @@ class RunDir:
 
     # ---- splits (with test seal) -------------------------------------------
     def write_splits(self, splits: Splits) -> None:
+        sealed = self.sealed_dir
+        if splits.pooled and sealed is not None:
+            # The full partition (train/val/confirm ids) lives in the sealed dir; the run dir keeps
+            # only what a proposer may know: F, test, the seed. C = pool minus F is NOT recoverable
+            # from it because train/val are not listed either.
+            full = splits.to_dict()
+            _atomic_write(sealed / "splits_full.json", json.dumps(full, indent=2))
+            public = {k: full[k] for k in ("test", "seed", "test_used", "pooled", "feedback", "pool_seed")}
+            public.update(train=[], val=[], confirm=[], sealed=True)
+            _atomic_write(self.splits_path, json.dumps(public, indent=2))
+            return
         _atomic_write(self.splits_path, json.dumps(splits.to_dict(), indent=2))
 
     def read_splits(self) -> Splits:
-        return Splits.from_dict(json.loads(self.splits_path.read_text(encoding="utf-8")))
+        d = json.loads(self.splits_path.read_text(encoding="utf-8"))
+        if d.get("sealed") and self.sealed_dir is not None:
+            full = json.loads((self.sealed_dir / "splits_full.json").read_text(encoding="utf-8"))
+            full["test_used"] = bool(d.get("test_used") or full.get("test_used"))
+            return Splits.from_dict(full)
+        return Splits.from_dict(d)
+
+    # ---- sealed directory (pooled mode) ---------------------------------------------------------
+    @property
+    def sealed_dir(self) -> Path | None:
+        """Where everything derived from the hidden confirm stratum C lives (None: not sealed).
+
+        Deliberately OUTSIDE the run dir and the project: both optimizers can read the whole run tree
+        (the agent-optimize host's cwd is the common parent of the run dir and the project; a
+        hill-climb proposer runs in ``<run>/work/<cid>``)."""
+        try:
+            v = self._read_state().get("sealed_dir")
+        except (OSError, ValueError):
+            return None
+        return Path(v) if v else None
+
+    def seal(self, path=None) -> Path:
+        """Create (once) and record the sealed directory. Default: ``<project>.sealed/<run name>``, a
+        sibling of the project directory (the run dir is ``<project>/.capevolve/<run>``); override with
+        ``path`` or ``CAPEVOLVE_SEALED_DIR`` (a parent: the run name is appended)."""
+        have = self.sealed_dir
+        if have is not None:
+            return have
+        env = os.environ.get("CAPEVOLVE_SEALED_DIR")
+        if path:
+            target = Path(path)
+        elif env:
+            target = Path(env) / self.root.name
+        else:
+            proj = self.root.parent.parent
+            target = proj.with_name(proj.name + ".sealed") / self.root.name
+        target.mkdir(parents=True, exist_ok=True)
+        with _file_lock(self._state_lock):
+            st = self._read_state()
+            st["sealed_dir"] = str(target)
+            self._write_state(st)
+        return target
+
+    def rollout_dir(self, split: str) -> Path:
+        """``rollouts/<split>``; the confirm stratum's rollouts live in the sealed dir."""
+        sd = self.sealed_dir if split == "confirm" else None
+        return (sd / "rollouts" / "confirm") if sd is not None else self.rollouts / split
+
+    @property
+    def private_dir(self) -> Path:
+        """C-derived round state and aggregates: sealed when sealed, else ``<run>/private``."""
+        sd = self.sealed_dir
+        return (sd / "private") if sd is not None else self.root / "private"
 
     def reserve_test(self) -> Splits:
         """Check the seal is unused (raise if not) WITHOUT flipping it.

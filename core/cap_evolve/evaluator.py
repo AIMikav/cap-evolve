@@ -233,12 +233,12 @@ class P2Evaluator:
 
     # -- rounds -----------------------------------------------------------------------------------
     def _round_dir(self) -> Path:
-        """Round state: job dicts carry C task ids, so it lives under ``private/`` (never proposer-readable)."""
-        return self.run_dir.root / "private" / "p2"
+        """Round state: job dicts carry C task ids, so it lives in the sealed dir (outside every proposer-readable tree)."""
+        return self.run_dir.private_dir / "p2"
 
     def _private(self, kind: str, **fields) -> None:
         """Append C-derived numbers (means, z, n) to ``private/p2_confirm.jsonl``; events get the bit only."""
-        path = self.run_dir.root / "private" / "p2_confirm.jsonl"
+        path = self.run_dir.private_dir / "p2_confirm.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         clean = {k: (None if isinstance(v, float) and not math.isfinite(v) else v) for k, v in fields.items()}
         with path.open("a", encoding="utf-8") as f:
