@@ -294,7 +294,7 @@ class RealBackend(P2Port, conductor.Backend):
         log, rcf, prompt = self._paths(job)
         prompt.write_text(proposer.build_prompt(workdir=work, parent=parent, cluster=cluster, digest_text=text,
                                                 strict=bool(job.get("strict")), kind=kind,
-                                                conflicts=conflicts), encoding="utf-8")
+                                                conflicts=conflicts, refusal=job.get("refusal") or ""), encoding="utf-8")
         cmd = [act.PY, RUN_OPTIMIZER, "--name", self.optimizer, "--workdir", work, "--prompt", prompt, "--json",
                "--transcript", str(self.transcript(job))]
         turns = int(self.spec.get("optimizer_max_turns") or 40)
@@ -341,7 +341,7 @@ class RealBackend(P2Port, conductor.Backend):
         text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
         res = {"ok": rc == 0, "rc": rc, "tail": text[-400:]}
         if job["kind"] in ("propose", "merge"):
-            res["tokens"] = proposer.tokens_from_result(text)
+            res.update(zip(("tokens", "cache_read_tokens"), proposer.usage_from_result(text).values()))
         return res
 
     def kill(self, job):

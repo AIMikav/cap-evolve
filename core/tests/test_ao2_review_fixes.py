@@ -260,3 +260,57 @@ def test_a_merge_resolve_job_gets_a_copy_of_the_trunk_and_the_donor_path(tmp_pat
     assert job["parent"] == "cand_2", "register() diffs the result against the trunk it was built from"
     prompt = (tmp_path / "j.prompt.md").read_text()
     assert "policy/policy.md::Rules" in prompt and str(tmp_path / "candidates" / "cand_1") in prompt
+
+
+# token basis, refusal detail, retry with the reason (airline smoke findings) ------------------------
+def test_job_tokens_are_the_non_cache_read_basis_and_cache_reads_are_recorded_apart():
+    out = json.dumps({"cost": {"tokens": 110_000, "cache_read_tokens": 103_000, "usd": 0.4}})
+    assert proposer.usage_from_result("noise\n" + out) == {"tokens": 7_000, "cache_read": 103_000}
+    assert proposer.tokens_from_result(out) == 7_000
+    assert proposer.usage_from_result("no json at all") == {"tokens": 0, "cache_read": 0}
+    assert proposer.usage_from_result(json.dumps({"cost": {"tokens": 5}})) == {"tokens": 5, "cache_read": 0}
+
+
+def test_cache_reads_do_not_count_toward_the_token_caps(tmp_path):
+    w, be, cfg = F.make(tmp_path, spec={**SPEC, "max_optimizer_tokens": 40_000, "ao_job_token_cap": 3_000},
+                        world_kw={"tokens_per_propose": 1_000})
+    w.cache_read_per_propose = 100_000            # 100x the cap, as in the airline smoke
+    c = F.run_to_done(w, be, cfg)
+    n = sum(1 for j in c.st["jobs"].values() if j["kind"] == "propose" and j["state"] == "done")
+    assert n >= 5, "five+ proposals would have blown a 40k cap had cache reads counted"
+    assert c.st["tokens_committed"] == n * 1_000
+    assert c.st["cache_read_committed"] == n * 100_000
+
+
+def test_a_refusal_keeps_its_detail_in_the_event_and_in_conductor_json(tmp_path):
+    w, be, cfg = F.make(tmp_path, spec={**SPEC, "max_candidates": 2})
+    w.refuse_first = {"cand_1": "a hypothesis is required (--hypothesis-file: {id, cluster_ids, claim})"}
+    c = F.run_to_done(w, be, cfg)
+    ev = [e[1] for e in w.events if e[0] == "proposal_failed"]
+    assert ev and ev[0]["why"] == "hypothesis" and ev[0]["detail"].startswith("a hypothesis is required")
+    disk = json.loads((w.root / "conductor.json").read_text())
+    assert disk["refusals"]["cand_1"]["detail"].startswith("a hypothesis is required")
+    assert disk["refusals"]["cand_1"]["attempt"] == 1
+
+
+def test_the_retry_prompt_carries_the_refusal_reason(tmp_path):
+    w, be, cfg = F.make(tmp_path, spec={**SPEC, "max_candidates": 2})
+    detail = "hypothesis rejected: cluster_ids must name an open cluster"
+    w.refuse_first = {"cand_1": detail}
+    F.run_to_done(w, be, cfg)
+    retries = [j for j in be.started if j["kind"] == "propose" and j["tag"] == "cand_1" and j.get("strict")]
+    assert retries and retries[0]["refusal"] == detail
+    prompt = proposer.build_prompt(workdir="/w", parent="seed", cluster=None, strict=True, refusal=detail)
+    assert "Your previous attempt was refused: " + detail in prompt and "/w/hypothesis.json" in prompt
+    assert len(prompt.encode()) <= proposer.MAX_PROMPT_BYTES
+
+
+def test_the_prompt_says_the_hypothesis_file_is_required_even_without_clusters(tmp_path):
+    p = proposer.build_prompt(workdir="/w", parent="seed", cluster=None)
+    assert "REQUIRED" in p and "refused without it" in p and "no clusters.json" in p
+
+
+def test_an_uppercase_hypothesis_file_is_read(tmp_path):
+    (tmp_path / "HYPOTHESIS.json").write_text('{"id": "h1", "claim": "x"}')
+    assert proposer.read_hypothesis(tmp_path) == {"id": "h1", "claim": "x"}
+    assert proposer.read_hypothesis(tmp_path / "nowhere") is None

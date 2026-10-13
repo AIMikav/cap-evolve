@@ -363,9 +363,10 @@ class Conductor:
             j["result"] = {k: v for k, v in res.items() if k != "stdout"}
             j["state"] = "done" if res.get("ok", True) else "failed"
             j["reserved_rollouts"] = 0
-            tok = int(res.get("tokens") or 0)
+            tok = int(res.get("tokens") or 0)                  # non-cache-read: input + output + cache creation
             if j["kind"] in ("propose", "merge", "diagnose"):
                 self.st["tokens_committed"] = int(self.st.get("tokens_committed", 0)) + tok
+                self.st["cache_read_committed"] = int(self.st.get("cache_read_committed", 0)) + int(res.get("cache_read_tokens") or 0)
                 j["reserved_tokens"] = 0
             getattr(self, f"_reaped_{j['kind']}", lambda *_: None)(j, res)
 
@@ -415,7 +416,9 @@ class Conductor:
         if not out.get("ok"):
             att = self.st.setdefault("attempts", {})
             att[tag] = att.get(tag, 0) + 1
-            self.b.log("proposal_failed", tag=tag, why=out.get("refused"), attempt=att[tag])
+            detail = str(out.get("detail") or res.get("tail") or "")[:300] if not res.get("ok", True) or out.get("detail") else ""
+            self.b.log("proposal_failed", tag=tag, why=out.get("refused"), attempt=att[tag], detail=detail)
+            self.st.setdefault("refusals", {})[tag] = {"why": out.get("refused"), "detail": detail, "attempt": att[tag]}
             self.st["idle_proposals"] = int(self.st.get("idle_proposals", 0)) + 1      # refused / duplicate / failed
             if out.get("refused") == "duplicate":
                 self.st["dup_refused"] = int(self.st.get("dup_refused", 0)) + 1
@@ -905,7 +908,8 @@ class Conductor:
                 if self.st.get("attempts", {}).get(j["tag"], 0) > self.cfg.propose_retries:
                     self._give_up(j["tag"], j)
                     continue
-                self._launch_propose(j["tag"], j["parent"], j.get("slot", 0), retry=True, edit_kind=j.get("edit_kind", "edit"))
+                self._launch_propose(j["tag"], j["parent"], j.get("slot", 0), retry=True, edit_kind=j.get("edit_kind", "edit"),
+                                     refusal=(self.st.get("refusals", {}).get(j["tag"]) or {}).get("detail", ""))
         while True:
             live = cs.live(self.st, "propose") + cs.live(self.st, "merge")
             if len(live) >= self.cfg.k_prop or self.in_flight_nodes() + len(live) >= self.cfg.alive_cap:
@@ -929,9 +933,9 @@ class Conductor:
         return cs.tokens_fit({"tokens_committed": self.tokens_used(), "jobs": self.st["jobs"]}, self.cfg.job_token_cap,
                              c.max_tokens, c.finalize_tokens)
 
-    def _launch_propose(self, tag, parent, slot, retry=False, edit_kind="edit") -> None:
+    def _launch_propose(self, tag, parent, slot, retry=False, edit_kind="edit", refusal="") -> None:
         j = cs.new_job(self.st, "propose", tag=tag, parent=parent, slot=slot, retry=False, edit_kind=edit_kind,
-                       strict=retry, reserved_tokens=self.cfg.job_token_cap, reserved_rollouts=0)
+                       strict=retry, refusal=refusal, reserved_tokens=self.cfg.job_token_cap, reserved_rollouts=0)
         self._start(j)
 
     # ---- 6. stop / drain / finish -------------------------------------------------------
