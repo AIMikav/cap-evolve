@@ -157,6 +157,9 @@ def merge_allowed(n_merges: int, n_proposals: int, merge_won: bool, frac: float 
 
 # ---- stopping ---------------------------------------------------------------------------------
 
+MAX_IDLE = 6          # consecutive proposals that yield no new evaluable candidate (refused, duplicate, failed)
+
+
 @dataclass(frozen=True)
 class Caps:
     """Numeric stopping inputs only. None / 0 = no such cap."""
@@ -167,6 +170,7 @@ class Caps:
     max_candidates: int | None = None        # only when the spec sets the numeric key explicitly
     plateau_n: int | None = None             # explicit proposals-without-gain; else derived
     plateau_floor: float = 0.4               # fraction of the rollout budget that must be spent first
+    max_idle: int = MAX_IDLE                 # 0 = off; a proposer that cannot yield a new candidate must not spin
     chunk: int = CHUNK
     proposer_cap: int = 150_000
     finalize_rollouts: int = 0
@@ -186,7 +190,7 @@ def plateau_n(caps: Caps, n_proposals: int, spent_frac: float) -> int | None:
 
 def stop_reason(*, caps: Caps, committed: int, reserved: int, tokens: int, tokens_reserved: int,
                 now: float, best_reward: float | None, n_proposals: int,
-                since_improve: int, alive_p: list[float], in_flight: int = 0) -> str | None:
+                since_improve: int, alive_p: list[float], in_flight: int = 0, idle: int = 0) -> str | None:
     """Why the conductor should stop PROPOSING (then drain, finalize, exit 0), or None to go on.
     Only structured keys are read."""
     mc = caps.max_metric_calls
@@ -200,6 +204,8 @@ def stop_reason(*, caps: Caps, committed: int, reserved: int, tokens: int, token
         return "reward: stop_at_reward reached"
     if caps.max_candidates and n_proposals >= caps.max_candidates and in_flight == 0:
         return "max_candidates (numeric key)"      # proposals already launched are allowed to finish
+    if caps.max_idle and idle >= caps.max_idle:
+        return "proposer_exhausted"             # idle proposals' tokens are already inside `tokens` above
     spent_frac = (committed / mc) if mc else 0.0
     n = plateau_n(caps, n_proposals, spent_frac)
     if n and since_improve >= n and (not mc or spent_frac >= caps.plateau_floor) and not any(p > P_ALIVE for p in alive_p):

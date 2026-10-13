@@ -110,6 +110,7 @@ class Cfg:
             deadline=deadline, stop_at_reward=num("stop_at_reward", cast=float),
             max_candidates=num("max_candidates"), plateau_n=num("ao_plateau_n"),
             plateau_floor=num("ao_plateau_floor", cast=float, default=0.4),
+            max_idle=num("ao_max_idle_proposals", default=policy.MAX_IDLE),
             chunk=num("ao_chunk", default=policy.CHUNK), proposer_cap=job_cap,
             finalize_rollouts=num("ao_finalize_reserve", default=0),
             finalize_tokens=num("ao_finalize_tokens", default=0))
@@ -120,7 +121,7 @@ class Cfg:
                    screen_n=num("ao_screen_n", default=1), max_confirm=num("ao_max_confirm", default=1),
                    target_alive=num("ao_target_alive"), merge=bool(spec.get("ao_merge")),
                    job_token_cap=job_cap, chunk_timeout=num("ao_chunk_timeout", cast=float, default=cls.chunk_timeout),
-                   seed=num("ao_seed", default=0), ref_pooled=spec.get("split_mode") == "pooled",
+                   seed=num("ao_seed", default=0), tick_s=num("ao_tick_s", cast=float, default=cls.tick_s), ref_pooled=spec.get("split_mode") == "pooled",
                    params=params, caps=caps, p2=p2, pipeline=num("ao_pipeline", default=2 if p2 and k > 1 else 1))
 
 
@@ -155,7 +156,11 @@ class Backend:
     def start(self, job: dict) -> dict: raise NotImplementedError
     def poll(self, job: dict) -> dict | None: raise NotImplementedError
     def alive(self, job: dict) -> bool: raise NotImplementedError
-    def kill(self, job: dict) -> None: raise NotImplementedError
+    def kill(self, job: dict) -> bool | None:
+        """Stop the job. False = it cannot be stopped yet (a P2 worker thread mid-rollout): the conductor keeps its
+        slot and reservation until ``poll`` reports it finished. None/True = stopped."""
+        raise NotImplementedError
+    def running_tokens(self, job: dict) -> int: return 0        # optimizer tokens a RUNNING one-shot job has used so far
     # graph
     def register(self, job: dict, result: dict) -> dict: raise NotImplementedError
     def node_event(self, tag: str, status: str, **kw) -> None: raise NotImplementedError
@@ -275,7 +280,7 @@ class Conductor:
         self.promote()
         reason = self.stop_check()
         if reason and not self.st.get("stopped"):
-            self.st["stopped"] = reason
+            self.st["stopped"] = self.st["stop_reason"] = reason
             self.b.log("conductor_stop", reason=reason)
         if not self.st.get("stopped"):
             self.merge()
@@ -318,13 +323,25 @@ class Conductor:
             if j["state"] != "running":
                 continue
             res = self.b.poll(j)
-            if res is None:
-                if self.clock() - float(j.get("started") or self.clock()) > self.cfg.chunk_timeout:
-                    self.b.kill(j)
-                    j["state"] = "lost"
-                    j["reserved_rollouts"] = j["reserved_tokens"] = 0
-                    self.b.log("job_timeout", job=j["id"], job_kind=j["kind"])
+            if res is not None and j.get("cancelling"):      # a cancelled worker finally ended: now free its slot
+                self._lose(j, "job_cancelled")
                 continue
+            if res is None:
+                if j.get("cancelling"):
+                    continue
+                if not self.b.alive(j):                 # gone without leaving an exit record: free the slot now
+                    self._lose(j, "job_vanished")
+                elif self.clock() - float(j.get("started") or self.clock()) > self.cfg.chunk_timeout:
+                    if self._stop(j):
+                        self._lose(j, "job_timeout")
+                elif j["kind"] in ("propose", "merge", "diagnose") and \
+                        self.b.running_tokens(j) > self.cfg.job_token_cap:
+                    used = int(self.b.running_tokens(j))     # the per-job cap is enforced here, not trusted to the CLI
+                    self.b.kill(j)                           # a proposer is a process: kill() always stops it
+                    self.b.log("job_token_cap", job=j["id"], job_kind=j["kind"], tokens=used, cap=self.cfg.job_token_cap)
+                    res = {"ok": False, "error": "token_cap", "tokens": used}
+                if res is None:
+                    continue
             j["result"] = {k: v for k, v in res.items() if k != "stdout"}
             j["state"] = "done" if res.get("ok", True) else "failed"
             j["reserved_rollouts"] = 0
@@ -333,6 +350,21 @@ class Conductor:
                 self.st["tokens_committed"] = int(self.st.get("tokens_committed", 0)) + tok
                 j["reserved_tokens"] = 0
             getattr(self, f"_reaped_{j['kind']}", lambda *_: None)(j, res)
+
+    def _stop(self, j) -> bool:
+        """Ask the backend to stop ``j``. False (and ``cancelling``) when it cannot stop yet; reap frees it later."""
+        if self.b.kill(j) is False:
+            j["cancelling"] = True
+            return False
+        return True
+
+    def _lose(self, j, why) -> None:
+        """A running job that is gone or hung: refund its reservations; the ledger decides what is missing."""
+        j["state"] = "lost"
+        j["reserved_rollouts"] = j["reserved_tokens"] = 0
+        self.b.log(why, job=j["id"], job_kind=j["kind"], tag=j.get("tag"))
+        if j["kind"] in ("propose", "merge"):
+            self._lost_proposal(j)
 
     def _reaped_eval(self, j, res) -> None:
         if j.get("p2seq") or j.get("p2"):
@@ -350,6 +382,7 @@ class Conductor:
             att = self.st.setdefault("attempts", {})
             att[tag] = att.get(tag, 0) + 1
             self.b.log("proposal_failed", tag=tag, why=out.get("refused"), attempt=att[tag])
+            self.st["idle_proposals"] = int(self.st.get("idle_proposals", 0)) + 1      # refused / duplicate / failed
             if out.get("refused") == "duplicate":
                 self.st["dup_refused"] = int(self.st.get("dup_refused", 0)) + 1
             if att[tag] > self.cfg.propose_retries or out.get("refused") == "duplicate":
@@ -376,8 +409,10 @@ class Conductor:
                 self.b.discard(tag)
                 self.st["dup_refused"] = int(self.st.get("dup_refused", 0)) + 1
                 self.b.log("duplicate_refused", tag=tag, same_as=t)
+                self.st["idle_proposals"] = int(self.st.get("idle_proposals", 0)) + 1
                 self.st["proposals_since_improve"] += 1
                 return
+        self.st["idle_proposals"] = 0                                # a new evaluable candidate ends the idle streak
         parents = out.get("parents") or [j.get("parent") or self.champion]
         self.st["nodes"][tag] = {
             "tag": tag, "parents": parents, "parent": parents[0], "edit_kind": j.get("edit_kind", "edit"),
@@ -641,6 +676,7 @@ class Conductor:
         try:
             j.update(self.b.start(j))
             j["state"] = "running"
+            self.save()              # the pid is on disk before anything else can crash: no double run on resume
         except Exception as e:      # noqa: BLE001 - a job that cannot start is a failed job, not a crash
             j["state"] = "failed"
             j["reserved_rollouts"] = j["reserved_tokens"] = 0
@@ -793,9 +829,9 @@ class Conductor:
 
     def _p2_abandon_round(self, r, why) -> None:
         for j in cs.live(self.st, "eval"):
-            if j.get("round") == r["id"]:
-                self.b.kill(j)
+            if j.get("round") == r["id"] and self._stop(j):
                 j["state"] = "lost"
+                j["reserved_rollouts"] = j["reserved_tokens"] = 0
         for tag in r["tags"]:
             n = self.st["nodes"].get(tag)
             if n and n["status"] == "racing":
@@ -861,7 +897,7 @@ class Conductor:
             reserved=cs.reserved(self.st) + self.b.reserved_rollouts(),
             tokens=self.tokens_used(), tokens_reserved=cs.reserved(self.st, "reserved_tokens"), now=self.clock(),
             best_reward=champ_reward, n_proposals=self.st["n_proposals"], since_improve=self.st["proposals_since_improve"],
-            alive_p=alive_p, in_flight=self.in_flight_nodes() + len(cs.live(self.st, "propose")) + len(cs.live(self.st, "merge")))
+            alive_p=alive_p, idle=int(self.st.get("idle_proposals", 0)), in_flight=self.in_flight_nodes() + len(cs.live(self.st, "propose")) + len(cs.live(self.st, "merge")))
 
     def drain(self) -> bool:
         """After a stop: cancel proposer/merge jobs and evals that do not serve a running
@@ -869,8 +905,7 @@ class Conductor:
         confirmation can no longer run is ``unconfirmed``. True when nothing is in flight."""
         for j in cs.live(self.st):
             keep = self._keep_on_drain(j)
-            if not keep:
-                self.b.kill(j)
+            if not keep and not j.get("cancelling") and self._stop(j):
                 j["state"] = "lost"
                 j["reserved_rollouts"] = j["reserved_tokens"] = 0
         confirming = [t for t, n in self.st["nodes"].items() if n["status"] == "confirming"]
@@ -905,7 +940,13 @@ class Conductor:
             if n["status"] in PRE_CONFIRM and not self._is_base(t):
                 self.b.node_event(t, "gated" if n["status"] == "screened" else "proposed", stage="pending_at_stop")
         if not self.b.finalized():
-            self.st["final"] = self.b.finalize(self.champion)
+            try:
+                self.st["final"] = self.b.finalize(self.champion)
+            except Refused as e:                 # retrying cannot help: stop the supervisor instead of looping it
+                self.st["finalize_blocked"] = str(e)[:400]
+                self.b.log("finalize_blocked", reason=self.st["finalize_blocked"])
+                self.save()
+                raise
         self.st["finalized"] = True
         self.b.log("conductor_done", champion=self.champion, reason=self.st.get("stopped"))
 
@@ -954,11 +995,18 @@ def main(argv=None) -> int:
         return EXIT_REFUSED
     with be.run_lock():
         c = Conductor(Path(a.run_dir).resolve(), be, cfg)
-        rc = c.run(a.max_ticks)
+        try:
+            rc = c.run(a.max_ticks)
+        except Refused as e:             # e.g. finalize blocked: a relaunch would hit the same wall
+            print(json.dumps({"ok": False, "refused": str(e)}, indent=2))
+            return EXIT_REFUSED
     print(json.dumps({"ok": rc == 0, "champion": c.champion, "stopped": c.st.get("stopped"),
                       "n_proposals": c.st["n_proposals"]}, indent=2))
     return rc
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # run the importable module, not __main__: conductor_backend does `import conductor`, and its Refused must
+    # be the very class main() catches (two copies of this file would make the exit-2 path a crash the supervisor retries)
+    import conductor as _conductor
+    sys.exit(_conductor.main())
