@@ -542,7 +542,7 @@ def pregate_failure(run_dir, project, parent_tag: str, cand_dir: Path, cmd: str 
                 else float(cfg["max_policy_growth"]),
                 strict=bool(cfg.get("strict")), write_tools=cfg.get("write_tools"),
                 tool_dirs=tuple(cfg.get("tool_paths") or ("tools",)),
-                helpers=hcfg)
+                helpers=hcfg, seed=run_dir.candidate_dir("seed"))
         except Exception as e:  # noqa: BLE001
             res = {"ok": True, "failure": "", "warnings": [f"built-in pre-gate crashed: {type(e).__name__}: {e}"]}
         if res["warnings"]:  # surfaced in events.jsonl for the digest; never a refusal
