@@ -99,9 +99,9 @@ def test_c_numbers_and_ids_stay_in_the_private_file_not_in_events_or_the_step_re
     assert seq and set(seq[0]) - {"kind", "ts", "t", "time"} <= {"round", "candidate", "bit"}
     C = run_dir.read_splits().confirm
     assert not any(f'"{t}"' in run_dir.events_path.read_text() for t in C)
-    priv = (run_dir.root / "private" / "p2_confirm.jsonl").read_text()
+    priv = (run_dir.private_dir / "p2_confirm.jsonl").read_text()
     assert '"mean"' in priv
-    assert not list((run_dir.root / "p2").glob("*")) if (run_dir.root / "p2").exists() else True
+    assert not (run_dir.root / "private").exists() and not (run_dir.root / "p2").exists()
 
 
 def test_the_ledger_of_a_pooled_run_is_not_empty(tmp_path):

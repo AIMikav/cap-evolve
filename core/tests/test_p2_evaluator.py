@@ -47,7 +47,8 @@ def test_partition_is_persisted_sealed_and_never_redrawn(tmp_path):
     assert not (set(s1.confirm) & set(s1.test))
     s2 = harness.ensure_pooled(run_dir, confirm_fraction=0.9)      # a later call cannot re-partition
     assert (s2.feedback, s2.confirm) == (s1.feedback, s1.confirm)
-    assert json.loads(run_dir.splits_path.read_text())["confirm"] == s1.confirm
+    assert json.loads(run_dir.splits_path.read_text())["confirm"] == []          # sealed: ids live outside the run
+    assert json.loads((run_dir.sealed_dir / "splits_full.json").read_text())["confirm"] == s1.confirm
     events = [json.loads(l) for l in run_dir.events_path.read_text().splitlines()]
     assert sum(e["kind"] == "pooled_split" for e in events) == 1
     assert not any(t in json.dumps(events) for t in s1.confirm)     # ids never go to the event log
@@ -118,7 +119,7 @@ def test_confirmation_never_reuses_rung_seeds_or_rollouts(tmp_path):
     # no rung rollout was written on the confirm stratum, and no confirm rollout on F
     ev_calls = adapter.calls
     sp = run_dir.read_splits()
-    conf_dir = run_dir.rollouts / "confirm"
+    conf_dir = run_dir.rollout_dir("confirm")
     assert all(p.name.split("__")[0] in sp.confirm for p in conf_dir.glob("*.json"))
     assert all(p.name.split("__")[0] in sp.feedback for p in (run_dir.rollouts / "feedback").glob("*.json"))
 
