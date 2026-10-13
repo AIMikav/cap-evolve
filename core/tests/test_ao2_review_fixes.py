@@ -206,6 +206,17 @@ def test_the_idle_cap_is_configurable_and_defaults_to_six():
     assert Cfg.from_spec({"ao_max_idle_proposals": 9}).caps.max_idle == 9
 
 
+def test_the_final_estimate_is_configurable_and_never_exceeds_what_is_left(tmp_path):
+    for spec, left, c, want in (({}, None, 58, 4), ({"ao_final_estimate_trials": 0}, None, 58, 0),
+                                ({"ao_final_estimate_trials": 2}, None, 58, 2),
+                                ({}, 100, 58, 0), ({}, 300, 58, 2), ({}, 5000, 58, 4)):
+        fake = SimpleNamespace(spec=spec, root=tmp_path, ev=SimpleNamespace(confirm_ids=lambda c=c: list(range(c))))
+        import unittest.mock as m
+        with m.patch.object(conductor_backend.RunDir, "open",
+                            return_value=SimpleNamespace(remaining_metric_calls=lambda left=left: left)):
+            assert conductor_backend.RealBackend.final_estimate_trials(fake) == want, (spec, left)
+
+
 # merge-resolve jobs (seen live on run_20261013_131033) ------------------------------------------
 def test_proposer_metadata_never_makes_two_branches_conflict(tmp_path):
     import merge

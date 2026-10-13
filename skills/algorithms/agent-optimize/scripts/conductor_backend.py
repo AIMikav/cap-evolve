@@ -432,14 +432,29 @@ class RealBackend(P2Port, conductor.Backend):
 
     def finalize(self, champion):
         if self.cfg.p2 and champion != "seed" and not (self.root / "final_estimate.json").exists():
-            est = self.ev.final_estimate(digest.cand_dir(self.run_dir, champion), digest.cand_dir(self.run_dir, "seed"))
-            (self.root / "final_estimate.json").write_text(json.dumps(est, indent=1, default=str), encoding="utf-8")
+            n = self.final_estimate_trials()
+            if n > 0:
+                est = self.ev.final_estimate(digest.cand_dir(self.run_dir, champion),
+                                             digest.cand_dir(self.run_dir, "seed"), n_trials=n)
+                (self.root / "final_estimate.json").write_text(json.dumps(est, indent=1, default=str), encoding="utf-8")
+            else:
+                self.log("final_estimate_skipped", why="no budget left for it or ao_final_estimate_trials: 0")
         a = argparse.Namespace(**vars(self.ns), n_confirm=0, n_trials=0, seal_anyway=None, over_budget=None, verb="finalize")
         try:
             rc, out = act.finalize(a, self.ctx)
         except act.Refused as e:
             raise conductor.Refused(f"finalize blocked: {e}") from e
         return out
+
+    def final_estimate_trials(self) -> int:
+        """Trials per C task for the champion-vs-seed estimate (``ao_final_estimate_trials``, default 4; 0 = off).
+        It spends ``2 * |C| * n`` rollouts of ``max_metric_calls`` after the search, so it is shrunk to what is
+        left rather than failing the finalize on an exhausted budget."""
+        n = int(self.spec.get("ao_final_estimate_trials", 4))
+        left = RunDir.open(self.root).remaining_metric_calls()
+        if n > 0 and left is not None:
+            n = min(n, int(left) // max(1, 2 * len(self.ev.confirm_ids())))
+        return max(n, 0)
 
     def finalized(self):
         return (self.root / "final.json").exists() and RunDir.open(self.root).read_splits().test_used
