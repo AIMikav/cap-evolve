@@ -134,6 +134,7 @@ on:
           - "ibm-ete/aws/claude-sonnet-4-5"
           - "ibm-ete/aws/claude-sonnet-5"
           - "ibm-ete/aws/claude-sonnet-5-5"
+          - "ibm-ete/aws/gpt-oss-120b"
           - "ibm-ete/aws/kimi-k2.5"
           - "ibm-ete/aws/us.claude-opus-4-7"
           - "ibm-ete/azure/DeepSeek-V3.2"
@@ -164,6 +165,7 @@ on:
           - "ibm-ete/gemini-2.5-flash"
           - "ibm-ete/gemini-2.5-pro"
           - "ibm-ete/gpt-5.5"
+          - "ibm-ete/rits/google/gemma-4-31B"
           # ---- RITS (skillberry-1 lite-rits proxy) — see resolve_provider.sh ----
           # Curated from the live rits.json catalog (105 models), granite family excluded on
           # request. Only gemma-4-31B-it is a genuine match to the WikiSkill paper's model
@@ -249,6 +251,7 @@ on:
           - "ibm-ete/aws/claude-sonnet-4-5"
           - "ibm-ete/aws/claude-sonnet-5"
           - "ibm-ete/aws/claude-sonnet-5-5"
+          - "ibm-ete/aws/gpt-oss-120b"
           - "ibm-ete/aws/kimi-k2.5"
           - "ibm-ete/aws/us.claude-opus-4-7"
           - "ibm-ete/azure/DeepSeek-V3.2"
@@ -279,6 +282,7 @@ on:
           - "ibm-ete/gemini-2.5-flash"
           - "ibm-ete/gemini-2.5-pro"
           - "ibm-ete/gpt-5.5"
+          - "ibm-ete/rits/google/gemma-4-31B"
           # ---- RITS (skillberry-1 lite-rits proxy) — see resolve_provider.sh and the
           # agent_model list above for the same catalog note. ----
           - "ibm-rits/google/gemma-4-31B-it"
