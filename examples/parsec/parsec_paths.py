@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Single source of truth for "which parsec v4 checkout" and the shared MCP
-port table.
+"""Single source of truth for "which parsec checkout" (v4 or v5) and the
+shared MCP port table.
 
 Both were previously hardcoded independently in adapter.py and
 scaffold_projects.py — two copies of the same PARSEC_V4N env-var-with-Mac-
@@ -9,11 +9,19 @@ risk: a seed snapshot gets frozen from one tree while the trials that score
 it run against another, if the two copies ever drift. This module is the
 fix: both files import from here instead of defining their own copy.
 
-There is deliberately NO machine-specific fallback path. A fallback here is
-exactly the bug this module replaces (it was a personal Mac path; on CCC
-there is no equivalent single "the" checkout to default to) — callers that
-need a v4_t2_e1-shaped operation, not just a path, use resolve_v4n() and get
-a clear RuntimeError instead of silently resolving to the wrong tree.
+v5 is a separate, from-scratch benchmark checkout (not a v4 variant), so it
+gets its own env var ($PARSEC_V5N) and its own resolve_v5n()/V5N_REQUIRED_MSG
+rather than overloading v4's — the two trees are never meant to be read
+interchangeably. The MCP port table is shared: v5 reuses the same 5-service
+simulator topology v4/h4 proved, so examples/parsec/v5/'s scripts import
+MCP_PORTS from here too.
+
+There is deliberately NO machine-specific fallback path for either. A
+fallback here is exactly the bug this module replaces (it was a personal Mac
+path; on CCC there is no equivalent single "the" checkout to default to) —
+callers that need a v4_t2_e1-shaped (or v5-shaped) operation, not just a
+path, use resolve_v4n()/resolve_v5n() and get a clear RuntimeError instead
+of silently resolving to the wrong tree.
 """
 from __future__ import annotations
 
@@ -60,3 +68,25 @@ def resolve_v4n() -> Path:
     if v4n is None:
         raise RuntimeError(f"{V4N_REQUIRED_MSG} Set it before running this script.")
     return v4n
+
+
+#: One source of truth for the "you forgot to set PARSEC_V5N" wording.
+V5N_REQUIRED_MSG = (
+    "PARSEC_V5N environment variable is required — it must point at "
+    "the root of a parsec v5 checkout (e.g. "
+    ".../rhdp-parsec/v5_2026-10-10, the directory containing _run/)."
+)
+
+
+def resolve_v5n_or_none() -> Path | None:
+    """The parsec v5 checkout root, from $PARSEC_V5N, or None if unset/blank."""
+    raw = os.environ.get("PARSEC_V5N", "").strip()
+    return Path(raw) if raw else None
+
+
+def resolve_v5n() -> Path:
+    """Like resolve_v5n_or_none(), but raises when PARSEC_V5N is unset."""
+    v5n = resolve_v5n_or_none()
+    if v5n is None:
+        raise RuntimeError(f"{V5N_REQUIRED_MSG} Set it before running this script.")
+    return v5n
