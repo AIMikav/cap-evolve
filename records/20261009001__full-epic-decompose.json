@@ -13,6 +13,7 @@
   "optimizer_model": "GLM 5.3 (via PriceTag AI Gateway)",
   "algorithm": "hill-climb",
   "conclusion": "success",
+  "has_ui": true,
   "reward_baseline": 0.8611111111111112,
   "reward_opt": 0.8611111111111112,
   "delta": 0.0,
