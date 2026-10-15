@@ -1,0 +1,1 @@
+{"path":"events.jsonl","binary":false,"size":230,"truncated":false,"text":"{\"t\": 1792054769.028353, \"kind\": \"splits\", \"train\": 80, \"val\": 40, \"test\": 280, \"seed\": 0}\n{\"t\": 1792054769.0345595, \"kind\": \"eval_start\", \"split\": \"val\", \"tag\": \"seed\", \"n_tasks\": 40, \"n_trials\": 1, \"workers\": 1, \"rollouts\": 40}\n"}
