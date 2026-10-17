@@ -1,1 +1,0 @@
-{"path":"candidates/cand_0004/extract_thoughts.py","binary":false,"size":236,"truncated":false,"text":"import json\nwith open(\"./trajectories/80-42__cand_0003__t0.json\", 'r') as f:\n    data = json.load(f)\n    trace = data['rollout']['trace']\n    for turn in trace:\n        if turn['role'] == 'assistant':\n            print(turn['content'])\n"}
