@@ -1,0 +1,1 @@
+{"path":"work/cand_0004/analyze_416.py","binary":false,"size":238,"truncated":false,"text":"import json\nwith open('./trajectories/416-15__seed__t0.json') as f:\n    d = json.load(f)\nfor msg in d['rollout']['trace']:\n    if msg.get('role') == 'assistant' and '```python' in msg.get('content', ''):\n        print(msg.get('content'))\n"}
