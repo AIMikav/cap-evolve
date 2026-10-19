@@ -1,1 +1,0 @@
-{"path":"candidates/cand_0001/get_code_384.py","binary":false,"size":237,"truncated":false,"text":"import json\nwith open('./trajectories/38462__seed__t0.json') as f:\n    d = json.load(f)\nfor msg in d['rollout']['trace']:\n    if msg.get('role') == 'assistant' and '```python' in msg.get('content', ''):\n        print(msg.get('content'))\n"}

@@ -1,1 +1,0 @@
-{"path":"work/cand_0002/get_code_227.py","binary":false,"size":238,"truncated":false,"text":"import json\nwith open('./trajectories/227-40__seed__t0.json') as f:\n    d = json.load(f)\nfor msg in d['rollout']['trace']:\n    if msg.get('role') == 'assistant' and '```python' in msg.get('content', ''):\n        print(msg.get('content'))\n"}
