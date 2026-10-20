@@ -130,9 +130,20 @@ def executable_files(cand: Path, cfg: dict) -> list[Path]:
     return sorted(seen)
 
 
-def surface_problems(cand: Path, cfg: dict) -> list[str]:
+def _same_as_seed(f: Path, cand: Path, seed: Path | None) -> bool:
+    if seed is None:
+        return False
+    sf = Path(seed) / f.relative_to(cand)
+    return sf.is_file() and not sf.is_symlink() and sf.read_bytes() == f.read_bytes()
+
+
+def surface_problems(cand: Path, cfg: dict, seed: Path | None = None) -> list[str]:
     """Violations of the surface manifest: executable files outside the declared dirs, symlinks
-    among them, and size caps. Empty when helpers are off or nothing is declared."""
+    among them, and size caps. Empty when helpers are off or nothing is declared.
+
+    ``seed``: files byte-identical to the seed's are not the candidate's doing and are not checked for
+    the "outside the declared surface" rule (a seed's read-only ``reference/data_model.py``); only new
+    or changed executable files are."""
     cand = Path(cand)
     if not cfg["enabled"] or not cfg["executable_dirs"]:
         return []
@@ -149,7 +160,7 @@ def surface_problems(cand: Path, cfg: dict) -> list[str]:
             if under_declared(f) or f.suffix in EXEC_SUFFIXES:
                 problems.append(f"{rel}: symlink in an executable surface")
             continue
-        if f.suffix in EXEC_SUFFIXES and not under_declared(f):
+        if f.suffix in EXEC_SUFFIXES and not under_declared(f) and not _same_as_seed(f, cand, seed):
             problems.append(f"{rel}: executable file outside the declared surface "
                             f"{cfg['executable_dirs']}")
     total = 0

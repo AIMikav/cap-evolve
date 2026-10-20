@@ -1353,6 +1353,19 @@ def _p2_evaluate(adapter, run_dir: RunDir, workdir: Path, cid: str, parent_id, p
                       "delta": r1.mean, "record": rec, "reason": reason}
 
 
+def skip_finalize(run_dir: RunDir, *, champion: str | None = None, reason: str = "spec") -> dict:
+    """``finalize: false``: end the run after the search with the champion RECORDED, so it can be frozen later.
+
+    Writes ``champion.json`` (id, snapshot dir, best val) and logs ``finalize_skipped``. Scores nothing:
+    no test, no train/val bookend, no final estimate."""
+    best = champion or run_dir.best_id or "seed"
+    rec = {"champion": best, "candidate_dir": str(run_dir.candidate_dir(best)),
+           "best_val": run_dir.spent.best_val, "finalized": False, "reason": reason}
+    _atomic_write(run_dir.root / "champion.json", json.dumps(rec, indent=2))
+    run_dir.log_event("finalize_skipped", reason=reason, champion=best)
+    return rec
+
+
 def _internal_estimate(adapter, run_dir: RunDir, gate_kwargs: dict | None):
     """Rule P2 + pooled splits: champion vs seed on C, fresh seeds (the unbiased internal estimate).
 

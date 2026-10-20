@@ -137,6 +137,37 @@ def mo_verdict(reward_pass: bool, r_mean: float, r_se: float, n: int, cps: dict,
     return False, "no_gain"
 
 
+# ---- focus rule (ao_focus) ------------------------------------------------------------------------
+FOCUS_SD_FLOOR = 0.25      # per-task paired-delta sd floor (one or two trials cannot claim certainty)
+FOCUS_Z = 1.8              # one-sided ACCEPT bar (simulated on real per-task pass rates: false accept ~5% per null)
+FOCUS_Z_KILL = 0.8         # lighter KILL bar: a wrong kill costs one idea, a wrong accept costs the champion
+FOCUS_MIN_GAIN = 0.07      # accept only gains of >= 2 tasks of 30: large, resolvable improvements
+FILL_Z = 1.0               # a promotion is kept when its fresh full-set fill beats the old champion by > 1 se
+
+
+def focus_verdict(focus_d, canary_d, n_all: int, n_pass: int) -> dict:
+    """Stratified estimate of the FULL-set gain from two strata of the champion's tasks: the failing
+    stratum is measured in full (``focus_d``, one paired delta per task), the passing stratum through
+    ``canary_d``, a random sample of it scaled to its ``n_pass`` tasks. Unbiased for the full-set
+    change even though both strata were picked by the champion's own (noisy) results: the regression
+    to the mean that inflates focus deltas is the one that deflates canary deltas.
+    ``accept``: lower bound > 0 and gain >= FOCUS_MIN_GAIN; ``kill``: (lighter) upper bound < FOCUS_MIN_GAIN."""
+    nf, nc, N = len(focus_d), len(canary_d), max(n_all, 1)
+    _, se_f, _ = mean_se(focus_d, FOCUS_SD_FLOOR)                 # se of the focus MEAN
+    mc, se_c, _ = mean_se(canary_d, FOCUS_SD_FLOOR) if nc else (0.0, 0.0, 0)
+    gain = (sum(focus_d) + n_pass * mc) / N
+    se = math.sqrt((nf * se_f) ** 2 + (n_pass * se_c) ** 2) / N
+    out = {"gain": gain, "se": se, "mean": sum(focus_d) / nf if nf else 0.0, "canary": mc, "n": nf,
+           "p_beat": _N.cdf(gain / se) if se > 0 else 0.5}
+    if nf == 0:
+        return {**out, "verdict": "more", "why": "no_data"}
+    if gain - FOCUS_Z * se > 0 and gain >= FOCUS_MIN_GAIN:
+        return {**out, "verdict": "accept", "why": "focus_gain"}
+    if gain + FOCUS_Z_KILL * se < FOCUS_MIN_GAIN:
+        return {**out, "verdict": "kill", "why": "no_gain"}
+    return {**out, "verdict": "more", "why": "undecided"}
+
+
 # ---- parents and merges -----------------------------------------------------------------------
 
 def pick_parent(slot: int, champion: str, tips: dict[str, float], rng: random.Random,
@@ -200,7 +231,7 @@ class Caps:
     stop_at_reward: float | None = None
     max_candidates: int | None = None        # only when the spec sets the numeric key explicitly
     plateau_n: int | None = None             # explicit proposals-without-gain; else derived
-    plateau_floor: float = 0.4               # fraction of the rollout budget that must be spent first
+    plateau_floor: float = 0.8               # fraction of the rollout budget that must be spent first (see plateau_n)
     max_idle: int = MAX_IDLE                 # 0 = off; a proposer that cannot yield a new candidate must not spin
     chunk: int = CHUNK
     proposer_cap: int = 150_000
@@ -209,14 +240,15 @@ class Caps:
 
 
 def plateau_n(caps: Caps, n_proposals: int, spent_frac: float) -> int | None:
-    """Proposals without a champion change that count as a plateau: ``max(6, 0.4 * budget_proposals)``
-    where ``budget_proposals`` is projected from the spend so far. None until the projection is
-    meaningful (5% of the rollout budget spent), so an early dry spell never stops a run."""
-    if caps.plateau_n:
-        return int(caps.plateau_n)
-    if not caps.max_metric_calls or spent_frac < 0.05 or n_proposals <= 0:
-        return None
-    return max(6, int(math.ceil(0.4 * n_proposals / spent_frac)))
+    """Proposals without a champion change that count as a plateau: ONLY the explicit ``ao_plateau_n``.
+
+    There is no derived plateau. The old derived rule (max(6, 0.4 * projected proposals)) compared a count of
+    proposals, which are launched far ahead of their evaluations, with the committed spend; while no champion
+    existed it reduced to ``spent_frac >= plateau_floor`` for any proposal count, so every unaccepted search
+    stopped at the floor (41% in campaign v2.0, 80% in v2.1) with budget unspent and proposals never
+    evaluated. A capped run ends on its budget, its tokens, its deadline or ``stop_at_reward``; a plateau
+    stop exists only when the spec asks for one."""
+    return int(caps.plateau_n) if caps.plateau_n else None
 
 
 def stop_reason(*, caps: Caps, committed: int, reserved: int, tokens: int, tokens_reserved: int,
@@ -235,7 +267,7 @@ def stop_reason(*, caps: Caps, committed: int, reserved: int, tokens: int, token
         return "reward: stop_at_reward reached"
     if caps.max_candidates and n_proposals >= caps.max_candidates and in_flight == 0:
         return "max_candidates (numeric key)"      # proposals already launched are allowed to finish
-    if caps.max_idle and idle >= caps.max_idle:
+    if caps.max_idle and idle >= caps.max_idle and in_flight == 0:     # never strand candidates still evaluating
         return "proposer_exhausted"             # idle proposals' tokens are already inside `tokens` above
     spent_frac = (committed / mc) if mc else 0.0
     n = plateau_n(caps, n_proposals, spent_frac)

@@ -204,3 +204,152 @@ def test_the_idle_cap_is_configurable_and_defaults_to_six():
     from conductor import Cfg
     assert Cfg.from_spec({"ao_max_idle_proposals": 0}).caps.max_idle == 6, "0 means unset: the default holds"
     assert Cfg.from_spec({"ao_max_idle_proposals": 9}).caps.max_idle == 9
+
+
+def test_the_final_estimate_is_configurable_and_never_exceeds_what_is_left(tmp_path):
+    for spec, left, c, want in (({}, None, 58, 4), ({"ao_final_estimate_trials": 0}, None, 58, 0),
+                                ({"ao_final_estimate_trials": 2}, None, 58, 2),
+                                ({}, 100, 58, 0), ({}, 300, 58, 2), ({}, 5000, 58, 4)):
+        fake = SimpleNamespace(spec=spec, root=tmp_path, ev=SimpleNamespace(confirm_ids=lambda c=c: list(range(c))))
+        import unittest.mock as m
+        with m.patch.object(conductor_backend.RunDir, "open",
+                            return_value=SimpleNamespace(remaining_metric_calls=lambda left=left: left)):
+            assert conductor_backend.RealBackend.final_estimate_trials(fake) == want, (spec, left)
+
+
+# merge-resolve jobs (seen live on run_20261013_131033) ------------------------------------------
+def test_proposer_metadata_never_makes_two_branches_conflict(tmp_path):
+    import merge
+    dirs = {}
+    for name, hyp in (("base", None), ("a", '{"id": "a"}'), ("b", '{"id": "b"}')):
+        d = dirs[name] = tmp_path / name
+        (d / "policy").mkdir(parents=True)
+        (d / "policy" / "policy.md").write_text("# P\n\nrule\n")
+        if hyp:
+            (d / "hypothesis.json").write_text(hyp)
+    (dirs["b"] / "tools.py").write_text("x = 1\n")
+    r = merge.build_merge_dir(dirs["base"], dirs["a"], dirs["b"], tmp_path / "out")
+    assert r["built"], r
+
+
+def test_a_merge_resolve_job_gets_a_copy_of_the_trunk_and_the_donor_path(tmp_path):
+    import unittest.mock as m
+    work = tmp_path / "work" / "cand_9"
+    calls = []
+
+    def sh(argv):
+        calls.append([str(x) for x in argv])
+        work.mkdir(parents=True)
+        return 0, "", ""
+    fake = SimpleNamespace(
+        ctx=SimpleNamespace(work=lambda t: work), run_dir=tmp_path, root=tmp_path, project=tmp_path, spec={},
+        cfg=SimpleNamespace(cost_eps=None), optimizer="mock",
+        _paths=lambda j: (tmp_path / "j.log", tmp_path / "j.rc", tmp_path / "j.prompt.md"),
+        _spawn=lambda j, cmd, env=None: {"pid": 1}, transcript=lambda j: tmp_path / "t.jsonl", job_usd_cap=lambda: 0,
+        _inject_context=lambda work, parent: None, _project_instructions=lambda: "", _valid_clusters=lambda: [])
+    job = {"id": "j1", "kind": "merge", "tag": "cand_9", "parent": "cand_1", "parents": ["cand_1", "cand_2"],
+           "conflicts": [{"where": "policy/policy.md::Rules", "trunk": ["cand_2"], "donor": ["cand_1"]}]}
+    with m.patch.object(conductor_backend.act, "sh", sh), \
+            m.patch.object(conductor_backend, "conductor_jobs", lambda root: []), \
+            m.patch.object(conductor_backend.digest, "build", lambda *a: {}), \
+            m.patch.object(conductor_backend.digest, "fit", lambda d: ({}, "")), \
+            m.patch.object(conductor_backend.digest, "cand_dir", lambda rd, t: tmp_path / "candidates" / t):
+        conductor_backend.RealBackend._start_llm(fake, job)
+    argv = calls[0]
+    assert argv[argv.index("--parent") + 1] == "cand_2", "the work dir is a copy of the conflict's trunk"
+    assert argv[argv.index("--source") + 1] == str(tmp_path / "candidates" / "cand_2"), "read where the tip lives"
+    assert job["parent"] == "cand_2", "register() diffs the result against the trunk it was built from"
+    prompt = (tmp_path / "j.prompt.md").read_text()
+    assert "policy/policy.md::Rules" in prompt and str(tmp_path / "candidates" / "cand_1") in prompt
+
+
+# token basis, refusal detail, retry with the reason (airline smoke findings) ------------------------
+def test_job_tokens_are_the_non_cache_read_basis_and_cache_reads_are_recorded_apart():
+    out = json.dumps({"cost": {"tokens": 110_000, "cache_read_tokens": 103_000, "usd": 0.4}})
+    assert proposer.usage_from_result("noise\n" + out) == {"tokens": 7_000, "cache_read": 103_000}
+    assert proposer.tokens_from_result(out) == 7_000
+    assert proposer.usage_from_result("no json at all") == {"tokens": 0, "cache_read": 0}
+    assert proposer.usage_from_result(json.dumps({"cost": {"tokens": 5}})) == {"tokens": 5, "cache_read": 0}
+
+
+def test_cache_reads_do_not_count_toward_the_token_caps(tmp_path):
+    w, be, cfg = F.make(tmp_path, spec={**SPEC, "max_optimizer_tokens": 40_000, "ao_job_token_cap": 3_000},
+                        world_kw={"tokens_per_propose": 1_000})
+    w.cache_read_per_propose = 100_000            # 100x the cap, as in the airline smoke
+    c = F.run_to_done(w, be, cfg)
+    n = sum(1 for j in c.st["jobs"].values() if j["kind"] == "propose" and j["state"] == "done")
+    assert n >= 5, "five+ proposals would have blown a 40k cap had cache reads counted"
+    assert c.st["tokens_committed"] == n * 1_000
+    assert c.st["cache_read_committed"] == n * 100_000
+
+
+def test_a_refusal_keeps_its_detail_in_the_event_and_in_conductor_json(tmp_path):
+    w, be, cfg = F.make(tmp_path, spec={**SPEC, "max_candidates": 2})
+    w.refuse_first = {"cand_1": "a hypothesis is required (--hypothesis-file: {id, cluster_ids, claim})"}
+    c = F.run_to_done(w, be, cfg)
+    ev = [e[1] for e in w.events if e[0] == "proposal_failed"]
+    assert ev and ev[0]["why"] == "hypothesis" and ev[0]["detail"].startswith("a hypothesis is required")
+    disk = json.loads((w.root / "conductor.json").read_text())
+    assert disk["refusals"]["cand_1"]["detail"].startswith("a hypothesis is required")
+    assert disk["refusals"]["cand_1"]["attempt"] == 1
+
+
+def test_the_retry_prompt_carries_the_refusal_reason(tmp_path):
+    w, be, cfg = F.make(tmp_path, spec={**SPEC, "max_candidates": 2})
+    detail = "hypothesis rejected: cluster_ids must name an open cluster"
+    w.refuse_first = {"cand_1": detail}
+    F.run_to_done(w, be, cfg)
+    retries = [j for j in be.started if j["kind"] == "propose" and j["tag"] == "cand_1" and j.get("strict")]
+    assert retries and retries[0]["refusal"] == detail
+    prompt = proposer.build_prompt(workdir="/w", parent="seed", cluster=None, strict=True, refusal=detail)
+    assert "Your previous attempt was refused: " + detail in prompt and "/w/hypothesis.json" in prompt
+    assert len(prompt.encode()) <= proposer.MAX_PROMPT_BYTES
+
+
+def test_the_prompt_says_the_hypothesis_file_is_required_even_without_clusters(tmp_path):
+    p = proposer.build_prompt(workdir="/w", parent="seed", cluster=None)
+    assert "REQUIRED" in p and "refused without it" in p and "no clusters.json" in p
+
+
+def test_an_uppercase_hypothesis_file_is_read(tmp_path):
+    (tmp_path / "HYPOTHESIS.json").write_text('{"id": "h1", "claim": "x"}')
+    assert proposer.read_hypothesis(tmp_path) == {"id": "h1", "claim": "x"}
+    assert proposer.read_hypothesis(tmp_path / "nowhere") is None
+
+
+def test_a_proposer_reads_its_parents_val_traces_and_guidance(tmp_path):
+    """Seen live: conductor proposers had no ./trajectories, so every edit was written blind."""
+    import unittest.mock as m
+    seen = {}
+    fake = SimpleNamespace(project=tmp_path, run_dir=SimpleNamespace(log_event=lambda *a, **k: seen.setdefault("warn", k),
+                                                   read_splits=lambda: SimpleNamespace(pooled=False)),
+                           optimizer="claude-code", spec={"capabilities": ["system-prompt", "tools"],
+                                                          "capability_sources": ["seed/data_model.py"]})
+    with m.patch("cap_evolve.check.load_adapter", lambda p: "ADAPTER"), \
+            m.patch.object(conductor_backend.harness, "_inject_optimizer_context",
+                           lambda adapter, rd, work, **kw: seen.update(adapter=adapter, work=work, **kw)):
+        conductor_backend.RealBackend._inject_context(fake, tmp_path / "work" / "cand_5", "cand_3")
+    assert seen["split"] == "val" and seen["tag"] == "cand_3", "the PARENT's val traces (non-pooled), never test"
+    assert seen["work"] == tmp_path / "work" / "cand_5" and seen["capabilities"] == ["system-prompt", "tools"]
+    assert "warn" not in seen
+
+
+def test_in_pooled_mode_a_proposer_gets_the_parents_f_traces_and_no_c_id(tmp_path):
+    from p2_fakes import make_run
+    from cap_evolve import evaluator, harness, promotion
+    adapter, run_dir = make_run(tmp_path, n_train=24, n_val=24, default=0.4, max_metric_calls=2000)
+    ev = evaluator.P2Evaluator(adapter, run_dir, promotion.P2Params.from_spec({"promotion_rule": "P2"}))
+    F_ids, C_ids = list(ev.feedback_ids()), list(ev.confirm_ids())
+    assert F_ids and C_ids and not set(F_ids) & set(C_ids) and harness.gate_split(run_dir) == "feedback"
+    seed = run_dir.candidate_dir("seed")
+    for split, ids in (("feedback", F_ids), ("confirm", C_ids)):
+        harness.evaluate_candidate(adapter, seed, run_dir=run_dir, split=split, ids=ids, n_trials=1, tag="seed")
+    work = tmp_path / "work" / "cand_1"
+    work.mkdir(parents=True)
+    fake = SimpleNamespace(project=tmp_path, run_dir=run_dir, optimizer="mock", spec={}, _adapter=adapter)
+    conductor_backend.RealBackend._inject_context(fake, work, "seed")
+    names = [f.name for f in (work / "trajectories").glob("*")]
+    assert names, "the proposer must not edit blind in pooled mode"
+    seen = {n for t in F_ids for n in names if t in n}
+    assert seen, "the parent's F traces are there"
+    assert not [n for n in names if any(c in n for c in C_ids)], "and no confirm-stratum id"

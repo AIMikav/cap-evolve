@@ -45,10 +45,14 @@ import _bootstrap  # noqa: F401  # side-effect import: seeds sys.path for cap_ev
 
 import policy
 from cap_evolve import conductor_state as cs
-from cap_evolve import promotion
+from cap_evolve import gatecfg, promotion
 
 FRESH_BASE = 1000          # first fresh-trial index (hill-climb: ``1000 + iterations * n_conf``)
+FILL_BASE, FILL_N = 3000, 2   # focus rule: a new champion's fresh reference fill (trial indices, trials per task)
 TERMINAL = ("champion", "rejected", "pruned", "superseded", "refused")
+#: Refusal reasons that are about a proposal's paperwork, not about whether the proposer produced an edit.
+SCHEMA_REFUSALS = ("hypothesis", "too_small")
+SCHEMA_REFUSAL_FACTOR = 5      # consecutive schema refusals tolerated, in multiples of ao_max_idle_proposals
 PRE_CONFIRM = ("proposed", "rung", "full", "screened", "stale", "racing")
 EXIT_REFUSED = 2
 
@@ -70,6 +74,11 @@ class Cfg:
     target_alive: int | None = None     # nodes in flight before confirm; default K (K=1 => serial = hill-climb)
     merge: bool = False
     merge_bar: float = policy.COMPLEMENTARY   # complementarity a pair of tips needs to be merged
+    focus: bool = False                 # ao_focus: judge on the champion's failing tasks + canaries, promote directly
+    focus_n: int = 1                    # first look: trials per focus cell
+    focus_max: int = 3                  # last look; undecided after it = pruned (no resolvable gain)
+    focus_canary: int = 6               # sample of the champion's passing tasks (regression stratum)
+    focus_accept_min: int = 2           # trials per focus cell before an ACCEPT (one trial is enough to kill)
     job_token_cap: int = 150_000
     chunk_timeout: float = 3 * 3600.0
     eval_retries: int = 3
@@ -80,7 +89,9 @@ class Cfg:
     params: promotion.PromotionParams = dataclasses.field(default_factory=promotion.PromotionParams)
     p2: object | None = None            # promotion.P2Params when promotion_rule is P2 (round mode)
     cost_eps: float | None = None       # second objective (a ``cost`` objective in the spec): cost per success
+    finalize: bool = True               # spec ``finalize: false``: record the champion, score nothing
     pipeline: int = 1                   # P2: proposals may run this many rounds ahead of the evaluating round
+                                        # (1 = at most K proposals unevaluated; each round's proposals see the previous verdicts)
     caps: policy.Caps = dataclasses.field(default_factory=policy.Caps)
 
     @property
@@ -111,7 +122,7 @@ class Cfg:
             max_metric_calls=num("max_metric_calls"), max_tokens=num("max_optimizer_tokens", "ao_max_tokens"),
             deadline=deadline, stop_at_reward=num("stop_at_reward", cast=float),
             max_candidates=num("max_candidates"), plateau_n=num("ao_plateau_n"),
-            plateau_floor=num("ao_plateau_floor", cast=float, default=0.4),
+            plateau_floor=num("ao_plateau_floor", cast=float, default=policy.Caps.plateau_floor),
             max_idle=num("ao_max_idle_proposals", default=policy.MAX_IDLE),
             chunk=num("ao_chunk", default=policy.CHUNK), proposer_cap=job_cap,
             finalize_rollouts=num("ao_finalize_reserve", default=0),
@@ -125,9 +136,12 @@ class Cfg:
                    screen_n=num("ao_screen_n", default=1), max_confirm=num("ao_max_confirm", default=1),
                    target_alive=num("ao_target_alive"), merge=bool(spec.get("ao_merge")),
                    job_token_cap=job_cap, chunk_timeout=num("ao_chunk_timeout", cast=float, default=cls.chunk_timeout),
-                   seed=num("ao_seed", default=0), tick_s=num("ao_tick_s", cast=float, default=cls.tick_s), ref_pooled=spec.get("split_mode") == "pooled",
-                   params=params, caps=caps, p2=p2, pipeline=num("ao_pipeline", default=2 if p2 and k > 1 else 1),
-                   cost_eps=cost_eps, merge_bar=num("ao_merge_bar", cast=float, default=policy.COMPLEMENTARY))
+                   seed=num("ao_seed", default=0), tick_s=num("ao_tick_s", cast=float, default=cls.tick_s), ref_pooled=spec.get("split_mode") == "pooled", finalize=gatecfg.finalize_enabled(spec),
+                   params=params, caps=caps, p2=p2, pipeline=num("ao_pipeline", default=1),
+                   cost_eps=cost_eps, merge_bar=num("ao_merge_bar", cast=float, default=policy.COMPLEMENTARY),
+                   focus=bool(spec.get("ao_focus")), focus_n=num("ao_focus_n", default=1),
+                   focus_max=num("ao_focus_max", default=3), focus_canary=num("ao_focus_canary", default=6),
+                   focus_accept_min=num("ao_focus_accept_min", default=2))
 
 
 def refuse_multi_objective(spec: dict) -> float | None:
@@ -178,6 +192,7 @@ class Backend:
     def register(self, job: dict, result: dict) -> dict: raise NotImplementedError
     def node_event(self, tag: str, status: str, **kw) -> None: raise NotImplementedError
     def commit_accept(self, tag: str, evidence: dict) -> None: raise NotImplementedError
+    def restore_champion(self, tag: str) -> None: pass             # a reverted promotion: the run's best is ``tag`` again
     def commit_reject(self, tag: str, reason: str, evidence: dict) -> None: raise NotImplementedError
     def discard(self, tag: str) -> None: pass
     def merge_build(self, a: str, b: str, tag: str, kind: str) -> dict: raise NotImplementedError
@@ -186,6 +201,10 @@ class Backend:
     def recover(self) -> None: pass
     def finalize(self, champion: str) -> dict: raise NotImplementedError
     def finalized(self) -> bool: raise NotImplementedError
+    def skip_finalize(self, champion: str) -> dict:
+        """``finalize: false``: record the champion, score nothing."""
+        self.log("finalize_skipped", reason="spec", champion=champion)
+        return {"champion": champion, "finalized": False, "reason": "spec"}
     def log(self, event: str, **kw) -> None: pass
     def initial_champion(self) -> str: return "seed"
     def remaining_rollouts(self) -> int | None: return None      # P2: what the run dir has left after reservations
@@ -358,9 +377,10 @@ class Conductor:
             j["result"] = {k: v for k, v in res.items() if k != "stdout"}
             j["state"] = "done" if res.get("ok", True) else "failed"
             j["reserved_rollouts"] = 0
-            tok = int(res.get("tokens") or 0)
+            tok = int(res.get("tokens") or 0)                  # non-cache-read: input + output + cache creation
             if j["kind"] in ("propose", "merge", "diagnose"):
                 self.st["tokens_committed"] = int(self.st.get("tokens_committed", 0)) + tok
+                self.st["cache_read_committed"] = int(self.st.get("cache_read_committed", 0)) + int(res.get("cache_read_tokens") or 0)
                 j["reserved_tokens"] = 0
             getattr(self, f"_reaped_{j['kind']}", lambda *_: None)(j, res)
 
@@ -379,9 +399,25 @@ class Conductor:
         if j["kind"] in ("propose", "merge"):
             self._lost_proposal(j)
 
+    def _missing(self, tag, ids, window) -> dict:
+        """``b.missing`` minus cells dropped after ``eval_retries`` runs that never landed (a rollout that
+        always errors): missing data, which ``paired_deltas`` already drops, never a wait forever."""
+        drop = self.st.get("dropped_cells", {})
+        lo, hi = window_key(window)
+        return {t: k for t, k in self.b.missing(tag, ids, window).items() if f"{tag}|{t}|{lo}|{hi}" not in drop}
+
     def _reaped_eval(self, j, res) -> None:
         if j.get("p2seq") or j.get("p2"):
             return self._p2_reaped(j, res)
+        if res.get("ok", True):
+            lo, hi = window_key(j["window"])
+            tries, drop = self.st.setdefault("cell_tries", {}), self.st.setdefault("dropped_cells", {})
+            for t in self.b.missing(j["tag"], j["ids"], j["window"]):
+                key = f"{j['tag']}|{t}|{lo}|{hi}"
+                tries[key] = tries.get(key, 0) + 1
+                if tries[key] >= self.cfg.eval_retries and key not in drop:
+                    drop[key] = tries[key]
+                    self.b.log("cell_dropped", tag=j["tag"], task=t, window=[lo, hi], tries=tries[key])
         n = self.st["nodes"].get(j.get("owner"))
         if not res.get("ok", True) and n is not None:
             n["eval_failures"] = int(n.get("eval_failures", 0)) + 1
@@ -394,8 +430,18 @@ class Conductor:
         if not out.get("ok"):
             att = self.st.setdefault("attempts", {})
             att[tag] = att.get(tag, 0) + 1
-            self.b.log("proposal_failed", tag=tag, why=out.get("refused"), attempt=att[tag])
-            self.st["idle_proposals"] = int(self.st.get("idle_proposals", 0)) + 1      # refused / duplicate / failed
+            detail = str(out.get("detail") or res.get("tail") or "")[:300] if not res.get("ok", True) or out.get("detail") else ""
+            self.b.log("proposal_failed", tag=tag, why=out.get("refused"), attempt=att[tag], detail=detail)
+            self.st.setdefault("refusals", {})[tag] = {"why": out.get("refused"), "detail": detail, "attempt": att[tag]}
+            if out.get("refused") in SCHEMA_REFUSALS:
+                # a paperwork refusal (hypothesis schema/validation, size rule) is not "the proposer cannot
+                # produce an edit": it is retried with its reason and does not feed the idle stop, except
+                # as a runaway guard after many in a row (a live run stopped on 27 identical refusals)
+                n = self.st["schema_refusals"] = int(self.st.get("schema_refusals", 0)) + 1
+                if self.cfg.caps.max_idle and n > SCHEMA_REFUSAL_FACTOR * self.cfg.caps.max_idle:
+                    self.st["idle_proposals"] = int(self.st.get("idle_proposals", 0)) + 1
+            else:
+                self.st["idle_proposals"] = int(self.st.get("idle_proposals", 0)) + 1  # no edit / duplicate / failed
             if out.get("refused") == "duplicate":
                 self.st["dup_refused"] = int(self.st.get("dup_refused", 0)) + 1
             if att[tag] > self.cfg.propose_retries or out.get("refused") == "duplicate":
@@ -426,6 +472,7 @@ class Conductor:
                 self.st["proposals_since_improve"] += 1
                 return
         self.st["idle_proposals"] = 0                                # a new evaluable candidate ends the idle streak
+        self.st["schema_refusals"] = 0
         parents = out.get("parents") or [j.get("parent") or self.champion]
         self.st["nodes"][tag] = {
             "tag": tag, "parents": parents, "parent": parents[0], "edit_kind": j.get("edit_kind", "edit"),
@@ -461,10 +508,12 @@ class Conductor:
         if self.cfg.p2:
             self._p2_step()
             return
+        if self.cfg.focus:
+            self._check_fill()
         for tag in sorted(self.st["nodes"]):
             n = self.st["nodes"][tag]
             if n["status"] in ("proposed", "rung", "full", "stale") and not self._is_base(tag):
-                self._advance(tag, n)
+                (self._advance_focus if self.cfg.focus else self._advance)(tag, n)
         for tag in sorted(self.st["nodes"]):
             n = self.st["nodes"][tag]
             if n["status"] == "confirming":
@@ -497,7 +546,7 @@ class Conductor:
         for _ in range(len(self.cfg.rungs) + 2):
             ids = self._stage_ids(n)
             full = ids == self.screen_ids()
-            if self.b.missing(tag, ids, (0, self.cfg.screen_n)) or self.b.missing(self.champion, ids, self.ref_want(self.champion)):
+            if self._missing(tag, ids, (0, self.cfg.screen_n)) or self._missing(self.champion, ids, self.ref_want(self.champion)):
                 n["status"] = "rung" if not full else "full"
                 return
             deltas = policy.paired_deltas(self._cand_rewards(tag, ids), self._ref(), ids)
@@ -526,6 +575,95 @@ class Conductor:
                 self.b.node_event(tag, "gated", stage="screened", mean_delta=round(s["mean"], 6), se=round(s["se"], 6))
             return
 
+    # ---- focus rule (ao_focus) -------------------------------------------------------------
+    def _check_fill(self, unfunded: bool = False) -> None:
+        """A focus promotion is tentative until the new champion's fresh fill (all tasks, unselected trials)
+        beats the previous champion's reference on every task: paired mean - FILL_Z*se > 0. Catches a lucky
+        look and regressions outside the canary sample at no extra cost (the fill runs anyway); else revert."""
+        champ = self.champion
+        n = self.node(champ)
+        prev = n.get("fill_check")
+        ids = self.screen_ids()
+        if not prev or (self._missing(champ, ids, self.ref_want(champ)) and not unfunded):
+            return
+        d = policy.paired_deltas(self.b.rewards(champ, ids, self.ref_window(champ)),
+                                 self.b.rewards(prev, ids, self.ref_window(prev)), ids)
+        m, se, k = policy.mean_se(d, policy.FOCUS_SD_FLOOR)
+        ev = {"stage": "fill_check", "fill_mean_delta": round(m, 4), "se": round(se, 4), "n": k}
+        n.pop("fill_check")
+        if k and m - policy.FILL_Z * se > 0 and not unfunded:
+            n["fill"] = ev
+            self.b.node_event(champ, "gated", **ev, kept=True)
+            return
+        self._finish_node(champ, "rejected", "fill_unfunded" if unfunded else "fill_reject", ev)
+        self.node(prev)["status"] = "champion"
+        self.st.update(champion=prev, epoch=self.st["epoch"] + 1)
+        self.b.restore_champion(prev)          # commit.py moved the run's best_id on the accept; undo it
+        self.b.log("promotion_reverted", tag=champ, back_to=prev, **ev)
+
+    def _focus_ids(self, n) -> tuple[list[str], list[str]]:
+        """(focus, canaries) against the CURRENT champion, frozen per node per epoch: focus = tasks the
+        champion does not always pass (all its draws), canaries = ``focus_canary`` of its passing tasks."""
+        if n.get("focus_epoch") != self.st["epoch"]:
+            ref = self.b.rewards(self.champion, self.screen_ids(), self.ref_window(self.champion))
+            mean = {t: sum(v) / len(v) for t, v in ref.items() if v}
+            focus = sorted(t for t, m in mean.items() if m < 1.0)
+            passing = sorted(t for t, m in mean.items() if m >= 1.0)
+            canary = sorted(random.Random(f"{self.cfg.seed}:{n.get('tag', '')}:{self.st['epoch']}").sample(
+                passing, min(self.cfg.focus_canary, len(passing))))
+            n.update(focus_ids=focus, canary_ids=canary, focus_epoch=self.st["epoch"], n_pass=len(passing),
+                     trials=self.cfg.focus_n, rung=0)
+        return n["focus_ids"], n["canary_ids"]
+
+    def _advance_focus(self, tag, n) -> None:
+        """Judge ``tag`` on the champion's failing tasks (+ canaries) only, and promote directly: a real
+        fix is a large per-task jump there, invisible in a 30-task mean. Looks at ``focus_n`` ..
+        ``focus_max`` trials per cell; the champion's reference is all of its draws."""
+        n.setdefault("tag", tag)
+        if self._missing(self.champion, self.screen_ids(), self.ref_want(self.champion)):   # a new champion's fresh fill first
+            n["status"] = "rung"
+            return
+        focus, canary = self._focus_ids(n)
+        ids = focus + canary
+        if not focus:                     # the champion passes every task: nothing left this rule can promote on
+            self._finish_node(tag, "pruned", "no_focus_targets", {"stage": "focus"})
+            return
+        if self._missing(tag, ids, (0, n["trials"])):
+            n["status"] = "rung"
+            return
+        ref = self.b.rewards(self.champion, ids, self.ref_window(self.champion))
+        cand = self.b.rewards(tag, ids, (0, n["trials"]))
+        v = policy.focus_verdict(policy.paired_deltas(cand, ref, focus), policy.paired_deltas(cand, ref, canary),
+                                 len(self.screen_ids()), n["n_pass"])
+        n["p_beat"], n["focus"] = v["p_beat"], {k: v[k] for k in ("gain", "mean", "se", "canary", "n")}
+        route = "reward"
+        if v["verdict"] == "accept" and n["trials"] < self.cfg.focus_accept_min:
+            v["verdict"] = "more"                 # one trial per cell kills, never accepts: too noisy (seen live)
+        if v["verdict"] == "accept" and self.cfg.cost_eps is not None:
+            cps = self._cps(tag, ids, (0, n["trials"]), self.champion, self.ref_window(self.champion))
+            ok, route = policy.mo_verdict(True, v["mean"], v["se"], v["n"], cps, self.cfg.cost_eps, 1.0)
+            n["focus"]["cost_rel"] = round(cps.get("rel", 0.0), 4)
+            if not ok:
+                v["verdict"] = "kill"
+        ev = {"stage": f"focus@{n['trials']}", "gain": round(v["gain"], 4), "route": route, **n["focus"]}
+        if v["verdict"] == "accept":
+            self.b.commit_accept(tag, ev)
+            old = self.champion
+            self._finish_node(tag, "champion", "promoted", ev)
+            self.node(old)["status"] = "superseded"
+            # its reference is a FRESH unselected fill, never the trials that won it the promotion (those
+            # are selected upward: reusing them inflated the champion by ~0.1 per promotion in simulation)
+            k = FILL_BASE + 10 * (self.st["epoch"] + 1)
+            n["ref_window"] = [k, k + FILL_N]
+            n["fill_check"] = old                 # the fill must confirm the gain on EVERY task, else revert
+            self.st.update(champion=tag, epoch=self.st["epoch"] + 1, proposals_since_improve=0)
+        elif v["verdict"] == "kill" or n["trials"] >= self.cfg.focus_max:
+            self._finish_node(tag, "pruned", "focus_" + (route if route != "reward" else v["why"]), ev)
+        else:
+            n["trials"] += 1
+            n["rung"] += 1
+            n["status"] = "rung"
+
     def _start_confirms(self) -> None:
         busy = [t for t, n in self.st["nodes"].items() if n["status"] == "confirming"]
         free = self.cfg.max_confirm - len(busy)
@@ -549,7 +687,7 @@ class Conductor:
         ids = self.b.confirm_ids()
         w = (n["k0"], n["k0"] + self.cfg.params.n_conf)
         ref = n["ref"]
-        if self.b.missing(tag, ids, w) or self.b.missing(ref, ids, w):
+        if self._missing(tag, ids, w) or self._missing(ref, ids, w):
             return
         deltas = policy.paired_deltas(self.b.rewards(tag, ids, w), self.b.rewards(ref, ids, w), ids)
         p = self.cfg.params
@@ -597,14 +735,22 @@ class Conductor:
             key = f"{tip}>{self.champion}"
             if n.get("edit_kind") in ("rebase", "merge") or key in done or n["status"] in ("confirming", "racing"):
                 continue
-            if self._merge_jobs() >= 1:
+            if self._merge_jobs() >= 1 or not self._merge_room():
                 return
             done.append(key)
+            if self.b.related(tip, self.champion):      # the champion is already in its lineage (e.g. a revert)
+                continue
             self._do_merge(tip, self.champion, "rebase")
         self.st["rebased_epoch"] = self.st["epoch"]
 
+    def _merge_room(self) -> bool:
+        """Merges and rebases are candidates too: they count toward ``max_candidates`` and may add at most
+        one node beyond the alive cap (seen live: unbounded near-miss merging queued ~40 nodes)."""
+        cap = self.cfg.caps.max_candidates
+        return not (cap and self.st["n_proposals"] >= cap) and self.in_flight_nodes() < self.cfg.alive_cap + 1
+
     def merge(self) -> None:
-        if not self.cfg.merge or self._merge_jobs() >= 1:
+        if not self.cfg.merge or self._merge_jobs() >= 1 or not self._merge_room():
             return
         tips = self.alive_tips()
         wins = self.b.wins(tips, self.champion)
@@ -614,12 +760,21 @@ class Conductor:
                   for n in self.st["nodes"].values())
         if not policy.merge_allowed(nm, self.st["n_proposals"], won):
             return
-        if self.cfg.p2:       # a P2 node has been through its rungs when it is pending after a round
+        if self.cfg.focus:    # near misses: candidates that fixed failing tasks of THIS champion but not enough alone
+            tips = sorted(t for t, n in self.st["nodes"].items() if not self._is_base(t) and t != self.champion
+                          and n.get("focus_epoch") == self.st["epoch"] and (n.get("focus") or {}).get("gain", 0) > 0
+                          and n["status"] in ("pruned", "rung") and n.get("edit_kind", "edit") == "edit")
+            wins = self.b.wins(tips, self.champion)
+            eligible = tips
+        elif self.cfg.p2:     # a P2 node has been through its rungs when it is pending after a round
             eligible = [t for t in tips if self.node(t)["status"] == "unconfirmed" or self.node(t).get("unconfirmed")]
         else:
             eligible = [t for t in tips if self.node(t)["status"] == "screened"
                         or (self.node(t)["status"] in ("full", "rung") and self.node(t).get("rung", 0) >= 1)]
-        pairs = policy.merge_pairs(eligible, wins, self.b.related, merged, bar=self.cfg.merge_bar)
+        pairs = policy.merge_pairs(eligible, wins, self.b.related, merged, bar=self.cfg.merge_bar, limit=10)
+        if self.cfg.focus:    # only a pair whose gains TOGETHER could clear the accept bar is worth an evaluation
+            g = lambda t: (self.node(t).get("focus") or {}).get("gain", 0.0)  # noqa: E731
+            pairs = [p for p in pairs if g(p[0]) + g(p[1]) >= policy.FOCUS_MIN_GAIN]
         if pairs:
             a, b, _ = pairs[0]
             self.st.setdefault("merged_pairs", []).append(sorted((a, b)))
@@ -664,20 +819,28 @@ class Conductor:
                 out.append((1, tag, tag, cids, w, tag, "confirm"))
                 out.append((1, tag, n["ref"], cids, w, tag, "confirm"))
             elif n["status"] in ("proposed", "rung", "full", "stale") and not self._is_base(tag):
-                sids = self._stage_ids(n)
-                out.append((2, f"{-n.get('p_beat', 0.5):+.6f}:{tag}", tag, sids, (0, self.cfg.screen_n), tag, "rung"))
+                if self.cfg.focus:
+                    if self._missing(champ, ids, self.ref_want(champ)):
+                        continue                                  # wait for the champion's fill (priority 0)
+                    n.setdefault("tag", tag)
+                    f, c = self._focus_ids(n)
+                    sids, w = f + c, (0, n["trials"])
+                else:
+                    sids, w = self._stage_ids(n), (0, self.cfg.screen_n)
+                out.append((2, f"{-n.get('p_beat', 0.5):+.6f}:{tag}", tag, sids, w, tag, "rung"))
         return sorted(out, key=lambda w: (w[0], w[1]))
 
     def launch_evals(self) -> None:
         if self.cfg.p2:
             self._p2_launch()
             return
-        if self.st.get("stopped"):
-            wants = [w for w in self._wants() if w[6] == "confirm"]
+        if self.st.get("stopped"):           # finish confirmations, and a pending focus fill check
+            fill = bool(self.cfg.focus and self.node(self.champion).get("fill_check"))
+            wants = [w for w in self._wants() if w[6] == "confirm" or (fill and w[6] == "baseline")]
         else:
             wants = self._wants()
         for prio, _k, tag, ids, window, owner, purpose in wants:
-            miss = self.b.missing(tag, ids, window)
+            miss = self._missing(tag, ids, window)
             for t in self._inflight(tag, window):
                 miss.pop(t, None)
             for ch in policy.chunks(miss, self.cfg.chunk):
@@ -884,7 +1047,8 @@ class Conductor:
                 if self.st.get("attempts", {}).get(j["tag"], 0) > self.cfg.propose_retries:
                     self._give_up(j["tag"], j)
                     continue
-                self._launch_propose(j["tag"], j["parent"], j.get("slot", 0), retry=True, edit_kind=j.get("edit_kind", "edit"))
+                self._launch_propose(j["tag"], j["parent"], j.get("slot", 0), retry=True, edit_kind=j.get("edit_kind", "edit"),
+                                     refusal=(self.st.get("refusals", {}).get(j["tag"]) or {}).get("detail", ""))
         while True:
             live = cs.live(self.st, "propose") + cs.live(self.st, "merge")
             if len(live) >= self.cfg.k_prop or self.in_flight_nodes() + len(live) >= self.cfg.alive_cap:
@@ -893,6 +1057,8 @@ class Conductor:
                 return
             if cap.max_candidates and self.st["n_proposals"] >= cap.max_candidates:
                 return
+            if cap.max_idle and int(self.st.get("idle_proposals", 0)) >= cap.max_idle:
+                return                      # exhausted: stop proposing; the run ends once in-flight nodes are decided
             used = {j.get("slot") for j in cs.live(self.st, "propose")}
             slot = next(i for i in range(self.cfg.k_prop) if i not in used)
             tag = self.new_tag()
@@ -908,9 +1074,9 @@ class Conductor:
         return cs.tokens_fit({"tokens_committed": self.tokens_used(), "jobs": self.st["jobs"]}, self.cfg.job_token_cap,
                              c.max_tokens, c.finalize_tokens)
 
-    def _launch_propose(self, tag, parent, slot, retry=False, edit_kind="edit") -> None:
+    def _launch_propose(self, tag, parent, slot, retry=False, edit_kind="edit", refusal="") -> None:
         j = cs.new_job(self.st, "propose", tag=tag, parent=parent, slot=slot, retry=False, edit_kind=edit_kind,
-                       strict=retry, reserved_tokens=self.cfg.job_token_cap, reserved_rollouts=0)
+                       strict=retry, refusal=refusal, reserved_tokens=self.cfg.job_token_cap, reserved_rollouts=0)
         self._start(j)
 
     # ---- 6. stop / drain / finish -------------------------------------------------------
@@ -940,8 +1106,8 @@ class Conductor:
         confirming = [t for t, n in self.st["nodes"].items() if n["status"] == "confirming"]
         for t in confirming:
             n = self.node(t)
-            if not cs.live(self.st, "eval") and (self.b.missing(t, self.b.confirm_ids(), (n["k0"], n["k0"] + self.cfg.params.n_conf))
-                                                or self.b.missing(n["ref"], self.b.confirm_ids(), (n["k0"], n["k0"] + self.cfg.params.n_conf))):
+            if not cs.live(self.st, "eval") and (self._missing(t, self.b.confirm_ids(), (n["k0"], n["k0"] + self.cfg.params.n_conf))
+                                                or self._missing(n["ref"], self.b.confirm_ids(), (n["k0"], n["k0"] + self.cfg.params.n_conf))):
                 if not self._confirm_launchable(t, n):
                     n["status"] = "unconfirmed"
                     n["reserved"] = 0
@@ -951,11 +1117,20 @@ class Conductor:
             if r and r["stage"] not in ("confirm", "seq"):
                 self._p2_abandon_round(r, "stopped before the round reached its confirmation")
             return not cs.live(self.st) and not self.st.get("round")
+        if self.cfg.focus:
+            self._check_fill()
+            if self.node(self.champion).get("fill_check"):
+                need = sum(self._missing(self.champion, self.screen_ids(), self.ref_want(self.champion)).values())
+                if cs.live(self.st, "eval") or self.fits(need):
+                    return False                     # running, or launches next tick
+                self._check_fill(unfunded=True)      # the fill cannot be funded: an unverified promotion reverts
         return not cs.live(self.st) and not any(n["status"] == "confirming" for n in self.st["nodes"].values())
 
     def _keep_on_drain(self, j) -> bool:
         if j["kind"] != "eval":
             return False
+        if self.cfg.focus and j.get("purpose") == "baseline" and self.node(self.champion).get("fill_check"):
+            return True                    # the new champion's fill decides whether its promotion stands
         if self.cfg.p2:
             r = self.st.get("round")
             return bool(r) and r["stage"] in ("confirm", "seq") and j.get("round") == r["id"]
@@ -968,7 +1143,10 @@ class Conductor:
         for t, n in self.st["nodes"].items():
             if n["status"] in PRE_CONFIRM and not self._is_base(t):
                 self.b.node_event(t, "gated" if n["status"] == "screened" else "proposed", stage="pending_at_stop")
-        if not self.b.finalized():
+        if not self.cfg.finalize:
+            if not self.st.get("final_skipped"):
+                self.st["final_skipped"] = self.b.skip_finalize(self.champion)
+        elif not self.b.finalized():
             try:
                 self.st["final"] = self.b.finalize(self.champion)
             except Refused as e:                 # retrying cannot help: stop the supervisor instead of looping it

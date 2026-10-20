@@ -8,7 +8,46 @@ All notable changes to cap-evolve are documented here. The format follows
 [0.1.0]: https://github.com/skillberry-ai/cap-evolve/releases/tag/v0.1.0
 
 ## [Unreleased]
+### Reverted (V4 hill-climb changes, #880)
+- Removed the cost-aware acceptance (`cost_lambda`, `cost_accept`, `costaware.py`), the compress operators (`hc_compress_every`,
+  `hc2_compress_every`, `ao_compress_every`), the budget-driven iteration cap (`max_iterations` omitted), the shrunk direct final HC-2 round,
+  `hc2_plateau_rounds`, the `p2_extend_z` / `p2_reuse_control` options and the widened proposer edit-kinds guidance. Stock hill-climb,
+  HC-2 and agent-optimize behave as at a7a83846f / ac1f1f40c. On tau2 airline the V4 held-out gain was +0.080 against +0.131 for V3.
+- Kept from #880: the diversity gate compares ADDED lines, a P2 job gets one in-thread retry, tau2 native-sim result files are named by
+  process, thread and a random suffix.
+### Fixed
+- AO-2 no longer ends a search on hypothesis paperwork: the proposer prompt lists the valid `cluster_ids` (with
+  labels); an unknown or empty `cluster_ids`, out-of-cluster `predicted_tasks`, or a missing/unreadable
+  `hypothesis.json` is repaired with a warning and the candidate is evaluated (`act.py propose
+  --lenient-hypothesis`, passed by the conductor; `ao_strict_hypothesis: true` restores the refusal); such
+  refusals and the size rule no longer count toward `ao_max_idle_proposals` (a runaway guard of 5x that many in
+  a row remains).
+- AO-2 proposer and merge jobs now receive the project's own `optimizer/INSTRUCTIONS.md` (its benchmark facts
+  and constraints) as a delimited section of the job prompt, as the hill-climb path and the agent host already
+  did; template placeholders are dropped and the section is capped at 6 KiB. `ao_project_instructions: false`
+  turns it off.
 ### Added
+- **HC-2/AO-2 gain fixes (search-time diagnosis)**: `hc2_broad_slot` (one proposal per round sees the failing
+  traces of ALL clusters), `hc2_cross_traces` (cluster slots also see traces of the other clusters; the
+  "address only the cluster below" instruction is gone), `hc2_merge_survivors` (positive-screen candidates of a
+  round are 3-way merged into one candidate of the next), `hc2_cheap_accept` (accept on the rung-2 screen and
+  validate the accepted chain once on C at the end; default off), and `num_trials` honoured by every P2 stage
+  (rung sizes are tasks, each run `num_trials` times; control, incumbent draws and confirmation get at least
+  that many per task). AO-2: proposals are bounded to one round by default (`ao_pipeline: 1`), near-duplicate
+  proposals are refused (`ao_diversity_threshold` 0.6), the derived plateau stop is gone (only an explicit `ao_plateau_n` stops a run early).
+### Changed
+- The default optimizer `INSTRUCTIONS.md`, the capability skills and the AO proposer prompt ask for the edit with
+  the largest expected reward gain on the whole task distribution (REAL and GENERAL), drop the
+  SAFE / narrowest-lever / "never loosen" framing and the demand to run what the sandbox cannot run, and apply the
+  tools.py checklist to code surfaces only.
+### Fixed
+- `helper_smoke` no longer rejects helpers that import numpy, pandas or openpyxl (`import ctypes` opens the
+  interpreter's own handle, which fired the `ctypes.dlopen` audit event).
+- `P2Evaluator.plan_round` degrades the incumbent's F top-up before reporting a round unfundable (after a
+  promotion the new incumbent has few F draws; the full top-up used to end the search with up to 40% of the
+  budget unspent).
+- The derived AO-2 plateau rule reduced to `spent_frac >= floor` while no champion existed and stopped every
+  unaccepted search at 41% of the budget; it is removed.
 - **Deterministic helper code in editable surfaces (opt-in)**: spec `helpers.enabled` (or
   `CAPEVOLVE_HELPERS=1`) and `surface.executable_dirs`. Adds `cap_evolve.helpers` (surface manifest,
   lint, kernel bootstrap of skills, `@candidate_helper` fault tag, per-task reward variance) and the

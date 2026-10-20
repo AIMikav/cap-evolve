@@ -9,16 +9,33 @@ a <= 1.5k-token digest, the parent's identity and four rules. No SKILL.md is rea
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
-MAX_PROMPT_BYTES = 3072
+MAX_PROMPT_BYTES = 7168
 HYPOTHESIS_FILE = "hypothesis.json"
 
+PROCEDURE = """Procedure (do every step; you may use subagents to read traces in parallel):
+1. Read the failing traces listed above (./trajectories). For each failing task find the turn where the agent goes
+   wrong; the trace's reward breakdown (action checks, state assertions, required communication) is the ground truth.
+2. Group the failing tasks by root cause and fix as MANY groups as you can in this ONE edit, your primary tasks first.
+   A small edit is refused: change >= {min_lines} capability lines and predict >= {min_tasks} fixed tasks.
+   You are judged on how many of the parent's failing tasks your edit fixes, net of any passing task it breaks.
+3. On a code surface, prefer code over prose: where the agent computes prices/totals, looks things up or checks eligibility in its head,
+   add a deterministic tool (or make an existing tool return the needed fields / validate the call) plus one policy
+   line saying when to use it. Wording-only edits rarely move these tasks.
+4. Aim for the edit with the largest expected reward gain on the whole task distribution, not for these tasks alone.
+   Keep a change only if it is REAL (a failing trace shows the problem) and general (a rule for the class; no task id,
+   expected answer or copied value). Glance at a passing trace that uses the same rule; the conductor measures regressions.
+5. Read each task in predicted_tasks against your edit and name the turn it changes; drop tasks you cannot.
+"""
+
 RULES = """Rules:
-- One coherent edit for ONE hypothesis. General rules only: never a task id, an expected answer or a copied value.
+- A hypothesis already attempted (see rejected) needs a different mechanism, not new wording.
 - Edit only inside {workdir}. Do NOT run evaluations, sleep, poll or wait: the conductor evaluates your edit.
-- Finish by writing {workdir}/hypothesis.json: {{"id","cluster_ids":[...],"claim","predicted_tasks":[...],"predicted_mechanism","edit_scope"}}, then stop.
-- Reasoning about failures: read traces under ./trajectories if present (feedback tasks only; held-out data is not available)."""
+- REQUIRED, the candidate is refused without it: finish by writing {workdir}/hypothesis.json (valid JSON, exactly this name, even when no clusters.json exists): {{"id","cluster_ids":[...],"claim","predicted_tasks":[...],"predicted_mechanism","edit_scope"}}, then stop.
+- ./trajectories holds the parent's traces (feedback tasks only; held-out data is not available); ./guidance has the
+  capability guides and data-model sources."""
 
 STRICT = "\nYour previous attempt produced no usable candidate. This time the edit MUST change a capability file and hypothesis.json MUST exist."
 
@@ -30,29 +47,111 @@ def pick_cluster(digest_dict: dict, slot: int, taken: set[str]) -> dict | None:
     return rows[slot % len(rows)] if rows else None
 
 
+def failing_block(rates: dict, traces: dict, primary: list, rejected: list) -> str:
+    """The data a proposer needs inline: the parent's pass rate on every task it does not always pass,
+    the failing trace files to read, this slot's primary tasks, and what was already tried."""
+    rows = [f"{t}: {sum(v):g}/{len(v)}" for t, v in sorted(rates.items(), key=lambda kv: (sum(kv[1]) / len(kv[1]), kv[0]))
+            if v and sum(v) < len(v)]
+    out = [f"Parent's failing tasks (passes/trials): {', '.join(rows) or 'none'}."]
+    if primary:
+        out.append(f"Your PRIMARY tasks (sibling jobs take the others): {', '.join(primary)}.")
+    files = [f for t in (primary or sorted(traces)) for f in traces.get(t, [])]
+    if files:
+        out.append("Failing traces to read first: " + ", ".join(files) + ".")
+    if rejected:
+        out.append("Already tried and rejected (measured): " + " | ".join(rejected) + ".")
+    return "\n".join(out)
+
+
+PROJECT_MAX_BYTES = 6144
+_PLACEHOLDER = re.compile(r"\{\{[A-Z_]+\}\}")
+
+
+def project_instructions_section(text: str, max_bytes: int = PROJECT_MAX_BYTES) -> str:
+    """The project's own ``optimizer/INSTRUCTIONS.md`` (its benchmark facts and constraints) as a delimited
+    section of a job prompt. Template placeholders (``{{FAILURES}}``...) belong to the hill-climb prompt builder
+    and are dropped; the text is cut at ``max_bytes`` (the facts come first). Empty text gives ''."""
+    lines = []
+    for ln in (text or "").splitlines():
+        if _PLACEHOLDER.fullmatch(ln.strip()):
+            continue
+        lines.append(_PLACEHOLDER.sub("", ln))
+    body = "\n".join(lines).strip()
+    if not body:
+        return ""
+    data = body.encode("utf-8")
+    if len(data) > max_bytes:
+        body = data[:max_bytes].decode("utf-8", "ignore").rstrip() + "\n[... project instructions cut ...]"
+    return ("\n\n=== Project instructions from the user (benchmark facts and constraints; they bind every edit. "
+            "Where they describe iteration files such as JOURNAL.md or PROCESS.md, follow the procedure above "
+            "instead) ===\n" + body + "\n=== end of project instructions ===\n")
+
+
+def clusters_block(valid_clusters) -> str:
+    """The cluster ids hypothesis.json may cite (``[(id, label)]``), so the proposer never has to guess them."""
+    rows = [f"- {cid}: {str(label or '')[:100]}" for cid, label in valid_clusters or []]
+    if not rows:
+        return ""
+    return ("Valid cluster_ids for hypothesis.json (cite only these ids; an id not listed is dropped):\n"
+            + "\n".join(rows[:12]) + "\n")
+
+
 def build_prompt(*, workdir, parent: str, cluster: dict | None, digest_text: str = "", strict: bool = False,
-                 kind: str = "propose", conflicts: list | None = None) -> str:
+                 kind: str = "propose", conflicts: list | None = None, refusal: str = "", failing: str = "",
+                 min_lines: int = 40, min_tasks: int = 3, project_instructions: str = "",
+                 valid_clusters: list | None = None) -> str:
     head = {
         "propose": f"You are proposing one edit to candidate {parent!r} (already copied into {workdir}).",
-        "merge": (f"{workdir} merges two branches and has conflicts in {', '.join(map(str, conflicts or []))}. "
-                  "Resolve each conflict so BOTH branches' intended changes survive; remove all conflict markers."),
+        "merge": (f"{workdir} is a copy of branch {parent!r}; merging another branch into it conflicts in: "
+                  f"{'; '.join(map(str, conflicts or []))}. Rewrite each conflicting part so BOTH branches' "
+                  "intended changes survive (read the other branch's version where given)."),
     }[kind]
     target = ""
     if cluster:
         target = (f"\nTarget cluster {cluster.get('id')}: {cluster.get('label') or ''}; failing tasks "
                   f"{', '.join(map(str, cluster.get('tasks') or []))}; headroom {cluster.get('headroom')}.")
-    body = f"{head}{target}\n\n{digest_text.strip()}\n\n{RULES.format(workdir=workdir)}"
+    proc = PROCEDURE.format(min_lines=min_lines, min_tasks=min_tasks) if kind == "propose" else ""
+    ids = clusters_block(valid_clusters) if kind == "propose" else ""
+    body = f"{head}{target}\n{failing}\n{ids}\n{digest_text.strip()}\n\n{proc}{RULES.format(workdir=workdir)}"
     if strict:
         body += STRICT
+    if refusal:
+        body += (f"\nYour previous attempt was refused: {refusal.strip()[:300]}\nFix exactly that, and write "
+                 f"{workdir}/hypothesis.json with the fields above.")
     data = body.encode("utf-8")
     if len(data) > MAX_PROMPT_BYTES:      # shrink the digest, never the rules
         room = MAX_PROMPT_BYTES - len(body.replace(digest_text, "").encode("utf-8")) - 16
         body = body.replace(digest_text, digest_text.encode("utf-8")[:max(room, 0)].decode("utf-8", "ignore") + "...")
-    return body
+    return body + project_instructions_section(project_instructions)      # its own cap; never squeezes the rules
+
+
+def capability_diff_lines(parent_dir, cand_dir) -> int:
+    """Changed (+/-, non-blank) lines between two capability dirs, counting only files inside sub-dirs
+    (policy/, tools/, ...): root-level memory files and read-only context dirs are not the edit."""
+    import difflib
+    skip = {"trajectories", "guidance", "prior_iterations", "__pycache__", ".claude", ".git"}
+
+    def files(d):
+        d = Path(d)
+        return {str(f.relative_to(d)): f for f in d.rglob("*") if f.is_file() and len(f.relative_to(d).parts) > 1
+                and f.relative_to(d).parts[0] not in skip and not f.relative_to(d).parts[0].startswith(".")}
+    a, b = files(parent_dir), files(cand_dir)
+    n = 0
+    for rel in set(a) | set(b):
+        try:
+            x = a[rel].read_text(encoding="utf-8").splitlines() if rel in a else []
+            y = b[rel].read_text(encoding="utf-8").splitlines() if rel in b else []
+        except (OSError, UnicodeDecodeError):
+            continue
+        n += sum(1 for ln in difflib.unified_diff(x, y, lineterm="", n=0)
+                 if ln[:1] in "+-" and not ln.startswith(("+++", "---")) and ln[1:].strip())
+    return n
 
 
 def read_hypothesis(workdir) -> dict | None:
     p = Path(workdir) / HYPOTHESIS_FILE
+    if not p.is_file():                      # a model may write HYPOTHESIS.json: same file, different case
+        p = next((q for q in sorted(Path(workdir).glob("*")) if q.name.lower() == HYPOTHESIS_FILE and q.is_file()), p)
     try:
         h = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -60,16 +159,28 @@ def read_hypothesis(workdir) -> dict | None:
     return h if isinstance(h, dict) else None
 
 
-def tokens_from_result(stdout: str) -> int:
-    """Billed optimizer tokens from run-optimizer's JSON report (``cost.tokens``); 0 when absent."""
+def usage_from_result(stdout: str) -> dict:
+    """``{tokens, cache_read}`` of a finished job from run-optimizer's JSON report (``cost``).
+
+    ``tokens`` is the campaign's registered basis: input + output + cache creation, i.e. NON-cache-read
+    (the same quantity as the 4M guard). run-optimizer's ``cost.tokens`` also contains the cache reads,
+    which are subtracted here and reported on their own; a job re-reads its context every turn, so
+    cache reads are ~95% of the raw total and would exhaust a cap that was sized on the other basis."""
     for line in reversed((stdout or "").strip().splitlines()):
         try:
             rec = json.loads(line)
         except ValueError:
             continue
         if isinstance(rec, dict):
-            return int(((rec.get("cost") or {}).get("tokens")) or 0)
-    return 0
+            cost = rec.get("cost") or {}
+            total, cache = int(cost.get("tokens") or 0), int(cost.get("cache_read_tokens") or 0)
+            return {"tokens": max(total - cache, 0), "cache_read": cache}
+    return {"tokens": 0, "cache_read": 0}
+
+
+def tokens_from_result(stdout: str) -> int:
+    """Non-cache-read tokens of a finished job (see ``usage_from_result``); 0 when absent."""
+    return usage_from_result(stdout)["tokens"]
 
 
 def _billed(usage: dict) -> int:

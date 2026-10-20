@@ -36,7 +36,7 @@ import act
 import conductor
 import digest
 import proposer
-from cap_evolve import RunDir, eval_index, graph, harness, optimizer_config
+from cap_evolve import RunDir, eval_index, graph, harness, optimizer_config, optimizer_cost
 from cap_evolve.candidate_graph import CandidateGraph
 from cap_evolve.specfile import spec_for_run
 
@@ -137,6 +137,10 @@ class RealBackend(P2Port, conductor.Backend):
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self.ns = argparse.Namespace(run_dir=str(self.root), project=str(project), strict=False)
         self.ctx = act.Ctx(self.ns)
+        if cfg.focus:
+            # focus proposals fix the PARENT's failing tasks across root causes, gated by _too_small; the
+            # cluster-membership hypothesis rule refused every such proposal live (predicted tasks span clusters)
+            self.ctx.cfg["failure_clustering"] = False
         self._rows: tuple = (None, [])
         self._hash: dict = {}
         self._threads: dict = {}
@@ -242,8 +246,9 @@ class RealBackend(P2Port, conductor.Backend):
 
     def eval_cmd(self, job) -> list[str]:
         tag, ids, (lo, hi) = job["tag"], job["ids"], job["window"]
-        if lo == 0:
-            return act.topup_cmd(self.ctx, tag, hi, ids)
+        # ponytail: always the exact trial window, never --topup-to (that numbers refills after the tag's
+        # highest k, so an errored trial 1 came back as trial 2 and the window [0, 2) waited forever).
+        # A partial refill re-runs the cells it already has; dedupe per cell if that waste ever matters.
         cmd = eval_index.eval_cmd(self.root, self.project, tag, "val", hi - lo, ids=ids, trial_offset=lo,
                                   fixed_seeds=True, skills_dir=SKILLS)
         cmd[cmd.index("--candidate") + 1] = str(digest.cand_dir(self.run_dir, tag))
@@ -264,13 +269,23 @@ class RealBackend(P2Port, conductor.Backend):
     def _start_llm(self, job):
         tag, parent, kind = job["tag"], job["parent"], job["kind"]
         work = self.ctx.work(tag)
-        if kind == "propose":
+        conflicts = job.get("conflicts")
+        if kind == "merge":
+            # merge_n stops on a conflict without writing a merge dir: the job edits a copy of the trunk
+            # and ports the donor's version of each conflicting block, read from the donor's own dir.
+            parent = job["parent"] = ((conflicts or [{}])[0].get("trunk") or [parent])[0]   # register() diffs against it
+            conflicts = [f"{c.get('where')} (port the version in {digest.cand_dir(self.run_dir, (c.get('donor') or ['?'])[0])})"
+                         if isinstance(c, dict) else str(c) for c in conflicts or []]
+        if kind == "propose" or (kind == "merge" and not work.exists()):
             if work.exists():
                 shutil.rmtree(work)                 # a retry starts from a clean copy of the parent
-            rc, out, err = act.sh([act.PY, HERE / "prepare_candidate.py", "-r", self.root, "-t", tag, "--parent", parent])
+            rc, out, err = act.sh([act.PY, HERE / "prepare_candidate.py", "-r", self.root, "-t", tag, "--parent", parent,
+                                   "--source", digest.cand_dir(self.run_dir, parent),     # an unpromoted tip lives in work/
+                                   "--allow-uncommitted-source"])
             if rc != 0:
                 raise RuntimeError(f"prepare_candidate failed: {(err or out)[-300:]}")
             (work.parent / f".parent_{tag}").write_text(parent)
+            self._inject_context(work, parent)
         try:
             dg, text = digest.fit(digest.build(self.run_dir, self.project, self.spec))
         except Exception:  # noqa: BLE001 - a digest failure must not stop a proposal
@@ -279,12 +294,20 @@ class RealBackend(P2Port, conductor.Backend):
             text = ("Objectives: reward first, then cost per success (agent USD per unit reward); an edit that "
                     "adds cost per success beyond " f"{self.cfg.cost_eps:.0%} is rejected even when reward rises.\n" + text)
         taken = {j.get("cluster") for j in conductor_jobs(self.root) if j.get("state") in ("queued", "running")}
-        cluster = proposer.pick_cluster(dg, int(job.get("slot") or 0), taken)
+        cluster = proposer.pick_cluster(dg, int(job.get("slot") or 0), taken) if kind == "propose" else None
         job["cluster"] = (cluster or {}).get("id")
         log, rcf, prompt = self._paths(job)
-        prompt.write_text(proposer.build_prompt(workdir=work, parent=parent, cluster=cluster, digest_text=text,
-                                                strict=bool(job.get("strict")), kind=kind,
-                                                conflicts=job.get("conflicts")), encoding="utf-8")
+        failing = self._failing_block(work, parent, int(job.get("slot") or 0)) if kind == "propose" else ""
+        body = proposer.build_prompt(workdir=work, parent=parent, cluster=cluster, digest_text=text,
+                                     strict=bool(job.get("strict")), kind=kind, conflicts=conflicts,
+                                     refusal=job.get("refusal") or "", failing=failing,
+                                     min_lines=int(self.spec.get("ao_min_edit_lines") or 40),
+                                     min_tasks=int(self.spec.get("ao_min_predicted") or 3),
+                                     project_instructions=self._project_instructions(),
+                                     valid_clusters=self._valid_clusters())
+        prompt.write_text(body, encoding="utf-8")
+        with contextlib.suppress(OSError):        # the injected CLAUDE.md says "read ./INSTRUCTIONS.md FIRST"
+            (work / "INSTRUCTIONS.md").write_text(body, encoding="utf-8")
         cmd = [act.PY, RUN_OPTIMIZER, "--name", self.optimizer, "--workdir", work, "--prompt", prompt, "--json",
                "--transcript", str(self.transcript(job))]
         turns = int(self.spec.get("optimizer_max_turns") or 40)
@@ -295,6 +318,28 @@ class RealBackend(P2Port, conductor.Backend):
         if self.spec.get("optimizer_model"):
             cmd += ["--model", str(self.spec["optimizer_model"])]
         return self._spawn(job, cmd)
+
+    def _valid_clusters(self) -> list:
+        """``[(cluster_id, label)]`` of the clusters.json that ``hypotheses.validate`` checks ids against."""
+        try:
+            cl = digest.load_clusters(self.run_dir) or []
+        except Exception:  # noqa: BLE001 - a prompt hint, never a reason to fail a proposal
+            return []
+        return [(c.get("cluster_id"), c.get("label") or c.get("signature") or c.get("tag") or "")
+                for c in cl if c.get("cluster_id")]
+
+    def _project_instructions(self) -> str:
+        """The project's optimizer INSTRUCTIONS.md (the user's benchmark facts and constraints), which the
+        hill-climb path and the agent host already hand to their optimizer. ``ao_project_instructions: false``
+        turns it off. Absent file: ''."""
+        if self.spec.get("ao_project_instructions", True) in (False, "false", "False", 0):
+            return ""
+        from cap_evolve.specfile import resolve_instructions_file
+        try:
+            path, exists, _ = resolve_instructions_file(self.spec, self.project)
+            return path.read_text(encoding="utf-8") if exists else ""
+        except OSError:
+            return ""
 
     def transcript(self, job) -> Path:
         return self.jobs_dir / f"{job['id']}.transcript.jsonl"
@@ -311,6 +356,49 @@ class RealBackend(P2Port, conductor.Backend):
 
     def running_tokens(self, job):
         return proposer.transcript_tokens(self.transcript(job))
+
+    def _failing_block(self, work, parent, slot) -> str:
+        """Per-task pass rates of the parent (all its ledger draws), its 0-reward trace files present in
+        ./trajectories (two per task), this slot's primary tasks (failing tasks dealt round-robin over the
+        ``k_prop`` slots, worst first) and the rejected hypotheses with their measured focus gain."""
+        try:
+            rows = [r for r in self._ledger() if r["cap_hash"] == self.cap_hash(parent) and r["split"] == "val"]
+            rates, zero = {}, {}
+            for r in sorted(rows, key=lambda r: int(r["trial_idx"])):
+                rates.setdefault(r["task"], []).append(float(r["reward"]))
+                if float(r["reward"]) < 1.0:
+                    zero.setdefault(r["task"], []).append(int(r["trial_idx"]))
+            have = {p.name for p in (work / "trajectories").glob("*.json")}
+            traces = {t: [f for f in (f"{t}__{parent}__t{k}.json" for k in ks) if f in have][:2] for t, ks in zero.items()}
+            failing = sorted((t for t, v in rates.items() if sum(v) < len(v)), key=lambda t: (sum(rates[t]) / len(rates[t]), t))
+            k = max(1, int(self.cfg.k_prop))
+            primary = [t for i, t in enumerate(failing) if i % k == slot % k]
+            rejected = []
+            st = json.loads((self.root / "conductor.json").read_text(encoding="utf-8"))
+            for t, n in sorted(st.get("nodes", {}).items()):
+                if n.get("status") in ("pruned", "rejected"):
+                    h = proposer.read_hypothesis(digest.cand_dir(self.run_dir, t)) or {}
+                    g = (n.get("focus") or {}).get("gain")
+                    rejected.append(f"{t}: {str(h.get('claim') or '')[:90]} -> {n.get('why')}"
+                                    + (f" gain {g:+.2f}" if g is not None else ""))
+            return proposer.failing_block(rates, traces, primary, rejected[-6:])
+        except Exception as e:  # noqa: BLE001 - never block a proposal on its context
+            self.run_dir.log_event("optimizer_context_warning", what="failing_block", error=str(e)[:300])
+            return ""
+
+    def _inject_context(self, work, parent) -> None:
+        """What a harness-driven optimizer gets in its work dir: the PARENT's feedback-split traces (F when pooled, else val) under
+        ./trajectories, capability guidance and data-model sources under ./guidance (none of it is
+        capability: cap_hash ignores both). Without it a proposer edits blind. Never fatal."""
+        try:
+            from cap_evolve.check import load_adapter
+            adapter = getattr(self, "_adapter", None) or load_adapter(self.project)
+            harness._inject_optimizer_context(
+                adapter, self.run_dir, work, split=harness.gate_split(self.run_dir), capabilities=list(self.spec.get("capabilities") or []),
+                optimizer_name=self.optimizer, capability_sources=list(self.spec.get("capability_sources") or []),
+                project_dir=self.project, tag=parent)
+        except Exception as e:  # noqa: BLE001
+            self.run_dir.log_event("optimizer_context_warning", what="conductor_inject", error=str(e)[:300])
 
     def alive(self, job):
         if job.get("p2") or job.get("p2seq"):
@@ -331,7 +419,10 @@ class RealBackend(P2Port, conductor.Backend):
         text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
         res = {"ok": rc == 0, "rc": rc, "tail": text[-400:]}
         if job["kind"] in ("propose", "merge"):
-            res["tokens"] = proposer.tokens_from_result(text)
+            res.update(zip(("tokens", "cache_read_tokens"), proposer.usage_from_result(text).values()))
+            tr = self.transcript(job)
+            if tr.exists():                    # bill THIS job's own transcript to the run (idempotent), nothing else
+                optimizer_cost.register(self.run_dir, str(tr))
         return res
 
     def kill(self, job):
@@ -357,8 +448,20 @@ class RealBackend(P2Port, conductor.Backend):
             return {"ok": False, "refused": bad[0], "detail": bad[1]}
         h = proposer.read_hypothesis(work)
         hyp = work / proposer.HYPOTHESIS_FILE
+        small = self._too_small(job, work, parent, h)
+        if small:
+            return {"ok": False, "refused": "too_small", "detail": small}
+        dup = self._near_duplicate(job, work, parent)
+        if dup:
+            return {"ok": False, "refused": "near_duplicate", "detail": dup}
+        stop, why = self.run_dir.budget_exhausted()
+        # the legacy per-commit max_iterations is not this engine's budget: its structured caps
+        # (max_candidates, max_metric_calls, tokens, usd) are. Seen live: 10 commits refused every proposal.
+        over = ("conductor: max_iterations is informational; structured caps bound the run"
+                if stop and why.startswith("max_iterations") else None)
         a = argparse.Namespace(**vars(self.ns), tag=tag, parent=parent, hypothesis_file=str(hyp) if h else None,
-                               small_edit_justification=None, over_budget=None, verb="propose")
+                               small_edit_justification=None, over_budget=over, verb="propose",
+                               lenient_hypothesis=not self.spec.get("ao_strict_hypothesis"))
         try:
             rc, out = act.propose(a, self.ctx)
         except act.Refused as e:
@@ -368,6 +471,40 @@ class RealBackend(P2Port, conductor.Backend):
         parents = [parent] if job["kind"] == "propose" else list(job.get("parents") or [parent])
         return {"ok": True, "hash": self.cap_hash(tag), "parents": parents, "hypothesis_id": out.get("hypothesis_id")}
 
+    def _near_duplicate(self, job, work, parent) -> str:
+        """Diversity gate (the HC-2 one): a proposal whose diff against its parent overlaps one of the last
+        ``ao_diversity_window`` (default 2 x K) registered diffs at/above ``ao_diversity_threshold`` (default
+        0.6; 0 = off) is refused, and relaunched with this reason. Accepted-for-evaluation diffs are
+        remembered in the run dir, so a resumed run keeps its memory."""
+        thr = float(self.spec.get("ao_diversity_threshold", 0.6) or 0.0)
+        if thr <= 0 or job["kind"] != "propose":
+            return ""
+        from cap_evolve import hc2
+        d = hc2.diff_lines(digest.cand_dir(self.run_dir, parent), work)
+        if not d:
+            return ""
+        memo = hc2.RejectedDiffs(self.run_dir)
+        win = int(self.spec.get("ao_diversity_window") or 0) or 2 * max(1, int(self.cfg.k_prop))
+        if hc2.near_duplicate(d, memo.last(win), thr) is not None:
+            return (f"near-duplicate: this edit overlaps one of the last {win} proposals at >= {thr:g}. Make a "
+                    "different kind of edit aimed at a different root cause (different failing tasks, a different "
+                    "mechanism), not a rewording.")
+        memo.add(job["tag"], d)
+        return ""
+
+    def _too_small(self, job, work, parent, h) -> str:
+        """Focus runs want LARGE edits: a proposal must change >= ``ao_min_edit_lines`` capability lines and
+        predict >= ``ao_min_predicted`` fixed tasks, or it is refused and retried with this reason."""
+        if job["kind"] != "propose" or not self.cfg.focus:
+            return ""
+        n = proposer.capability_diff_lines(digest.cand_dir(self.run_dir, parent), work)
+        k = len((h or {}).get("predicted_tasks") or [])
+        lo, kmin = int(self.spec.get("ao_min_edit_lines") or 40), int(self.spec.get("ao_min_predicted") or 3)
+        if n >= lo and k >= kmin:
+            return ""
+        return (f"edit too small: {n} changed capability lines (need >= {lo}) and {k} predicted tasks (need >= {kmin}). "
+                "Fix MORE of the parent's failing tasks in one edit (tools + policy), and list them in predicted_tasks.")
+
     def node_event(self, tag, status, **kw):
         parents = kw.pop("parents", None)
         graph.append_node(self.run_dir, node_id=tag, parents=parents, status=status, **kw)
@@ -375,11 +512,36 @@ class RealBackend(P2Port, conductor.Backend):
     def commit_accept(self, tag, evidence):
         sr = harness.split_result_from_rollouts(self.run_dir, tag, "val")
         why = "the conductor's one-shot proposer writes hypothesis.json only; no agent session keeps a journal or ranked list"
-        extra = ["--val", str(sr.reward if sr.per_task else 0.0), "--missing-handover-justification", why,
+        extra = ["--missing-handover-justification", why,
                  "--missing-ranked-issues-justification", why, "--missing-diagnosis-justification", why]
+        if sr.per_task:
+            extra += ["--val", str(sr.reward)]
+        elif self.cfg.p2:
+            # pooled split (P2): train and val are pooled into F and the sealed C, so there are no full-val
+            # rollouts for commit.py to verify. Record the feedback-stratum estimate, flagged unverified with the
+            # confirmation verdict as the reason (C aggregates themselves stay out of the record).
+            per_task = [sum(v) / len(v) for v in self.rewards(tag, self.screen_ids(), None).values() if v]
+            if per_task:
+                extra += ["--val", str(sum(per_task) / len(per_task))]
+            extra += ["--val-unverified", "P2 pooled split: no full-val rollouts; accepted on confirmation "
+                      f"{(evidence or {}).get('confirmation', 'accept')}" + (" (val = feedback-stratum estimate)" if per_task else "")]
+        else:
+            extra += ["--val", "0.0"]
         rc, res = act.commit(self.ctx, tag, "accept", "conductor: " + json.dumps(evidence, default=str)[:200], extra)
         if rc != 0:
             raise RuntimeError(f"commit.py refused the accept of {tag}: {res}")
+        self._rediagnose(tag)
+
+    def restore_champion(self, tag) -> None:
+        self.run_dir.set_best(tag)
+        self.run_dir.log_event("best_restored", candidate=tag, why="focus promotion reverted by its fill check")
+
+    def _rediagnose(self, tag) -> None:
+        """Rebuild clusters.json from the NEW champion's val traces, so proposals target what it still fails."""
+        rc, out, err = act.sh([act.PY, SKILLS / "phases" / "diagnose" / "scripts" / "run.py", "--run-dir", self.root,
+                               "--tag", tag, "--project", self.project, "--split", "val", "--cluster", "v2"])
+        if rc != 0:
+            self.run_dir.log_event("infra_warning", msg=f"diagnose for {tag} failed: {(err or out)[-200:]}")
 
     def commit_reject(self, tag, reason, evidence):
         a = argparse.Namespace(tag=tag, reason=str(reason), commit_extra=None)
@@ -422,14 +584,49 @@ class RealBackend(P2Port, conductor.Backend):
 
     def finalize(self, champion):
         if self.cfg.p2 and champion != "seed" and not (self.root / "final_estimate.json").exists():
-            est = self.ev.final_estimate(digest.cand_dir(self.run_dir, champion), digest.cand_dir(self.run_dir, "seed"))
-            (self.root / "final_estimate.json").write_text(json.dumps(est, indent=1, default=str), encoding="utf-8")
+            n = self.final_estimate_trials()
+            if n > 0:
+                est = self.ev.final_estimate(digest.cand_dir(self.run_dir, champion),
+                                             digest.cand_dir(self.run_dir, "seed"), n_trials=n)
+                (self.root / "final_estimate.json").write_text(json.dumps(est, indent=1, default=str), encoding="utf-8")
+            else:
+                self.log("final_estimate_skipped", why="no budget left for it or ao_final_estimate_trials: 0")
+        if self.cfg.focus and champion != "seed" and not (self.root / "final_val.json").exists():
+            self._final_val(champion)
         a = argparse.Namespace(**vars(self.ns), n_confirm=0, n_trials=0, seal_anyway=None, over_budget=None, verb="finalize")
         try:
             rc, out = act.finalize(a, self.ctx)
         except act.Refused as e:
             raise conductor.Refused(f"finalize blocked: {e}") from e
         return out
+
+    def final_estimate_trials(self) -> int:
+        """Trials per C task for the champion-vs-seed estimate (``ao_final_estimate_trials``, default 4; 0 = off).
+        It spends ``2 * |C| * n`` rollouts of ``max_metric_calls`` after the search, so it is shrunk to what is
+        left rather than failing the finalize on an exhausted budget."""
+        n = int(self.spec.get("ao_final_estimate_trials", 4))
+        left = RunDir.open(self.root).remaining_metric_calls()
+        if n > 0 and left is not None:
+            n = min(n, int(left) // max(1, 2 * len(self.ev.confirm_ids())))
+        return max(n, 0)
+
+    def skip_finalize(self, champion):
+        """``finalize: false``: record the champion; no test FINAL, no bookend, no final estimate."""
+        return harness.skip_finalize(self.run_dir, champion=champion, reason="spec")
+
+    def _final_val(self, champion, n: int = 3, k0: int = 900_000) -> None:      # far above every fill window
+        """Focus promotes on failing tasks + canaries only: before test is sealed, ONE fresh full-val
+        estimate of the final champion (``n`` trials, fresh seeds), reported next to the seed's pooled draws."""
+        cmd = eval_index.eval_cmd(self.root, self.project, champion, "val", n, ids=self.screen_ids(), trial_offset=k0,
+                                  fixed_seeds=True, skills_dir=SKILLS)
+        cmd[cmd.index("--candidate") + 1] = str(digest.cand_dir(self.run_dir, champion))
+        rc, out, err = act.sh(cmd)
+        mean = lambda d: sum(sum(v) / len(v) for v in d.values() if v) / max(len([v for v in d.values() if v]), 1)
+        est = {"champion": champion, "trials": n, "rc": rc,
+               "champion_val": mean(self.rewards(champion, self.screen_ids(), (k0, k0 + n))),
+               "seed_val_pooled": mean(self.rewards("seed", self.screen_ids(), None))}
+        (self.root / "final_val.json").write_text(json.dumps(est, indent=1), encoding="utf-8")
+        self.log("final_val", **est)
 
     def finalized(self):
         return (self.root / "final.json").exists() and RunDir.open(self.root).read_splits().test_used
@@ -476,7 +673,14 @@ class RealBackend(P2Port, conductor.Backend):
                 if job.get("p2seq"):
                     v = rnd.sequential(job["p2seq"]["cid"])
                     return {"ok": True, "verdict": {"cid": v.cid, "status": v.status, "mean": v.mean, "z": v.z}}
-                rnd.run_job(self._job(job["p2"]))
+                try:
+                    rnd.run_job(self._job(job["p2"]))
+                except BudgetExhausted:
+                    raise
+                except Exception as first:  # noqa: BLE001 - one in-thread retry of a transient failure (an adapter
+                    # that prompts on stdin, a torn file): the job is idempotent, finished rollouts are not repeated
+                    self.run_dir.log_event("p2_job_retry", job=job["p2"].get("job_id"), error=f"{type(first).__name__}: {first}"[:200])
+                    rnd.run_job(self._job(job["p2"]))
                 return {"ok": True}
             except BudgetExhausted:
                 return {"ok": True, "unfunded": True}
