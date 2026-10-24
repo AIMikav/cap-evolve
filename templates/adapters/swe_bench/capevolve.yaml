@@ -27,7 +27,7 @@ split_val:          0.33
 split_test:         0.33
 num_trials:         1                     # SWE-bench is ~deterministic at temp=0
 gate_mode:          paired
-gate_k_se:          1.0
+gate_k_se:          0.2
 max_iterations:     20
 stall:              5
 stop_at_reward:     0.0                   # 0 = off; stop as soon as best val reward reaches this.

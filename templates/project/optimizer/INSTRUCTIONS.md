@@ -1,4 +1,4 @@
-# Optimize the capability — ship the edit with the largest expected reward gain
+# Optimize the capability — ship the edit with the largest expected objective score gain
 
 {{TARGET_READER}}
 
@@ -6,46 +6,14 @@
 
 {{EMPTY_SEED}}
 
-GOAL: raise the eval score as much as you can THIS iteration, then STOP (the harness
-re-scores you; don't run the evaluation yourself). Every capability you were given is fair game.
+GOAL: raise the objective score as much as you can THIS iteration, then STOP (the harness
+re-scores your work; don't run the evaluation yourself). Every capability you were given is fair game. Take your time, study these instructions in detail and be meticulous. Generating a high-quality result is far more important than speed of execution.
 
-**Aim for the edit with the largest expected reward gain on the WHOLE task distribution**, not
-for the tasks in front of you. The traces are a small sample of the failures the agent will meet:
-find the root causes that cost the most reward in total across failure types, and ship the general
-rule, check, procedure or tool that removes each of them. A timid one- or two-edit iteration is an
-under-used iteration; so is a patch that only fixes the task you read. Prefer one change that
-lifts many tasks over three that each lift one, and fix as many distinct root causes as the
-traces support in this ONE candidate. Whole-file rewrites and restructurings are fine when the
-file's structure is the problem.
-
-Regressions are measured by the harness, not by you: do not drop a well-supported edit because
-it might conceivably change a passing task. Drop it when the traces show it would, or when it
-is a guess no trace supports.
-
-## Keep an edit only if it is REAL and GENERAL
-1. **REAL** — a failing trace in `./trajectories/` shows the problem (reward 0, partial credit, or a
-   missing/incorrect report of what was done). Never edit for a hypothetical problem.
-2. **GENERAL** — it states a rule, check or procedure for the whole CLASS of situations, never a
-   literal that special-cases one task (its id, target, name or expected answer). In PROCESS.md
-   write, per edit, the class it covers and how many of the failing traces it touches. Prefer edits
-   that touch several tasks; keep a one-task edit only when its payoff is large and the class is
-   clearly broader than that task. Constants the domain defines (a stated date, a fixed fee, an
-   enum) are fine.
-3. **CHECKED** — replay the failing trace against your edit by reading (where does the agent's
-   behavior change?), and glance at one or two passing traces that use the same rule. If the
-   benchmark runtime happens to be importable in this working directory you may run a small check;
-   if it is not, do not spend turns trying to install it.
-
-## On code surfaces (tools, MCP): prefer code over prose
-Applies only if a selected capability edits code. A BEHAVIORAL miss (the agent knows the rule but
-skips it: doesn't look a record up first, acts on a guess, miscomputes a total) is not fixed by one
-more prose rule; enforce it in the tool body (a guard that raises an actionable error, a
-computation, a composite tool). Add a new tool when it closes a real gap the agent will call;
-don't defer a capability-gap cluster to a later iteration. Prompt-only and skill-only surfaces
-have no code lever: use the structural-prose equivalents in the capability skill (an ordered
-procedure, a checklist step, a worked example, a tightened output contract).
-
-## Read these first (everything is in this working directory)
+## PREPARATION: 
+Complete these steps before beginning to work on the edits. These preparation steps are MANDATORY and CRITICAL to the success of the optimization. Make sure you complete them properly before doing anything else.
+### 1. Understand the objective score
+The intake for this optimization defines an *objective score* function that should guide you in selecting edits to ship. It should be available either as a default score when nothing is defined in the intake, or as a specific score that is explicitly defined in the intake. Locate this objective score, study it very carefully, and understand its composition. In particular, identify each of the score's components, study them, and learn how to maximize the overall objective score as it is evaluated on each trace. 
+### 2. Editing how-to. Read these first (everything is in this working directory)
 - **`./guidance/<cap>/SKILL.md` for EACH selected capability — READ IT IN FULL before you
   edit; it is the MENU of improvement TYPES available to you.** Each capability skill lists
   the concrete kinds of change you can make (for a tools capability: in-body validation
@@ -78,7 +46,7 @@ procedure, a checklist step, a worked example, a tightened output contract).
 - `./guidance/optimizer/<name>.md` — your agent's subagent/parallelism features (optional).
 {{BENCH_REPO}}
 
-## Process (do this, then STOP)
+#### Process (do this, then STOP)
 **Parallelism:** {{PARALLEL_NOTE}}
 1. Read your capability SKILL(s) + the diagnose method + the cross-iteration files
    (LEDGER facts, JOURNAL handover, RUNMAP for clusters you'll touch).
@@ -90,7 +58,7 @@ procedure, a checklist step, a worked example, a tightened output contract).
 4. Ship every edit that is REAL and GENERAL together in this ONE candidate.
 5. Fill `PROCESS.md` and APPEND your entry to `JOURNAL.md`. STOP.
 
-## Choose the lever by FAILURE TYPE
+#### Choose the lever by FAILURE TYPE
 - **RULE VIOLATION** (the agent breaks a rule it could follow): on a code surface, move the rule
   into the body of the tool that governs it (a guard that raises an actionable error, or returns the
   corrected value). On a prompt surface, make the rule unmissable: a checklisted step, a worked
@@ -108,7 +76,7 @@ Also improve tool RETURN values and error messages (what is wrong, the valid opt
 step) when a recoverable error stranded the agent. Never delete a needed rule; change or
 consolidate it instead.
 
-## CHECK each edit before you keep it
+#### CHECK each edit before you keep it
 - State the failing trace(s) it targets and the turn where behavior changes.
 - Code edit: if you can run the function on the trace's arguments, do; otherwise read it through
   against the trace. A guard that cannot fire on the failing input is dead code.
@@ -116,7 +84,7 @@ consolidate it instead.
 - Record one line per edit in PROCESS.md: `trace <task> -> <what changes>; class: <...>; touches N failing tasks`.
 
 
-## NON-OVERFITTING (every edit must GENERALIZE)
+#### NON-OVERFITTING (every edit must GENERALIZE)
 Every edit encodes a GENERAL rule that holds across the whole class of inputs — NEVER a
 literal that special-cases one task (its id, target, name, or expected answer). A guard
 fires on the general condition ("the id is not in the user's records", "the record is in
@@ -125,7 +93,7 @@ defines (the policy's stated current date, a fixed fee/threshold, a domain enum)
 per-task specifics and any ground-truth in the traces ONLY to understand the failure
 CLASS, then write the general fix.
 
-## Handover (REQUIRED before you STOP)
+#### Handover (REQUIRED before you STOP)
 - **PROCESS.md** (this iteration): the ranked cluster list (with leverage + RULE/GAP/
   KNOWLEDGE tag), every kept edit + its lever, the CHECK line, the class of tasks it covers and how many
   failing traces it touches per edit, what you deliberately skipped and why, and (if you used subagents) that you did.
@@ -168,11 +136,11 @@ CLASS, then write the general fix.
 {{CAP_BRIEF}}
 {{ALGO_BRIEF}}
 
-## Self-check before STOP
+#### Self-check before STOP
 - Every kept edit is REAL (a failing trace shows it) and GENERAL (a class-level rule, no task id or answer),
   with its check line, class and coverage in PROCESS.md.
-- You aimed at the largest expected reward gain over the whole distribution: you covered the root
-  causes that cost the most reward across failure types, not only the first cluster or the task you
+- You aimed at the largest expected objective score gain over the whole distribution: you covered the root
+  causes that cost the most objective score degradation across failure types, not only the first cluster or the task you
   read last.
 - You read each selected capability's `./guidance/<cap>/SKILL.md` and used the improvement types it
   offers, not one lever repeated.
@@ -181,3 +149,48 @@ CLASS, then write the general fix.
 - You did not re-add anything LEDGER/JOURNAL show was rejected, and did not pad with cosmetic edits.
 - PROCESS.md + JOURNAL.md are filled. Keep narration minimal; don't restate these instructions or
   explore unrelated files.
+
+
+## Strategies for constructing edits:
+In the list below you will find several highly-valuable strategies for selecting and constructing edits. Each edit you make should comply with all of them if possible, or at least with the vast majority of them, and be justified by the traces you analyze. 
+### 1. Aim for the edit with the largest expected objective score gain on the WHOLE task distribution
+Never rely only on a single task trace or just the tasks in front of you for when constructing an edit. The traces are a small sample of the failures the agent will meet.
+Find the root causes that according to your estimate, should cause the most objective score decline in total across failure types. Based on those root causes, a good edit is a general
+rule, check, procedure or tool that mitigates all or most of them. A timid one- or two-edit iteration is an under-used iteration; so is a patch that only fixes the task you read. Prefer one change that increases the objective score for many tasks over three changes that increase score for only one task. Fix as many distinct root causes as the traces support in this ONE candidate. Whole-file rewrites and restructurings are fine when the file's structure is the root cause.
+
+Regressions are measured by the harness, not by you. Do not drop an edit that is well-supported by many traces, only because it might conceivably affect one passing task. Drop it when many traces show it would cause extensive damage measured by the objective score, or when it
+is a guess no trace supports.
+
+### 2. Keep an edit only if it is REAL and GENERAL
+1. **REAL** — a failing trace in `./trajectories/` shows the problem (reward 0, partial credit, or a
+   missing/incorrect report of what was done). Never edit for a hypothetical problem.
+2. **GENERAL** — it states a rule, check or procedure for the whole CLASS of situations, never a
+   literal that special-cases one task (its id, target, name or expected answer). In PROCESS.md
+   write, per edit, the class it covers and how many of the failing traces it touches. Prefer edits
+   that touch several tasks; keep a one-task edit only when its payoff is large and the class is
+   clearly broader than that task. Constants the domain defines (a stated date, a fixed fee, an
+   enum) are fine.
+3. **CHECKED** — replay the failing trace against your edit by reading (where does the agent's
+   behavior change?), and glance at one or two passing traces that use the same rule. If the
+   benchmark runtime happens to be importable in this working directory you may run a small check;
+   if it is not, do not spend turns trying to install it.
+
+### 3. Make it work well for the tasks you're not seeing
+Be aware that the eventual evaluation of the benchmark is using tasks and traces you may have not seen and may never see during this optimization. Therefore, changes you make should be generic and based on your broad and deep understanding of the entire domain of these tasks, as oppposed to being tied to specific tasks or even to just tasks you may have seen
+
+### 4. Make capabilities that are SOFT and allow JUDGEMENT CALLS
+The agent executing the benchmark with these capbilities is maximizing the benchmark's reward. Getting the highest reward is that agent's utmost goal, and that trumps complying and using any of the capabilities you ship. Therefore, each capability you add or edit must have a "softness" clause that does two things. First, it reminds the agent executing the benchmark of its ulimate goal of executing each task successfully according to the benchmark's guidelines so that the benchmark gives the highest reward for the agent's exectuion. Second, if the agent estimates that complying with that specific capability may interfere with a successful highest-reward execution, the agent is allowed NOT to comply with the capability and excercise a JUDGEMENT CALL to operate differently instead. 
+For example, consider the following scenario. The selected core capability is a text instruction "Never open the door". The task has a user asking the agent to open the door and talk to a person. The benchmark requires accurate execution of the user's request for maximum reward. Clearly, in this scenario, complying with the capability should interfere with getting maximum task reward. Therefore, a reasonable "softness clause" for the capability can be "Never open the door unless you estimate that interferes with accomplishing the task at maximum reward, in which case you are allowed not to comply with this rule.". 
+
+### 5. Edits with code changes, text changes or both
+1. A capability you select for editing or generating (if adding new) may contain code, text prompts or both. **Considering code changes should be done with great care.** Code is deterministic, with fixed behavior. Therefore, code changes must be GENERIC and CLEAR, to avoid helping some tasks while degrading other tasks. When the change you intend to impose is not suitable to be expressed in code due to these limitations, you may consider implementing the change in text, which is often more flexible. For genericity in text as well, you may include alternatives in the text for addressing task variations.
+2. **For editing tools, use the whole tools skill.** Study `./guidance/tools/SKILL.md` (the
+   `skills/capabilities/tools` skill) carefully and use the full range of what it offers:
+   update tool descriptions, update tool code, add new tools and remove tools that hurt.
+
+### 6. On code surfaces (tools, MCP): prefer code over prose
+Applies only if a selected capability edits code. A BEHAVIORAL miss (the agent knows the rule but skips it: doesn't look a record up first, acts on a guess, miscomputes a total) is not fixed by one more prose rule; enforce it in the tool body (a guard that raises an actionable error, a computation, a composite tool). Add a new tool when it closes a real gap the agent will call;
+don't defer a capability-gap cluster to a later iteration. Prompt-only and skill-only surfaces
+have no code lever: use the structural-prose equivalents in the capability skill (an ordered
+procedure, a checklist step, a worked example, a tightened output contract).
+

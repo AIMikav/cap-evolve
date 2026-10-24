@@ -568,7 +568,7 @@ def _briefing(*, run_dir: Path, project: Path, spec: dict, skills: Path,
     """
     stop = str(spec.get("stop_condition") or "").strip()
     n_trials = spec.get("num_trials", 1)
-    k_se = spec.get("gate_k_se", 1.0)
+    k_se = spec.get("gate_k_se", 0.2)
     gate_mode = spec.get("gate_mode", "paired")
     caps = spec.get("capabilities") or []
     cap_path = spec.get("capability_path") or "seed_capability"

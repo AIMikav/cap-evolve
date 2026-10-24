@@ -39,7 +39,7 @@ def main(argv=None) -> int:
     p.add_argument("--current", type=float, help="current best val reward (scalar mode)")
     p.add_argument("--candidate", type=float, help="candidate val reward (scalar mode)")
     p.add_argument("--mode", default="significant", choices=_MODES)
-    p.add_argument("--k-se", type=float, default=1.0)
+    p.add_argument("--k-se", type=float, default=0.2)
     p.add_argument("--candidate-stderr", type=float, default=0.0)
     p.add_argument("--current-stderr", type=float, default=0.0)
     p.add_argument("--threshold", type=float, default=0.0)

@@ -48,7 +48,7 @@ def main(argv=None) -> int:
                    help="attempt a system-aware merge every Nth accept")
     p.add_argument("--gate-mode", default="auto",
                    help="auto = let the engine pick the paired gate (recommended; candidate & current share val tasks); or significant|paired|strict|threshold")
-    p.add_argument("--k-se", type=float, default=1.0)
+    p.add_argument("--k-se", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--store", default="git", help="git|copy|command")
     p.add_argument("--store-commit-cmd", default=None)

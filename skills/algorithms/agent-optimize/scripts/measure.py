@@ -192,7 +192,7 @@ def main(argv=None) -> int:
 
     spec = spec_for_run(run_dir, project)
     n_trials = args.n_trials or int(spec.get("num_trials") or 1)
-    k_se = args.k_se if args.k_se is not None else float(spec.get("gate_k_se") or 1.0)
+    k_se = args.k_se if args.k_se is not None else float(spec.get("gate_k_se") or 0.2)
     mode = args.gate_mode or str(spec.get("gate_mode") or "paired")
 
     splits = run_dir.read_splits()

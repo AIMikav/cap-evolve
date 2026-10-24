@@ -112,8 +112,8 @@ Two axes, and the trials axis is the one people get wrong.
   dominated by sample size and is optimistic — issue #113. An empty val presents as
   `coverage 1.0` with `reward 0.0` (`loop.py:79-84`).
 
-**A one-task gain is not reliably bankable.** Under the shipped default
-(`mode: paired`, `k_se: 1.0`) a candidate that improves exactly one val task and
+**A one-task gain is not reliably bankable at `k_se: 1.0`.** Under `mode: paired`,
+`k_se: 1.0` (the default is `k_se: 0.2`, which banks it) a candidate that improves exactly one val task and
 changes nothing else has `Δ̄ == SE(Δ)` *algebraically*, so the strict `>` at
 `gate.py:176` is settled by floating-point representation — rejected at n=4, 8, 50,
 accepted at n=20, identical printed numbers. Issue #351, open; derivation in

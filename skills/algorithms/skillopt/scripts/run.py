@@ -58,7 +58,7 @@ def main(argv=None) -> int:
                         "Only safe when the adapter's run_target is thread-safe.")
     p.add_argument("--gate-mode", default="auto",
                    help="auto = let the engine pick the paired gate (recommended; candidate & current share val tasks); or significant|paired|strict|threshold")
-    p.add_argument("--k-se", type=float, default=1.0)
+    p.add_argument("--k-se", type=float, default=0.2)
     su = p.add_mutually_exclusive_group()
     su.add_argument("--slow-update", dest="slow_update", action="store_true", default=True,
                     help="run the gated epoch-boundary slow/meta update (default on)")

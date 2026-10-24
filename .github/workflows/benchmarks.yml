@@ -310,7 +310,7 @@ on:
         type: string
         default: "80"
       gate_k_se:
-        description: "Acceptance-gate strictness: accept a candidate iff improvement > k_se·SE. LEAVE BLANK for the tier default: 1.0, except a few tiers that pair a stricter value with hard scoring in their committed overrides.env. Lower = more lenient, higher = stricter."
+        description: "Acceptance-gate strictness: accept a candidate iff improvement > k_se·SE. LEAVE BLANK for the tier default: 0.2, unless a tier sets its own value in its committed overrides.env. Lower = more lenient, higher = stricter."
         type: string
         # MUST stay empty — see OPTIMIZER_USD_PER_ITER's comment below and
         # core/tests/test_benchmarks_optimizer_budget.py. A non-empty default is TRUTHY in the

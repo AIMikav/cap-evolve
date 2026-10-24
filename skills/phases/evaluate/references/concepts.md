@@ -54,7 +54,7 @@ Both terms above are sample statistics, and they degrade quietly:
 
 ### The degenerate single-task delta (issue #351, open)
 
-Under the shipped default gate (`mode: paired`, `k_se: 1.0`), a candidate that
+Under the paired gate at `k_se: 1.0` (the shipped default is `0.2`), a candidate that
 improves exactly one val task by `m` and changes nothing else gives paired deltas
 `[m, 0, …, 0]` over `n` tasks:
 
@@ -68,8 +68,9 @@ SE  = sqrt(var/n) = m/n = Δ̄
 val split rescues it, because both scale identically. Since `gate.py:176` tests a
 strict `Δ̄ > k·SE`, the verdict reduces to `x > x` and is settled by floating-point
 representation: rejected at n=4, 8, 50; accepted at n=20; identical printed numbers
-in every case. So a single-task improvement is not reliably bankable under the
-current default, and a rejection of one says nothing about the edit's quality.
+in every case. So a single-task improvement is not reliably bankable at `k_se = 1.0`, and a
+rejection of one says nothing about the edit's quality. Any `k_se < 1` (the default
+`0.2` included) banks it.
 
 ## pass^k vs pass@k — opposite questions
 

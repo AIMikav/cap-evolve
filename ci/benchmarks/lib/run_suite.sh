@@ -49,7 +49,7 @@ ITER="${ITERATIONS:-3}"
 AGENT_MODEL="${AGENT_MODEL:-gpt-oss-120b}"
 NUM_TRIALS="${NUM_TRIALS:-10}"
 OPTIMIZER_MODEL="${OPTIMIZER_MODEL:-claude-opus-4-8}"
-GATE_K_SE="${GATE_K_SE:-1.0}"
+GATE_K_SE="${GATE_K_SE:-0.2}"
 # Raw native trajectories (tau2's own results.json, via adapter._sim_save_path). ON for the
 # tau2 legs, whose adapters write them and where a failed rollout is only readable from the
 # trajectory; no other adapter produces them. Env wins, so a dispatch can still force either way.
@@ -103,7 +103,7 @@ case "$ALGORITHM" in
     # executed on its own (core/tests/test_benchmarks_agent_optimize.py does exactly that).
     _rounds="${ITER:-${ITERATIONS:-3}}"
     _trials="${NUM_TRIALS:-10}"
-    _k_se="${GATE_K_SE:-1.0}"
+    _k_se="${GATE_K_SE:-0.2}"
     _stop_usd=""
     if awk "BEGIN{exit !(${OPTIMIZER_USD_PER_ITER:-0} > 0)}" 2>/dev/null; then
       _stop_usd="$(awk "BEGIN{printf \"%.2f\", ${OPTIMIZER_USD_PER_ITER:-0} * $_rounds}")"
@@ -740,8 +740,8 @@ ENV
     # full_verified's GATE_K_SE=0.2), but a hard-scoring tier that omits that pairing would
     # silently reproduce the same wrongful reject — hard-fail instead of warning.
     if [ "${SB_SCORING:-soft}" = "hard" ]; then
-      if awk "BEGIN{exit !(${GATE_K_SE:-1.0} >= 0.5)}"; then
-        echo "::error:: SB_SCORING=hard with gate_k_se=${GATE_K_SE:-1.0}. Bernoulli per-task" \
+      if awk "BEGIN{exit !(${GATE_K_SE:-0.2} >= 0.5)}"; then
+        echo "::error:: SB_SCORING=hard with gate_k_se=${GATE_K_SE:-0.2}. Bernoulli per-task" \
              "reward widens the gate's SE, so real gains are likely to be REJECTED (run" \
              "30890657732 rejected a 0.600 candidate in favour of 0.580). Pair SB_SCORING=hard" \
              "with GATE_K_SE=0.2 in this tier's overrides.env, or dispatch gate_k_se=0.2." >&2

@@ -129,7 +129,10 @@ def test_all_switches_off_round_py_is_bit_identical_to_main(tmp_path):
     env = dict(os.environ, CAPEVOLVE_CORE=str(REPO / "core"), PYTHONHASHSEED="0",
                **{f"CAPEVOLVE_{k.upper()}": "0" for k in KEYS})
     p = subprocess.run([sys.executable, str(SCRIPTS / "round.py"), "--run-dir", str(run_dir.root),
-                        "--project", str(project), "--candidates", "cand_1", "--n-trials", "1", *_JUSTIFY],
+                        "--project", str(project), "--candidates", "cand_1", "--n-trials", "1",
+                        # the golden was captured at round.py's old --k-se default (1.0); pin it so the
+                        # fixture keeps testing the ablation switches, not the K default
+                        "--k-se", "1.0", *_JUSTIFY],
                        capture_output=True, text=True, env=env)
     tmp = str(tmp_path)
     nodes = [json.loads(ln) for ln in (run_dir.root / "graph.jsonl").read_text().splitlines()]
