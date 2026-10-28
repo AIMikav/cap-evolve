@@ -1,0 +1,27 @@
+[
+  {
+    "run_id": 203,
+    "bench": "epic-creator",
+    "tier": "full",
+    "event": "manual",
+    "source": "epic-intake-v1 finalized",
+    "date": "2026-10-26T23:05:17Z",
+    "iterations": 10,
+    "agent_model": "GLM 5.3",
+    "optimizer_model": "GLM 5.3",
+    "reward_baseline": 0.7024,
+    "reward_opt": 0.9,
+    "delta": 0.198,
+    "has_ui": true,
+    "suite": {
+      "reward_base": 0.7024,
+      "reward_opt": 0.9,
+      "eval_usd": 1962.52,
+      "optimizer_usd": 51.68,
+      "eval_seconds": 398816.42,
+      "optimizer_seconds": 8325.84,
+      "n": 21,
+      "n_scored": 21
+    }
+  }
+]

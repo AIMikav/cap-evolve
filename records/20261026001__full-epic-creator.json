@@ -1,0 +1,32 @@
+{
+  "run_id": 203,
+  "bench": "epic-creator",
+  "tier": "full",
+  "event": "manual",
+  "source": "epic-intake-v1 finalized",
+  "branch": "main",
+  "sha": "latest",
+  "date": "2026-10-26T23:05:17Z",
+  "iterations": 10,
+  "trials": 3,
+  "agent_model": "GLM 5.3",
+  "optimizer_model": "GLM 5.3",
+  "algorithm": "hill-climb",
+  "conclusion": "success",
+  "reward_baseline": 0.7024,
+  "reward_opt": 0.9,
+  "delta": 0.198,
+  "has_ui": true,
+  "suite": {
+    "reward_base": 0.7024,
+    "reward_opt": 0.9,
+    "eval_usd": 1962.52,
+    "optimizer_usd": 51.68,
+    "eval_seconds": 398816.42,
+    "n": 21
+  },
+  "tasks": [
+    { "task": "epic-creator-eval", "reward_baseline": 0.7024, "reward_opt": 0.9 }
+  ],
+  "note": "10 iterations, best candidate cand_0002. Validation score improved from 0.918 to 0.992. Test improvement: +0.198 points (28% gain). Optimized for GLM 5.3."
+}
