@@ -14,8 +14,9 @@ because gate_k_se=1.0 never let Δ=0.020 clear k_se·SE.
 The fix, mirroring optimizer_usd_per_iter: the input default is "" (blank distinguishable from
 an explicit value), and the workflow's GATE_K_SE assignment is a bare passthrough with NO
 literal fallback — so a blank dispatch leaves GATE_K_SE unset for load_overrides.sh to fill
-from overrides.env. The literal 1.0 fallback for tiers/benchmarks with no override moved to
-run_suite.sh (`GATE_K_SE="${GATE_K_SE:-1.0}"`), which runs AFTER load_overrides.sh.
+from overrides.env. The literal fallback for tiers/benchmarks with no override moved to
+run_suite.sh (`GATE_K_SE="${GATE_K_SE:-0.2}"`, 1.0 before the default became 0.2), which runs
+AFTER load_overrides.sh.
 """
 
 import re
@@ -79,23 +80,23 @@ def test_a_blank_dispatch_resolves_to_the_input_default():
     assert re.fullmatch(r"\$\{\{\s*(?:github\.event\.)?inputs\.gate_k_se\s*\}\}", expr), expr
 
 
-# --- run_suite.sh still supplies 1.0 for benchmarks/tiers with no override -----------------
+# --- run_suite.sh still supplies the 0.2 default for benchmarks/tiers with no override -----------------
 
 
-def test_run_suite_still_defaults_gate_k_se_to_one_when_unset():
+def test_run_suite_defaults_gate_k_se_to_the_project_default_when_unset():
     p = subprocess.run(
-        ["bash", "-c", 'GATE_K_SE="${GATE_K_SE:-1.0}"; printf "%s" "$GATE_K_SE"'],
+        ["bash", "-c", 'GATE_K_SE="${GATE_K_SE:-0.2}"; printf "%s" "$GATE_K_SE"'],
         capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"},
     )
     assert p.returncode == 0, p.stderr
-    assert p.stdout == "1.0"
+    assert p.stdout == "0.2"
 
 
 def test_run_suite_source_still_contains_the_literal_fallback():
     src = RUN_SUITE.read_text(encoding="utf-8")
-    assert 'GATE_K_SE="${GATE_K_SE:-1.0}"' in src, (
-        "run_suite.sh must keep a literal 1.0 fallback for benchmarks/tiers that never set "
-        "GATE_K_SE, so their behaviour is unchanged by this fix"
+    assert 'GATE_K_SE="${GATE_K_SE:-0.2}"' in src, (
+        "run_suite.sh must keep a literal fallback (the 0.2 project default) for benchmarks/tiers "
+        "that never set GATE_K_SE"
     )
 
 

@@ -18,7 +18,7 @@ algorithm_focus:    all
 dataset_source:     adapter
 num_trials:         5                     # tau2 is stochastic — more trials = lower noise
 gate_mode:          paired
-gate_k_se:          1.0
+gate_k_se:          0.2
 max_iterations:     20
 stall:              5
 stop_at_reward:     1.0                   # 0 = off; stop as soon as best val reward reaches this.

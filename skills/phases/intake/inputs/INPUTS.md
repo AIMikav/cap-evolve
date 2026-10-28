@@ -166,8 +166,7 @@ path, how to obtain it, and the alternatives. Never invent a NEEDED input.
     customized file.
 - **gate**: `gate_mode` (**paired** recommended — per-task paired SE on the same tasks
   both sides, ~2-3x smaller than combined-SE `significant`, so real 1-task gains bank;
-  also: significant|strict|threshold), `gate_k_se` (default 1.0; the
-  examples use 0.2). Add `--no-regression` to forbid breaking passing tasks.
+  also: significant|strict|threshold), `gate_k_se` (default 0.2). Add `--no-regression` to forbid breaking passing tasks.
 
 - **objectives** (default: unset = single-objective, gates on `reward` alone — the
   behavior every existing project already has). Ask only when `gate_mode: pareto` is

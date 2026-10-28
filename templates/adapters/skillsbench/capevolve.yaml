@@ -12,7 +12,7 @@ algorithm_focus:    all
 dataset_source:     adapter
 num_trials:         1                     # SkillsBench is mostly deterministic
 gate_mode:          paired
-gate_k_se:          1.0
+gate_k_se:          0.2
 max_iterations:     20
 stall:              5
 stop_at_reward:     0.0                   # 0 = off; stop as soon as best val reward reaches this.

@@ -85,7 +85,7 @@ Back-compat: `--focus all-at-once` is accepted and treated as `all` (`run.py:35`
 Beyond `--run-dir` / `--project` / `--optimizer` / `--focus` / `--max-iterations` /
 `--n-trials` / `--resume` (`scripts/run.py`):
 
-- `--gate-mode` (default `auto`) + `--k-se` (default `1.0`) — `auto` lets the engine
+- `--gate-mode` (default `auto`) + `--k-se` (default `0.2`) — `auto` lets the engine
   pick the paired gate; `significant|paired|strict|threshold` pin it. Raising `k-se`
   makes acceptance stricter.
 - `--protected-paths` — globs sealing the eval surface (scorer, gold, tasks, splits;
@@ -121,12 +121,12 @@ python scripts/run.py --run-dir .capevolve/run_X --project .capevolve/project \
 
 ## Known gate edge case (open, issue #351)
 
-Under the default paired gate with `k_se = 1.0`, a candidate that improves **exactly
-one** val task and changes nothing else has `Δ̄ == SE(Δ)` algebraically, so a strict
-`>` resolves it on floating-point representation alone. Expect a genuine one-task
-gain not to bank, unpredictably by split size. Do not lower `k-se` to work around it —
-that disables the bar for every candidate; prefer edits that generalize across a
-class of tasks, which is what the loop is asking for anyway.
+Under the paired gate with `k_se = 1.0`, a candidate that improves **exactly one**
+val task and changes nothing else has `Δ̄ == SE(Δ)` algebraically, so a strict `>`
+resolves it on floating-point representation alone. The default `k_se = 0.2` banks such a
+one-task gain (the bar is `0.2·Δ̄`); at `k_se = 1.0` expect it not to bank, unpredictably
+by split size. Prefer edits that generalize across a class of tasks, which is what the
+loop is asking for anyway.
 
 ## Agent mode
 

@@ -48,7 +48,7 @@ def main(argv=None) -> int:
                         "Only safe when the adapter's run_target is thread-safe.")
     p.add_argument("--gate-mode", default="auto",
                    help="auto = let the engine pick the paired gate (recommended; candidate & current share val tasks); or significant|paired|strict|threshold|pareto")
-    p.add_argument("--k-se", type=float, default=1.0)
+    p.add_argument("--k-se", type=float, default=0.2)
     p.add_argument("--objectives", default=None,
                    help="--gate-mode pareto only (#684): JSON list of {name, direction}, e.g. "
                         '\'[{"name":"reward","direction":"maximize"},'

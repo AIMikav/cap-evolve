@@ -35,7 +35,7 @@ def main(argv=None) -> int:
     p.add_argument("--max-iterations", type=int, default=0)
     p.add_argument("--n-trials", type=int, default=1)
     p.add_argument("--gate-mode", default="auto")
-    p.add_argument("--k-se", type=float, default=1.0)
+    p.add_argument("--k-se", type=float, default=0.2)
     p.add_argument("--store", default="git")
     # Tolerate any other flags the deterministic seam passes through.
     p.parse_known_args(argv)

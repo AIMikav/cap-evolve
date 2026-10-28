@@ -159,7 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "top-up); 0 = every trial of the tag, as before. The reference side is "
                         "unaffected.")
     p.add_argument("--mode", default="paired", choices=GATE_MODES)
-    p.add_argument("--k-se", type=float, default=1.0)
+    p.add_argument("--k-se", type=float, default=0.2)
     p.add_argument("--threshold", type=float, default=0.0)
     p.add_argument("--veto-regressions", action="store_true",
                    help="ALSO reject a gate-passing candidate that drops any val task the parent "

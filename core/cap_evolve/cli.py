@@ -979,7 +979,7 @@ def _cmd_run(argv):
                "--optimizer", opt_cmd, "--max-iterations", str(spec.get("max_iterations", 10)),
                "--n-trials", str(spec.get("num_trials", 1)),
                "--gate-mode", str(spec.get("gate_mode", "auto")),
-               "--k-se", str(spec.get("gate_k_se", 1.0)),
+               "--k-se", str(spec.get("gate_k_se", 0.2)),
                "--store", str(spec.get("store", "git"))]
     # Multi-objective (#684 item 8): hill-climb is the only non-agent-optimize algorithm
     # that reads ``objectives:`` today, forwarded ONLY when the spec declares it, so an

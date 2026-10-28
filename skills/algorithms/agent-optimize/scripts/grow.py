@@ -87,7 +87,7 @@ def main(argv=None) -> int:
     p.add_argument("--growth-round", type=int, required=True,
                    help="which growth attempt this is for this candidate (1, 2, ...)")
     p.add_argument("--max-growth-rounds", type=int, default=DEFAULT_MAX_GROWTH_ROUNDS)
-    p.add_argument("--k-se", type=float, default=1.0)
+    p.add_argument("--k-se", type=float, default=0.2)
     args = p.parse_args(argv)
 
     run_dir = RunDir.open(Path(args.run_dir))
