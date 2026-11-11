@@ -8,6 +8,10 @@ All notable changes to cap-evolve are documented here. The format follows
 [0.1.0]: https://github.com/skillberry-ai/cap-evolve/releases/tag/v0.1.0
 
 ## [Unreleased]
+### Removed
+- `examples/tau2_custom` (the direct and blackbox approaches on the Skillberry tau2 fork). It is superseded by
+  `examples/tau2_sierra_airline`, the same two approaches on vanilla tau2 pinned at `TAU2_REFERENCE_SHA`, which the
+  `tau2_sierra` / `tau2_sierra_blackbox` CI legs already run (#937).
 ### Reverted (V4 hill-climb changes, #880)
 - Removed the cost-aware acceptance (`cost_lambda`, `cost_accept`, `costaware.py`), the compress operators (`hc_compress_every`,
   `hc2_compress_every`, `ao_compress_every`), the budget-driven iteration cap (`max_iterations` omitted), the shrunk direct final HC-2 round,
@@ -16,6 +20,16 @@ All notable changes to cap-evolve are documented here. The format follows
 - Kept from #880: the diversity gate compares ADDED lines, a P2 job gets one in-thread retry, tau2 native-sim result files are named by
   process, thread and a random suffix.
 ### Fixed
+- Under `promotion_rule: P2` the proposer now reads the CURRENT champion's own feedback-split (F) trials. Before, it
+  read the seed's F trajectories in every iteration: P2 tags a candidate's F trials `<round>__<cid>__<stage>`,
+  and the trajectory copier only looked for the bare `<cid>` tag, so it fell back to the seed. The same lookup
+  also made the next iteration's failure list empty after an accept ("0 solid / 0 flaky / 0 failing of 0
+  tasks"). On an accept, the new champion is topped up to `p2_champion_trials` F trials per task (default 2,
+  pooled with its rung trials, fresh seeds; `0` turns it off). That measurement becomes the next iteration's
+  traces and failure list. A resumed pooled run pools the champion's F trials over every P2 round.
+- `prior_iterations/<cid>/` now holds that candidate's own `trajectories/` on the split the proposer may read
+  (F when pooled, else val), next to `PROCESS.md` and `diff.patch`. A rejected candidate's traces show how
+  the agent behaved under the failed edit. Confirm and test trials are never copied.
 - AO-2 no longer ends a search on hypothesis paperwork: the proposer prompt lists the valid `cluster_ids` (with
   labels); an unknown or empty `cluster_ids`, out-of-cluster `predicted_tasks`, or a missing/unreadable
   `hypothesis.json` is repaired with a warning and the candidate is evaluated (`act.py propose
@@ -1590,10 +1604,10 @@ Keep a Changelog dates the *release*.
   real 50-task × 10-trial run, val **0.536 → 0.712** (best candidate `cand_0007`,
   +0.176 / +32.8% relative; *fit metric*, `train == val == test`, so the test number
   0.694 pass@1 is not held out). Baseline val, best val and the delta come from
-  [`examples/tau2_airline/run_full/ui/data/runs_run_full.json`](examples/tau2_airline/run_full/ui/data/runs_run_full.json)
+  [`benchmarks/tau2/examples/airline/run_full/ui/data/runs_run_full.json`](benchmarks/tau2/examples/airline/run_full/ui/data/runs_run_full.json)
   (`summary.baseline_val = 0.536`, `summary.best_val = 0.712`, `best_id = cand_0007`,
   `delta_abs = 0.176`, `delta_pct = 32.8`); the sealed-test `0.694` comes from
-  [`examples/tau2_airline/run_full/final.json`](examples/tau2_airline/run_full/final.json)
+  [`benchmarks/tau2/examples/airline/run_full/final.json`](benchmarks/tau2/examples/airline/run_full/final.json)
   (`test.reward` / `test.pass_at_k.1`). Canonical prose:
   [`docs/RESULTS.md`](docs/RESULTS.md).
 - **`cap-evolve run --resume`** — continue an interrupted run (pod eviction, crash,

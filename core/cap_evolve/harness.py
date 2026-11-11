@@ -204,7 +204,9 @@ def ensure_splits(adapter, run_dir: RunDir, *, seed: int = 0, ratios=(0.5, 0.25,
     """
     if run_dir.splits_path.exists():
         return run_dir.read_splits()
-    if split_ids:
+    if split_ids and ("feedback" in split_ids or "confirm" in split_ids):
+        splits = _explicit_pool_splits(run_dir, split_ids, seed=seed)
+    elif split_ids:
         splits = Splits(train=[str(t) for t in split_ids.get("train", [])],
                         val=[str(t) for t in split_ids.get("val", [])],
                         test=[str(t) for t in split_ids.get("test", [])], seed=seed)
@@ -219,6 +221,28 @@ def ensure_splits(adapter, run_dir: RunDir, *, seed: int = 0, ratios=(0.5, 0.25,
     run_dir.log_event("splits", train=len(splits.train), val=len(splits.val),
                       test=len(splits.test), seed=seed)
     return splits
+
+
+def _explicit_pool_splits(run_dir: RunDir, split_ids: dict, *, seed: int) -> Splits:
+    """A split file that names F and C itself (``feedback``/``confirm`` + ``test``).
+
+    Only meaningful under ``split_mode: pooled``: in the legacy loop the proposer reads val, so C would
+    be shown to it — refused rather than silently defeating the point of naming it."""
+    if gatecfg.GateConfig.for_run(run_dir).split_mode != "pooled":
+        raise ValueError("split_ids with feedback/confirm needs split_mode: pooled — in the legacy loop "
+                         "the proposer reads val, so the confirm ids would be shown to it")
+    if "train" in split_ids or "val" in split_ids:
+        raise ValueError("split_ids: give either train/val or feedback/confirm, not both")
+    fb = [str(t) for t in split_ids.get("feedback") or []]
+    cf = [str(t) for t in split_ids.get("confirm") or []]
+    te = [str(t) for t in split_ids.get("test") or []]
+    if not fb or not cf:
+        raise ValueError("split_ids: feedback and confirm must both be non-empty")
+    for a, b, what in ((fb, cf, "feedback and confirm"), (fb, te, "feedback and test"),
+                       (cf, te, "confirm and test")):
+        if set(a) & set(b):
+            raise ValueError(f"split_ids: {what} overlap")
+    return Splits(train=fb, val=cf, test=te, seed=seed, explicit_pool=True)
 
 
 def _seed_pass_rates(run_dir: RunDir) -> dict:
@@ -250,12 +274,17 @@ def ensure_pooled(run_dir: RunDir, *, confirm_fraction: float | None = None,
     cfg = gatecfg.GateConfig.for_run(run_dir)
     frac = cfg.confirm_fraction if confirm_fraction is None else float(confirm_fraction)
     pool = list(dict.fromkeys([*splits.train, *splits.val]))
-    rates = pass_rates if pass_rates is not None else _seed_pass_rates(run_dir)
-    fb, cf = make_pooled_partition(pool, seed=splits.seed, confirm_fraction=frac, pass_rates=rates)
+    if splits.explicit_pool:
+        fb, cf, rates = list(splits.train), list(splits.val), {}
+        frac = len(cf) / len(pool)
+    else:
+        rates = pass_rates if pass_rates is not None else _seed_pass_rates(run_dir)
+        fb, cf = make_pooled_partition(pool, seed=splits.seed, confirm_fraction=frac, pass_rates=rates)
     splits.pooled, splits.feedback, splits.confirm, splits.pool_seed = True, fb, cf, splits.seed
     run_dir.write_splits(splits)
     run_dir.log_event("pooled_split", n_pool=len(pool), n_feedback=len(fb), n_confirm=len(cf),
-                      confirm_fraction=frac, stratified=bool(rates), seed=splits.seed)
+                      confirm_fraction=frac, stratified=bool(rates), seed=splits.seed,
+                      explicit=splits.explicit_pool)
     return splits
 
 
@@ -1278,6 +1307,26 @@ PROMOTION_KEYS = ("promotion_rule", "promotion_k_se", "promotion_n_conf", "promo
                   "promotion_min_coverage")
 
 
+def candidate_rollout_tags(run_dir, cid: str, split: str) -> list:
+    """Every rollout tag under ``rollouts/<split>/`` that measured candidate ``cid``.
+
+    Its own tag (``seed``, ``cand_0003``) plus the P2 round tags ``<round>__<cid>__<stage>``
+    (rung screens and incumbent top-ups). Never reads the confirm split. Sorted, deduplicated."""
+    if split == "confirm":
+        return []
+    vdir = run_dir.rollout_dir(split)
+    if not vdir.is_dir():
+        return []
+    pat = re.compile(r"__((?:r\d{3}__)?" + re.escape(str(cid)) + r"(?:__(?:(?!__).)+)?)$")
+    tags = set()
+    for f in vdir.glob("*.json"):
+        head, sep, k = f.stem.rpartition("__t")
+        m = pat.search(head) if sep and k.isdigit() else None
+        if m:
+            tags.add(m.group(1))
+    return sorted(tags)
+
+
 def resume_val(run_dir, tag, promotion_on: bool = False):
     """The incumbent's measurement to resume from. Under rule P the baseline is the incumbent's FRESH
     confirmation (tag ``<tag>__conf``) when one exists, not the selection-era trials that chose it."""
@@ -1285,8 +1334,9 @@ def resume_val(run_dir, tag, promotion_on: bool = False):
         pooled = run_dir.read_splits().pooled
     except (OSError, ValueError):
         pooled = False
-    if pooled:      # split_mode: pooled -> the incumbent's measurement lives on the feedback stratum
-        return split_result_from_rollouts(run_dir, tag, "feedback")
+    if pooled:      # the incumbent's F trials, pooled over every P2 round that drew them
+        return split_result_from_rollouts(run_dir, candidate_rollout_tags(run_dir, tag, "feedback") or tag,
+                                          "feedback")
     if promotion_on:
         sr = split_result_from_rollouts(run_dir, f"{tag}__conf", "val")
         if sr.per_task:
@@ -1351,6 +1401,37 @@ def _p2_evaluate(adapter, run_dir: RunDir, workdir: Path, cid: str, parent_id, p
               "unconfirmed": "P2 UNCONFIRMED (pending): the budget could not fund the confirmation"}[v.status]
     return cand_val, {"accept": v.status == "accept", "indecisive": v.status == "unconfirmed",
                       "delta": r1.mean, "record": rec, "reason": reason}
+
+
+def _p2_champion_feedback(adapter, run_dir: RunDir, cid: str, p2, *, errored_policy=None):
+    """A newly promoted P2 champion's own measurement on F, the base of the next iteration.
+
+    Tops its F draws up to ``p2_champion_trials`` per task (pooled with its rung trials, so the screen
+    is never paid twice; fresh seeds after the rung's) and returns them as a ``SplitResult``. Without
+    it the next proposer reads the parent's F trajectories and failure list, which the accepted edit
+    may already have fixed. ``0`` turns the top-up off and returns whatever F trials exist. An
+    unfunded top-up is logged and the existing trials are returned: it never undoes the accept."""
+    from . import eval_index
+    from .evaluator import SEED_BASE
+    cdir = run_dir.candidate_dir(cid)
+    want = int(getattr(p2, "champion_trials", 0) or 0)
+    if want > 0:
+        sp = run_dir.read_splits()
+        need = eval_index.missing(run_dir, eval_index.cap_hash(cdir), sp.feedback, want, split="feedback")
+        try:
+            for k in range(max(need.values(), default=0)):
+                ids = [t for t, n in need.items() if n > k]
+                evaluate_candidate(adapter, cdir, run_dir=run_dir, split="feedback", ids=ids, n_trials=1,
+                                   tag=f"{cid}__champ_p{k}", trial_offset=SEED_BASE["champion"] + k,
+                                   fixed_seeds=True,
+                                   errored_policy=errored_policy, budget_reserve=True)
+        except BudgetExhausted as e:
+            run_dir.log_event("p2_champion_feedback", candidate=cid, skipped="budget", reason=str(e)[:200])
+    tags = candidate_rollout_tags(run_dir, cid, "feedback")
+    sr = split_result_from_rollouts(run_dir, tags, "feedback", errored_policy=errored_policy)
+    run_dir.log_event("p2_champion_feedback", candidate=cid, trials_per_task=want,
+                      n_tasks=len(sr.per_task), reward=sr.reward)
+    return sr
 
 
 def skip_finalize(run_dir: RunDir, *, champion: str | None = None, reason: str = "spec") -> dict:
@@ -2612,10 +2693,30 @@ def record_iteration(run_dir: RunDir, workdir: Path, cid: str, *,
         run_dir.log_event("optimizer_context_warning", what="graph.jsonl", error=str(e)[:300])
 
 
+def _prior_trajectories(run_dir: RunDir, cid: str, dst: Path) -> int:
+    """Copy candidate ``cid``'s rollouts on the split the proposer may read into ``dst/trajectories/``.
+
+    That split is ``feedback`` under ``split_mode: pooled`` and ``val`` otherwise; confirm and test
+    rollouts are never copied. Returns the number of files copied."""
+    split = gate_split(run_dir)
+    vdir = run_dir.rollout_dir(split)
+    files = sorted(g for t in candidate_rollout_tags(run_dir, cid, split)
+                   for g in vdir.glob(f"*__{t}__t*.json"))
+    if not files:
+        return 0
+    tdir = dst / "trajectories"
+    if tdir.exists():
+        shutil.rmtree(tdir)
+    tdir.mkdir(parents=True)
+    for f in files:
+        shutil.copyfile(f, tdir / f.name)
+    return len(files)
+
+
 def _build_runmap(workdir: Path, run_dir: RunDir) -> None:
-    """Write RUNMAP.md + copy every prior iteration's PROCESS.md + capability diff into
-    ``workdir/prior_iterations/<cid>/`` so the optimizer has REAL in-dir access to all
-    prior iterations' working dirs (not just the parent's trajectories)."""
+    """Write RUNMAP.md + copy every prior iteration's PROCESS.md, capability diff and its own
+    trajectories on the proposer-visible split into ``workdir/prior_iterations/<cid>/``, so the
+    optimizer can see how a rejected or accepted edit actually behaved, not only what it changed."""
     parent_of = _parent_map(run_dir)
     rows: list[dict] = []
     try:
@@ -2631,6 +2732,7 @@ def _build_runmap(workdir: Path, run_dir: RunDir) -> None:
         rows = []
 
     prior_root = workdir / "prior_iterations"
+    traj_split = gate_split(run_dir)
     table = ["| iter | candidate | parent | outcome | val | ./prior_iterations/<id>/ |",
              "| --- | --- | --- | --- | --- | --- |"]
     for i, rec in enumerate(rows, 1):
@@ -2649,10 +2751,14 @@ def _build_runmap(workdir: Path, run_dir: RunDir) -> None:
             diff = _diff_capabilities(run_dir.candidate_dir(par), run_dir.candidate_dir(cid))
             if diff.strip():
                 (dst / "diff.patch").write_text(diff, encoding="utf-8")
+            n_traj = _prior_trajectories(run_dir, cid, dst)
         except Exception as e:  # noqa: BLE001
+            n_traj = 0
             run_dir.log_event("optimizer_context_warning",
                               what=f"prior_iterations/{cid}", error=str(e)[:300])
         present = [n for n in ("PROCESS.md", "diff.patch") if (dst / n).exists()]
+        if n_traj:
+            present.append(f"trajectories/ ({n_traj} {traj_split} trials)")
         have = " + ".join(present) if present else "(none)"
         table.append(f"| {i} | {cid} | {par} | {outcome} | {vstr} | {have} |")
     if len(table) == 2:
@@ -2663,7 +2769,10 @@ def _build_runmap(workdir: Path, run_dir: RunDir) -> None:
         "For each prior iteration, its artifacts are copied into "
         "`./prior_iterations/<candidate>/`:\n"
         "- `PROCESS.md` — what that iteration did (ranked issues, changes, verify-the-fix, process)\n"
-        "- `diff.patch` — the EXACT capability edit it made vs its parent\n\n"
+        "- `diff.patch` — the EXACT capability edit it made vs its parent\n"
+        f"- `trajectories/` — that candidate's OWN `{traj_split}` trials: how the agent actually "
+        "behaved under the edit. For a rejected candidate, compare them with the parent's trials "
+        "on the same tasks to see what the edit broke or failed to fix.\n\n"
         f"The live run dir (read-only) is at `{run_dir.root}` if you need "
         "`rollouts/<split>/` traces or the git log.\n\n"
         + "\n".join(table) + "\n\n"
@@ -3021,7 +3130,10 @@ def _copy_step_trajectories(adapter, run_dir: RunDir, workdir: Path, split: str,
         vdir = run_dir.rollout_dir(split)
         if not vdir.is_dir():
             return False
-        files = sorted(vdir.glob(f"*__{tag}__t*.json"))
+        # A P2 round names a candidate's F trials ``<round>__<cid>__<stage>``, never ``<cid>``
+        # alone, so a bare-tag glob finds nothing for any candidate but the seed.
+        tags = candidate_rollout_tags(run_dir, tag, split) or [tag]
+        files = sorted(g for t in tags for g in vdir.glob(f"*__{t}__t*.json"))
         if not files:
             return False
         try:
@@ -3309,9 +3421,9 @@ _POINTER_FILES = (
      "`./PROCESS.md` — EXPLAINABILITY (yours, REQUIRED this iteration): fill it in as you "
      "work. It is snapshotted with your candidate."),
     ("RUNMAP.md",
-     "`./RUNMAP.md` + `./prior_iterations/<id>/` — every prior iteration's PROCESS.md and "
-     "capability `diff.patch`, copied in for you. Read the ones targeting your cluster "
-     "BEFORE proposing, so you build on prior work instead of repeating it."),
+     "`./RUNMAP.md` + `./prior_iterations/<id>/` — every prior iteration's PROCESS.md, "
+     "capability `diff.patch` and its own `trajectories/`, copied in for you. Read the ones "
+     "targeting your cluster BEFORE proposing, so you build on prior work instead of repeating it."),
     ("INSIGHTS.md",
      "`./INSIGHTS.md` — SUMMARIZED, VERIFIED findings (yours, append-only): the distilled "
      "'what worked / what didn't / what's promising' a future iteration reads instead of "
@@ -3871,6 +3983,9 @@ def run_step(
     
     if accepted:
         run_dir.set_best(cid)
+        if p2_out is not None:
+            baseline_val = _p2_champion_feedback(adapter, run_dir, cid, p2,
+                                                 errored_policy=sw["errored_trial_policy"])
     # ``accepted=None`` leaves the stall counter untouched. An indecisive step is not
     # evidence that the optimizer has run out of ideas — the candidate was never
     # judged — so it must not push the run toward an early "stalled" stop.
@@ -4177,7 +4292,7 @@ def _passing_block(solid, *, max_ids: int = 60) -> str:
 # substituting the per-iteration dynamic blocks below; nothing benchmark-specific lives
 # here. ``{{...}}`` placeholders: FOCUS_SUMMARY, FAILURES, PASSING, CAP_BRIEF, ALGO_BRIEF, BENCH_REPO.
 _DEFAULT_INSTRUCTIONS_TEMPLATE = (
-    Path(__file__).resolve().parents[2] / "templates" / "project" / "optimizer" / "INSTRUCTIONS.md"
+    Path(__file__).resolve().parents[2] / "benchmarks" / "_scaffold" / "project" / "optimizer" / "INSTRUCTIONS.md"
 )
 # Big read-context the harness injects into the workdir that must NOT be stored as part
 # of the candidate snapshot (it would bloat candidates/ and pollute diffs). NOTE we keep

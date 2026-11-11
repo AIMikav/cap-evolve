@@ -36,13 +36,13 @@
     </button>
     <div class="nav-links" id="nav-links">
       <a href="getting-started.html">Get started</a>
-      <a href="blackbox.html">Blackbox</a>
       <a href="run-end-to-end.html">Run end-to-end</a>
       <a href="results.html">Results</a>
       <a href="benchmarks.html">Benchmarks</a>
       <a href="architecture.html">Architecture</a>
       <a href="agent-orchestration.html">Agent mode</a>
       <a href="harbor.html">Harbor</a>
+      <a href="blackbox.html">Blackbox</a>
       <a class="gh" href="https://github.com/skillberry-ai/cap-evolve">GitHub</a>
       <button class="theme-toggle" type="button" aria-label="Switch theme">
         <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
@@ -63,8 +63,8 @@
   </p>
 
   <section class="reveal">
-<pre><code>cp -r templates/adapters/&lt;template&gt;/*  .capevolve/project/adapters/
-cp    templates/adapters/model_config.py  .capevolve/project/adapters/
+<pre><code>cp -r benchmarks/_shared/&lt;template&gt;/*  .capevolve/project/adapters/
+cp    benchmarks/_shared/model_config.py  .capevolve/project/adapters/
 mv    .capevolve/project/adapters/seed_capability  .capevolve/project/seed_capability
 # set MODEL + credentials in a repo-root .env, then:
 cap-evolve check &amp;&amp; cap-evolve run</code></pre>
@@ -155,7 +155,7 @@ OPENAI_API_KEY=sk-…</code></pre>
     “write your own” guide are in
     <a href="https://github.com/skillberry-ai/cap-evolve/blob/main/docs/ADAPTER_TEMPLATES.md">docs/ADAPTER_TEMPLATES.md</a>;
     the templates themselves are in
-    <a href="https://github.com/skillberry-ai/cap-evolve/tree/main/templates/adapters">templates/adapters/</a>.
+    <a href="https://github.com/skillberry-ai/cap-evolve/tree/main/benchmarks">benchmarks/</a>.
     Next: <a href="optimize-your-own.html">optimize your own capability</a> or see a
     <a href="run-end-to-end.html">full run end-to-end</a>.
   </p>
